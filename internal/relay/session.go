@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"log"
 	"math/big"
 	"sync"
 	"time"
@@ -196,6 +197,21 @@ func (sm *SessionManager) GetActiveSessions() int {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return len(sm.sessions)
+}
+
+// DisconnectClient clears a client from its session when the connection drops.
+// For help clients, this allows a new helper to rejoin with the same code.
+func (sm *SessionManager) DisconnectClient(clientID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, session := range sm.sessions {
+		if session.Help != nil && session.Help.ID == clientID {
+			session.Help = nil
+			log.Printf("Cleared helper from session %s", session.ID)
+			return
+		}
+	}
 }
 
 // CleanupExpired 清理过期会话

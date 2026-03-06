@@ -148,6 +148,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.clientsMu.Lock()
 		delete(s.clients, clientID)
 		s.clientsMu.Unlock()
+		s.sessions.DisconnectClient(clientID)
 		conn.Close()
 		log.Printf("Connection closed: %s", clientID)
 	}()
