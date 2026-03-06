@@ -34,6 +34,12 @@ func ParseP2PMode(s string) P2PMode {
 	}
 }
 
+// P2PResult P2P 协商结果
+type P2PResult struct {
+	Tunnel *UDPTunnel // 非 nil 表示 P2P 成功
+	Err    error      // 非 nil 表示 required 模式下失败
+}
+
 // PeerInfo represents a peer's network information
 type PeerInfo struct {
 	PublicAddr  *net.UDPAddr
@@ -52,10 +58,10 @@ type P2PManager struct {
 	isShare      bool
 	connected    bool
 	connectedMu  sync.RWMutex
-	relayConn    RelayConn // Interface for relay fallback
-	onP2PReady   func(*net.UDPConn)
-	onRelayReady func()
+	relayConn    RelayConn
+	resultCh     chan P2PResult
 	stopChan     chan struct{}
+	closeOnce    sync.Once
 }
 
 // RelayConn is the interface for relay fallback communication
@@ -79,33 +85,22 @@ func (p *P2PManager) SetRelayConn(conn RelayConn) {
 	p.relayConn = conn
 }
 
-// SetOnP2PReady sets the callback when P2P is ready
-func (p *P2PManager) SetOnP2PReady(fn func(*net.UDPConn)) {
-	p.onP2PReady = fn
-}
-
-// SetOnRelayReady sets the callback when falling back to relay
-func (p *P2PManager) SetOnRelayReady(fn func()) {
-	p.onRelayReady = fn
-}
-
 // Start starts the P2P manager
-func (p *P2PManager) Start(sessionID string, isShare bool) error {
+func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, error) {
 	p.sessionID = sessionID
 	p.isShare = isShare
+	p.resultCh = make(chan P2PResult, 1)
 
 	if p.mode == P2PModeDisabled {
-		if p.onRelayReady != nil {
-			p.onRelayReady()
-		}
-		return nil
+		p.resultCh <- P2PResult{}
+		return p.resultCh, nil
 	}
 
 	// Create local UDP socket
 	var err error
 	p.localConn, err = net.ListenUDP("udp", nil)
 	if err != nil {
-		return fmt.Errorf("listen UDP: %w", err)
+		return nil, fmt.Errorf("listen UDP: %w", err)
 	}
 	p.localAddr = p.localConn.LocalAddr().(*net.UDPAddr)
 
@@ -130,7 +125,7 @@ func (p *P2PManager) Start(sessionID string, isShare bool) error {
 	// Start timeout for P2P attempt
 	go p.p2pTimeout()
 
-	return nil
+	return p.resultCh, nil
 }
 
 func (p *P2PManager) advertiseAddr() error {
@@ -256,9 +251,8 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 		})
 	}
 
-	if p.onP2PReady != nil {
-		p.onP2PReady(p.localConn)
-	}
+	tunnel := NewUDPTunnel(p.localConn, addr)
+	p.resultCh <- P2PResult{Tunnel: tunnel}
 }
 
 func (p *P2PManager) p2pTimeout() {
@@ -279,9 +273,9 @@ func (p *P2PManager) p2pTimeout() {
 			log.Printf("P2P connection timed out")
 			if p.mode == P2PModeAuto {
 				log.Printf("Falling back to relay mode")
-				if p.onRelayReady != nil {
-					p.onRelayReady()
-				}
+				p.resultCh <- P2PResult{}
+			} else if p.mode == P2PModeRequired {
+				p.resultCh <- P2PResult{Err: fmt.Errorf("P2P 连接超时")}
 			}
 		}
 	}
@@ -296,10 +290,15 @@ func (p *P2PManager) IsConnected() bool {
 
 // Close closes the P2P manager
 func (p *P2PManager) Close() {
-	close(p.stopChan)
-	if p.localConn != nil {
-		p.localConn.Close()
-	}
+	p.closeOnce.Do(func() {
+		close(p.stopChan)
+		p.connectedMu.RLock()
+		connected := p.connected
+		p.connectedMu.RUnlock()
+		if !connected && p.localConn != nil {
+			p.localConn.Close()
+		}
+	})
 }
 
 func randomString(n int) string {
