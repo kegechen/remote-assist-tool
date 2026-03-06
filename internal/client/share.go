@@ -3,9 +3,9 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/remote-assist/tool/internal/proto"
@@ -88,58 +88,93 @@ func (s *ShareMode) waitSessionReady() error {
 	}
 }
 
-// handleTunnel 处理隧道
+// handleTunnel 处理隧道（支持多次SSH连接）
 func (s *ShareMode) handleTunnel() error {
-	sshConn, err := net.Dial("tcp", s.sshAddr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to local SSH: %w", err)
-	}
-	defer sshConn.Close()
+	// Shared state: current SSH connection to local SSH server
+	var sshConn net.Conn
+	var connMu sync.Mutex
 
-	errChan := make(chan error, 2)
+	// connectSSH lazily connects to local SSH and starts a reader goroutine
+	connectSSH := func() net.Conn {
+		connMu.Lock()
+		defer connMu.Unlock()
 
-	go func() {
-		for {
-			msg, err := s.client.ReadMessage()
-			if err != nil {
-				errChan <- err
-				return
-			}
+		if sshConn != nil {
+			return sshConn
+		}
 
-			if msg.Type == proto.MsgTunnelData {
-				var dataMsg proto.TunnelData
-				if err := json.Unmarshal(msg.Payload, &dataMsg); err == nil {
-					if _, err := sshConn.Write(dataMsg.Data); err != nil {
-						errChan <- err
-						return
-					}
+		conn, err := net.Dial("tcp", s.sshAddr)
+		if err != nil {
+			log.Printf("Failed to connect to local SSH: %v", err)
+			return nil
+		}
+		sshConn = conn
+		fmt.Println("已连接到本地SSH服务...")
+
+		// Start SSH → relay goroutine
+		go func() {
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := conn.Read(buf)
+				if err != nil {
+					break
+				}
+				if err := s.client.SendMessage(proto.MsgTunnelData, &proto.TunnelData{Data: buf[:n]}); err != nil {
+					break
 				}
 			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := sshConn.Read(buf)
-			if err != nil {
-				errChan <- err
-				return
+			connMu.Lock()
+			if sshConn == conn {
+				sshConn = nil
 			}
+			connMu.Unlock()
+			conn.Close()
+			fmt.Println("本地SSH连接已断开，等待新的SSH会话...")
+		}()
 
-			dataMsg := &proto.TunnelData{Data: buf[:n]}
-			if err := s.client.SendMessage(proto.MsgTunnelData, dataMsg); err != nil {
-				errChan <- err
-				return
-			}
-		}
-	}()
-
-	err = <-errChan
-	if err != nil && err != io.EOF {
-		return err
+		return conn
 	}
-	return nil
+
+	// Main loop: read from relay, forward to SSH (connecting on demand)
+	for {
+		msg, err := s.client.ReadMessage()
+		if err != nil {
+			connMu.Lock()
+			if sshConn != nil {
+				sshConn.Close()
+			}
+			connMu.Unlock()
+			if err.Error() == "EOF" {
+				return nil
+			}
+			return err
+		}
+
+		switch msg.Type {
+		case proto.MsgTunnelData:
+			var dataMsg proto.TunnelData
+			if err := json.Unmarshal(msg.Payload, &dataMsg); err != nil {
+				continue
+			}
+			conn := connectSSH()
+			if conn != nil {
+				if _, err := conn.Write(dataMsg.Data); err != nil {
+					connMu.Lock()
+					if sshConn == conn {
+						sshConn = nil
+					}
+					connMu.Unlock()
+					conn.Close()
+				}
+			}
+		case proto.MsgHeartbeat:
+			// ignore
+		case proto.MsgError:
+			var errMsg proto.ErrorMessage
+			proto.DecodePayload(msg, &errMsg)
+			return fmt.Errorf("server error: %s - %s", errMsg.Code, errMsg.Message)
+		}
+	}
 }
 
 // GetCode 获取协助码

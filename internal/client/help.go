@@ -3,10 +3,9 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/remote-assist/tool/internal/proto"
 )
@@ -64,7 +63,7 @@ func (h *HelpMode) Run() error {
 	return fmt.Errorf("unexpected response: %s", msg.Type)
 }
 
-// handleTunnel 处理隧道
+// handleTunnel 处理隧道（支持多次SSH连接）
 func (h *HelpMode) handleTunnel() error {
 	listener, err := net.Listen("tcp", h.listenAddr)
 	if err != nil {
@@ -72,59 +71,79 @@ func (h *HelpMode) handleTunnel() error {
 	}
 	defer listener.Close()
 
-	localConn, err := listener.Accept()
-	if err != nil {
-		return err
-	}
-	defer localConn.Close()
+	// Shared state: current local SSH connection
+	var currentConn net.Conn
+	var connMu sync.Mutex
+	relayDone := make(chan error, 1)
 
-	fmt.Println("本地SSH连接已建立，开始转发流量...")
-
-	errChan := make(chan error, 2)
-
+	// Single long-lived goroutine: reads from relay, writes to current local SSH connection
 	go func() {
 		for {
 			msg, err := h.client.ReadMessage()
 			if err != nil {
-				errChan <- err
+				relayDone <- err
 				return
 			}
-
 			if msg.Type == proto.MsgTunnelData {
 				var dataMsg proto.TunnelData
 				if err := json.Unmarshal(msg.Payload, &dataMsg); err == nil {
-					if _, err := localConn.Write(dataMsg.Data); err != nil {
-						errChan <- err
-						return
+					connMu.Lock()
+					conn := currentConn
+					connMu.Unlock()
+					if conn != nil {
+						conn.Write(dataMsg.Data)
 					}
 				}
 			}
 		}
 	}()
 
-	go func() {
+	// Accept loop: each iteration handles one SSH session
+	for {
+		fmt.Printf("\n等待本地SSH连接... (ssh -p %s user@127.0.0.1)\n", getPort(h.listenAddr))
+
+		localConn, err := listener.Accept()
+		if err != nil {
+			select {
+			case relayErr := <-relayDone:
+				return relayErr
+			default:
+			}
+			return err
+		}
+
+		fmt.Println("本地SSH连接已建立，开始转发流量...")
+
+		connMu.Lock()
+		currentConn = localConn
+		connMu.Unlock()
+
+		// Read from local SSH, send to relay (blocks until SSH closes)
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := localConn.Read(buf)
 			if err != nil {
-				errChan <- err
-				return
+				break
 			}
-
 			dataMsg := &proto.TunnelData{Data: buf[:n]}
 			if err := h.client.SendMessage(proto.MsgTunnelData, dataMsg); err != nil {
-				errChan <- err
-				return
+				break
 			}
 		}
-	}()
 
-	err = <-errChan
-	if err != nil && err != io.EOF {
-		log.Printf("Tunnel error: %v", err)
-		return err
+		connMu.Lock()
+		currentConn = nil
+		connMu.Unlock()
+		localConn.Close()
+
+		// Check if relay is still alive
+		select {
+		case err := <-relayDone:
+			return err
+		default:
+			fmt.Println("SSH会话已结束")
+		}
 	}
-	return nil
 }
 
 func normalizeCode(code string) string {
