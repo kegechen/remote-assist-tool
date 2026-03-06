@@ -256,29 +256,9 @@ func (s *Server) handlePeerAddrAdvertise(client *ClientConn, msg *proto.Message)
 
 	log.Printf("Received peer address from %s: public=%s, private=%s", client.ID, advert.PublicAddr, advert.PrivateAddr)
 
-	// Find the session and store addresses
-	s.sessions.mu.Lock()
-	defer s.sessions.mu.Unlock()
-
-	for _, session := range s.sessions.sessions {
-		if session.Share != nil && session.Share.ID == client.ID {
-			session.SharePublicAddr = advert.PublicAddr
-			session.SharePrivateAddr = advert.PrivateAddr
-			// If help is already connected, send addresses to help
-			if session.Help != nil {
-				s.sendPeerAddrReady(session.Help, advert.PublicAddr, advert.PrivateAddr, true)
-			}
-			return
-		}
-		if session.Help != nil && session.Help.ID == client.ID {
-			session.HelpPublicAddr = advert.PublicAddr
-			session.HelpPrivateAddr = advert.PrivateAddr
-			// Send addresses to share
-			if session.Share != nil {
-				s.sendPeerAddrReady(session.Share, advert.PublicAddr, advert.PrivateAddr, false)
-			}
-			return
-		}
+	update := s.sessions.UpdatePeerAddr(client.ID, advert.PublicAddr, advert.PrivateAddr)
+	if update != nil {
+		s.sendPeerAddrReady(update.Peer, advert.PublicAddr, advert.PrivateAddr, update.IsShareSide)
 	}
 }
 

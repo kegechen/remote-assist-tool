@@ -231,6 +231,38 @@ func generateSessionID() string {
 	return "ses_" + time.Now().Format("20060102150405") + "_" + randomString(8)
 }
 
+// PeerAddrUpdate contains the result of a peer address update
+type PeerAddrUpdate struct {
+	Peer        *ClientConn
+	IsShareSide bool
+}
+
+// UpdatePeerAddr updates a client's peer addresses and returns the paired client info
+func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAddr string) *PeerAddrUpdate {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, session := range sm.sessions {
+		if session.Share != nil && session.Share.ID == clientID {
+			session.SharePublicAddr = publicAddr
+			session.SharePrivateAddr = privateAddr
+			if session.Help != nil {
+				return &PeerAddrUpdate{Peer: session.Help, IsShareSide: true}
+			}
+			return nil
+		}
+		if session.Help != nil && session.Help.ID == clientID {
+			session.HelpPublicAddr = publicAddr
+			session.HelpPrivateAddr = privateAddr
+			if session.Share != nil {
+				return &PeerAddrUpdate{Peer: session.Share, IsShareSide: false}
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
 func randomString(n int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
