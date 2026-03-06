@@ -148,6 +148,15 @@ func (c *Client) IsClosed() bool {
 	return c.closed
 }
 
+// SetReadDeadline 设置读取截止时间
+func (c *Client) SetReadDeadline(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		c.conn.SetReadDeadline(t)
+	}
+}
+
 // StartHeartbeatLoop 启动心跳循环
 func (c *Client) StartHeartbeatLoop(interval time.Duration) {
 	go func() {
@@ -177,4 +186,12 @@ func pipeConn(conn1, conn2 net.Conn) {
 	<-done
 	conn1.Close()
 	conn2.Close()
+}
+
+// isNetTimeout 检查错误是否为网络超时
+func isNetTimeout(err error) bool {
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Timeout()
+	}
+	return false
 }
