@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -62,8 +63,11 @@ func (h *HelpMode) Run() error {
 		p2pMode := p2p.ParseP2PMode(h.client.config.P2PMode)
 		if p2pMode != p2p.P2PModeDisabled {
 			tunnel, err := h.negotiateP2P(p2pMode, resp.SessionID)
-			if err != nil && p2pMode == p2p.P2PModeRequired {
-				return fmt.Errorf("P2P 连接失败: %w", err)
+			if err != nil {
+				if p2pMode == p2p.P2PModeRequired {
+					return fmt.Errorf("P2P 连接失败: %w", err)
+				}
+				log.Printf("P2P negotiation failed, falling back to relay: %v", err)
 			}
 			if tunnel != nil {
 				fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
@@ -180,7 +184,12 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 			conn := currentConn
 			connMu.Unlock()
 			if conn != nil {
-				conn.Write(buf[:n])
+				if _, err := conn.Write(buf[:n]); err != nil {
+					connMu.Lock()
+					currentConn = nil
+					connMu.Unlock()
+					conn.Close()
+				}
 			}
 		}
 	}()

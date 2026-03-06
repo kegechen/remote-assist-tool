@@ -65,8 +65,11 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 		p2pMode := p2p.ParseP2PMode(s.client.config.P2PMode)
 		if p2pMode != p2p.P2PModeDisabled {
 			tunnel, err := s.negotiateP2P(p2pMode, sessionID)
-			if err != nil && p2pMode == p2p.P2PModeRequired {
-				return s.code, s.expiresAt, fmt.Errorf("P2P 连接失败: %w", err)
+			if err != nil {
+				if p2pMode == p2p.P2PModeRequired {
+					return s.code, s.expiresAt, fmt.Errorf("P2P 连接失败: %w", err)
+				}
+				log.Printf("P2P negotiation failed, falling back to relay: %v", err)
 			}
 			if tunnel != nil {
 				fmt.Println("开始 P2P 直连转发SSH流量...")

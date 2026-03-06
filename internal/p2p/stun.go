@@ -213,6 +213,51 @@ func (m *STUNMessage) AddSoftwareAttribute(name string) {
 	})
 }
 
+// DiscoverPublicAddrVia discovers the public address using an existing UDP connection
+func DiscoverPublicAddrVia(conn *net.UDPConn, stunServer string) (*net.UDPAddr, error) {
+	serverAddr, err := net.ResolveUDPAddr("udp", stunServer)
+	if err != nil {
+		return nil, fmt.Errorf("resolve STUN server: %w", err)
+	}
+
+	req := NewBindingRequest()
+	req.AddSoftwareAttribute("remote-assist-tool/1.0")
+	reqBytes := req.Pack()
+
+	_, err = conn.WriteToUDP(reqBytes, serverAddr)
+	if err != nil {
+		return nil, fmt.Errorf("send STUN request: %w", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1500)
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		conn.SetReadDeadline(time.Time{})
+		return nil, ErrSTUNTimeout
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	resp, err := UnpackSTUN(buf[:n])
+	if err != nil {
+		return nil, fmt.Errorf("parse STUN response: %w", err)
+	}
+
+	if resp.Type != STUNBindingResponse {
+		return nil, errors.New("not a binding response")
+	}
+
+	mappedAddr, err := resp.GetMappedAddress()
+	if err != nil {
+		return nil, fmt.Errorf("get mapped address: %w", err)
+	}
+
+	return &net.UDPAddr{
+		IP:   mappedAddr.IP,
+		Port: int(mappedAddr.Port),
+	}, nil
+}
+
 // DiscoverPublicAddr discovers the public address using a STUN server
 func DiscoverPublicAddr(stunServer string) (*net.UDPAddr, error) {
 	// Resolve STUN server address

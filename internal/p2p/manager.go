@@ -89,7 +89,7 @@ func (p *P2PManager) SetRelayConn(conn RelayConn) {
 func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, error) {
 	p.sessionID = sessionID
 	p.isShare = isShare
-	p.resultCh = make(chan P2PResult, 1)
+	p.resultCh = make(chan P2PResult, 2)
 
 	if p.mode == P2PModeDisabled {
 		p.resultCh <- P2PResult{}
@@ -106,7 +106,7 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 
 	// Discover public address via STUN
 	if p.stunServer != "" {
-		p.publicAddr, err = DiscoverPublicAddr(p.stunServer)
+		p.publicAddr, err = DiscoverPublicAddrVia(p.localConn, p.stunServer)
 		if err != nil {
 			log.Printf("STUN discovery failed: %v, will try without", err)
 		} else {
