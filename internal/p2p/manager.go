@@ -22,6 +22,18 @@ const (
 	P2PModeRequired // Only use P2P, fail if not possible
 )
 
+// ParseP2PMode 将字符串转换为 P2PMode
+func ParseP2PMode(s string) P2PMode {
+	switch s {
+	case "auto":
+		return P2PModeAuto
+	case "required":
+		return P2PModeRequired
+	default:
+		return P2PModeDisabled
+	}
+}
+
 // PeerInfo represents a peer's network information
 type PeerInfo struct {
 	PublicAddr  *net.UDPAddr
