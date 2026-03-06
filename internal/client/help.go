@@ -82,9 +82,11 @@ func (h *HelpMode) handleTunnel() error {
 			msg, err := h.client.ReadMessage()
 			if err != nil {
 				relayDone <- err
+				listener.Close() // unblock Accept
 				return
 			}
-			if msg.Type == proto.MsgTunnelData {
+			switch msg.Type {
+			case proto.MsgTunnelData:
 				var dataMsg proto.TunnelData
 				if err := json.Unmarshal(msg.Payload, &dataMsg); err == nil {
 					connMu.Lock()
@@ -94,6 +96,12 @@ func (h *HelpMode) handleTunnel() error {
 						conn.Write(dataMsg.Data)
 					}
 				}
+			case proto.MsgError:
+				var errMsg proto.ErrorMessage
+				proto.DecodePayload(msg, &errMsg)
+				relayDone <- fmt.Errorf("%s", errMsg.Message)
+				listener.Close() // unblock Accept
+				return
 			}
 		}
 	}()

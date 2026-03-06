@@ -199,9 +199,17 @@ func (sm *SessionManager) GetActiveSessions() int {
 	return len(sm.sessions)
 }
 
+// DisconnectResult contains info about a disconnected client's session
+type DisconnectResult struct {
+	PeerToNotify *ClientConn // The other side to notify (if any)
+	SessionID    string
+	WasShare     bool // true if the disconnected client was the share side
+}
+
 // DisconnectClient clears a client from its session when the connection drops.
-// For help clients, this allows a new helper to rejoin with the same code.
-func (sm *SessionManager) DisconnectClient(clientID string) {
+// For help clients: clears session.Help so a new helper can rejoin.
+// For share clients: returns the help client so the server can notify it.
+func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -209,9 +217,23 @@ func (sm *SessionManager) DisconnectClient(clientID string) {
 		if session.Help != nil && session.Help.ID == clientID {
 			session.Help = nil
 			log.Printf("Cleared helper from session %s", session.ID)
-			return
+			return nil
+		}
+		if session.Share != nil && session.Share.ID == clientID {
+			help := session.Help
+			session.Share = nil
+			log.Printf("Share disconnected from session %s", session.ID)
+			if help != nil {
+				return &DisconnectResult{
+					PeerToNotify: help,
+					SessionID:    session.ID,
+					WasShare:     true,
+				}
+			}
+			return nil
 		}
 	}
+	return nil
 }
 
 // CleanupExpired 清理过期会话

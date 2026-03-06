@@ -148,7 +148,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.clientsMu.Lock()
 		delete(s.clients, clientID)
 		s.clientsMu.Unlock()
-		s.sessions.DisconnectClient(clientID)
+		result := s.sessions.DisconnectClient(clientID)
+		if result != nil && result.PeerToNotify != nil {
+			s.sendError(result.PeerToNotify, "PEER_DISCONNECTED", "被协助端已断开连接")
+		}
 		conn.Close()
 		log.Printf("Connection closed: %s", clientID)
 	}()
