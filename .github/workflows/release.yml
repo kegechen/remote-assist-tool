@@ -30,8 +30,9 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             ext=".exe"
           fi
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o "dist/remote-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/remote
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o "dist/relay-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/relay
+          ldflags="-X github.com/remote-assist/tool/internal/version.Version=${{ github.event.release.tag_name }}"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/remote-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/remote
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/relay-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/relay
         shell: bash
 
       - name: Upload Release Assets

@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/remote-assist/tool/internal/client"
+	"github.com/remote-assist/tool/internal/version"
 )
 
 func main() {
@@ -21,6 +22,9 @@ func main() {
 		runShare(os.Args[2:])
 	case "help":
 		runHelp(os.Args[2:])
+	case "--version", "-version", "version":
+		fmt.Printf("remote-assist %s\n", version.Info())
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
 		printUsage()
@@ -127,12 +131,13 @@ func runHelp(args []string) {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Remote Assist CLI\n\n")
+	fmt.Fprintf(os.Stderr, "Remote Assist CLI %s\n\n", version.Info())
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  %s <command> [options]\n\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "Commands:\n")
-	fmt.Fprintf(os.Stderr, "  share   - Share your SSH access with someone\n")
-	fmt.Fprintf(os.Stderr, "  help    - Help someone using their assist code\n")
+	fmt.Fprintf(os.Stderr, "  share     - Share your SSH access with someone\n")
+	fmt.Fprintf(os.Stderr, "  help      - Help someone using their assist code\n")
+	fmt.Fprintf(os.Stderr, "  --version - Show version information\n")
 	fmt.Fprintf(os.Stderr, "\nUse '%s <command> -h' for more info about a command\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "\n")
 }
