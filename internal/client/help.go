@@ -6,7 +6,9 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 )
 
@@ -55,12 +57,176 @@ func (h *HelpMode) Run() error {
 		fmt.Println("已连接到被协助端！")
 		fmt.Printf("会话ID: %s\n", resp.SessionID)
 		fmt.Printf("本地监听: %s\n", h.listenAddr)
-		fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 
+		// 尝试 P2P 直连
+		p2pMode := p2p.ParseP2PMode(h.client.config.P2PMode)
+		if p2pMode != p2p.P2PModeDisabled {
+			tunnel, err := h.negotiateP2P(p2pMode, resp.SessionID)
+			if err != nil && p2pMode == p2p.P2PModeRequired {
+				return fmt.Errorf("P2P 连接失败: %w", err)
+			}
+			if tunnel != nil {
+				fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
+				return h.handleTunnelP2P(tunnel)
+			}
+		}
+
+		// relay 模式
+		fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 		return h.handleTunnel()
 	}
 
 	return fmt.Errorf("unexpected response: %s", msg.Type)
+}
+
+// negotiateP2P 尝试 P2P 直连协商
+func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTunnel, error) {
+	mgr := p2p.NewP2PManager(mode, h.client.config.STUNServer)
+	mgr.SetRelayConn(h.client)
+
+	resultCh, err := mgr.Start(sessionID, false)
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case result := <-resultCh:
+		return result.Tunnel, result.Err
+	default:
+	}
+
+	fmt.Println("正在尝试 P2P 直连...")
+
+	negotiationTimeout := 12 * time.Second
+	if mode == p2p.P2PModeRequired {
+		negotiationTimeout = 32 * time.Second
+	}
+	h.client.SetReadDeadline(time.Now().Add(negotiationTimeout))
+
+	peerReady := false
+	for !peerReady {
+		msg, err := h.client.ReadMessage()
+		if err != nil {
+			h.client.SetReadDeadline(time.Time{})
+			if isNetTimeout(err) {
+				mgr.Close()
+				if mode == p2p.P2PModeRequired {
+					return nil, fmt.Errorf("P2P 协商超时：对端未响应")
+				}
+				fmt.Println("P2P 协商超时，回退到中转模式")
+				return nil, nil
+			}
+			mgr.Close()
+			return nil, err
+		}
+		switch msg.Type {
+		case proto.MsgPeerAddrReady:
+			var ready proto.PeerAddrReady
+			if err := proto.DecodePayload(msg, &ready); err == nil {
+				mgr.HandlePeerAddrReady(&ready)
+			}
+			peerReady = true
+		case proto.MsgHeartbeat:
+		case proto.MsgError:
+			h.client.SetReadDeadline(time.Time{})
+			var errMsg proto.ErrorMessage
+			proto.DecodePayload(msg, &errMsg)
+			mgr.Close()
+			return nil, fmt.Errorf("server error: %s", errMsg.Message)
+		}
+	}
+
+	h.client.SetReadDeadline(time.Time{})
+
+	result := <-resultCh
+	if result.Tunnel != nil {
+		fmt.Println("P2P 直连已建立！")
+	} else if result.Err == nil {
+		fmt.Println("P2P 打洞超时，回退到中转模式")
+		mgr.Close()
+	} else {
+		mgr.Close()
+	}
+	return result.Tunnel, result.Err
+}
+
+// handleTunnelP2P 通过 P2P 隧道处理本地监听
+func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
+	defer tunnel.Close()
+
+	listener, err := net.Listen("tcp", h.listenAddr)
+	if err != nil {
+		return fmt.Errorf("failed to listen: %w", err)
+	}
+	defer listener.Close()
+
+	var currentConn net.Conn
+	var connMu sync.Mutex
+	tunnelDone := make(chan error, 1)
+
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := tunnel.Read(buf)
+			if err != nil {
+				tunnelDone <- err
+				listener.Close()
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			connMu.Lock()
+			conn := currentConn
+			connMu.Unlock()
+			if conn != nil {
+				conn.Write(buf[:n])
+			}
+		}
+	}()
+
+	for {
+		fmt.Printf("\n等待本地SSH连接 (P2P直连)... (ssh -p %s user@127.0.0.1)\n", getPort(h.listenAddr))
+
+		localConn, err := listener.Accept()
+		if err != nil {
+			select {
+			case tunnelErr := <-tunnelDone:
+				return tunnelErr
+			default:
+			}
+			return err
+		}
+
+		fmt.Println("本地SSH连接已建立，P2P 直连转发中...")
+
+		connMu.Lock()
+		currentConn = localConn
+		connMu.Unlock()
+
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := localConn.Read(buf)
+			if err != nil {
+				break
+			}
+			if _, err := tunnel.Write(buf[:n]); err != nil {
+				break
+			}
+		}
+
+		connMu.Lock()
+		currentConn = nil
+		connMu.Unlock()
+		localConn.Close()
+
+		select {
+		case err := <-tunnelDone:
+			return err
+		default:
+			fmt.Println("SSH会话已结束 (P2P)")
+		}
+	}
 }
 
 // handleTunnel 处理隧道（支持多次SSH连接）
