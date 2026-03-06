@@ -210,10 +210,10 @@ func (sm *SessionManager) CleanupExpired() []string {
 		if now.After(session.ExpiresAt) {
 			expired = append(expired, id)
 			session.closed = true
-			if session.Share != nil {
+			if session.Share != nil && session.Share.Conn != nil {
 				session.Share.Conn.Close()
 			}
-			if session.Help != nil {
+			if session.Help != nil && session.Help.Conn != nil {
 				session.Help.Conn.Close()
 			}
 			delete(sm.sessions, id)

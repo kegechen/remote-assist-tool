@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -87,7 +88,9 @@ func (c *Client) Close() {
 	if conn != nil {
 		// Use recover to handle any panics from closing
 		defer func() {
-			recover()
+			if r := recover(); r != nil {
+				log.Printf("Recovered panic during connection close: %v", r)
+			}
 		}()
 		conn.Close()
 	}
