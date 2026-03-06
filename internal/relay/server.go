@@ -55,7 +55,7 @@ func NewServer(cfg *Config) (*Server, error) {
 	return &Server{
 		config:   cfg,
 		sessions: NewSessionManager(),
-		codes:    NewCodeManager(cfg.CodeTTL, cfg.CodeLength),
+		codes:    NewCodeManager(cfg.CodeLength),
 		clients:  make(map[string]*ClientConn),
 	}, nil
 }
