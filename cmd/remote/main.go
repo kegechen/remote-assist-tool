@@ -35,7 +35,7 @@ func runShare(args []string) {
 	insecure := fs.Bool("insecure", false, "Skip TLS verification")
 	caFile := fs.String("ca", "", "CA certificate file")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
-	p2pMode := fs.String("p2p", "disabled", "P2P mode: disabled, auto, required")
+	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 
 	fs.Usage = func() {
@@ -82,7 +82,7 @@ func runHelp(args []string) {
 	insecure := fs.Bool("insecure", false, "Skip TLS verification")
 	caFile := fs.String("ca", "", "CA certificate file")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
-	p2pMode := fs.String("p2p", "disabled", "P2P mode: disabled, auto, required")
+	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 
 	fs.Usage = func() {
