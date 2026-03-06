@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/remote-assist/tool/internal/crypto"
@@ -78,7 +81,10 @@ func main() {
 		log.Printf("WARNING: Running in plain mode (INSECURE - for development only)")
 	}
 
-	err = server.Start()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	err = server.StartWithContext(ctx)
 	if err != nil {
 		log.Fatalf("Server error: %v", err)
 	}

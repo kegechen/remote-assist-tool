@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -60,8 +61,13 @@ func NewServer(cfg *Config) (*Server, error) {
 	}, nil
 }
 
-// Start 启动服务器
+// Start starts the server (backward compatible)
 func (s *Server) Start() error {
+	return s.StartWithContext(context.Background())
+}
+
+// StartWithContext starts the server with context for graceful shutdown
+func (s *Server) StartWithContext(ctx context.Context) error {
 	// Start STUN server if configured
 	if s.config.STUNListenAddr != "" {
 		var err error
@@ -78,7 +84,8 @@ func (s *Server) Start() error {
 	var err error
 
 	if s.config.UseTLS && s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
-		tlsConfig, err := crypto.NewTLSConfig(s.config.TLSCertFile, s.config.TLSKeyFile)
+		var tlsConfig *tls.Config
+		tlsConfig, err = crypto.NewTLSConfig(s.config.TLSCertFile, s.config.TLSKeyFile)
 		if err != nil {
 			return fmt.Errorf("failed to create TLS config: %w", err)
 		}
@@ -94,11 +101,24 @@ func (s *Server) Start() error {
 	log.Printf("Server starting on %s", s.config.ListenAddr)
 	go s.cleanupLoop()
 
+	// Close listener when context is cancelled
+	go func() {
+		<-ctx.Done()
+		log.Printf("Shutting down server...")
+		listener.Close()
+	}()
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Accept error: %v", err)
-			continue
+			select {
+			case <-ctx.Done():
+				log.Printf("Server stopped")
+				return nil
+			default:
+				log.Printf("Accept error: %v", err)
+				continue
+			}
 		}
 		go s.handleConn(conn)
 	}
