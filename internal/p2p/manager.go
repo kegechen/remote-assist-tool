@@ -1,9 +1,11 @@
 package p2p
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"sync"
 	"time"
@@ -289,9 +291,14 @@ func (p *P2PManager) Close() {
 }
 
 func randomString(n int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = byte('a' + (i % 26))
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			panic("crypto/rand failed: " + err.Error())
+		}
+		b[i] = charset[num.Int64()]
 	}
 	return string(b)
 }
