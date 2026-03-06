@@ -150,6 +150,20 @@ func TestSessionCleanupExpired(t *testing.T) {
 	}
 }
 
+func TestRandomStringUniqueness(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		s := randomString(8)
+		if len(s) != 8 {
+			t.Errorf("expected length 8, got %d", len(s))
+		}
+		if seen[s] {
+			t.Errorf("duplicate random string: %s", s)
+		}
+		seen[s] = true
+	}
+}
+
 func TestSessionGetByExpiredCode(t *testing.T) {
 	sm := NewSessionManager()
 

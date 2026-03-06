@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"crypto/rand"
 	"errors"
 	"io"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -233,8 +235,11 @@ func randomString(n int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
-		time.Sleep(1 * time.Nanosecond)
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			panic("crypto/rand failed: " + err.Error())
+		}
+		b[i] = charset[num.Int64()]
 	}
 	return string(b)
 }
