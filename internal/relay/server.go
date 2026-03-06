@@ -245,9 +245,6 @@ func (s *Server) handleJoin(client *ClientConn, code string) {
 
 	logger.LogSessionEstablished(session.ID, code, client.ID, session.Share.ID)
 	log.Printf("Session established: %s", session.ID)
-
-	tunnel := NewTunnel(session.Share, client)
-	tunnel.Start()
 }
 
 // handlePeerAddrAdvertise 处理对等端地址通告
