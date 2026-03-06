@@ -99,7 +99,7 @@ func (s *Server) StartWithContext(ctx context.Context) error {
 	}
 
 	log.Printf("Server starting on %s", s.config.ListenAddr)
-	go s.cleanupLoop()
+	go s.cleanupLoop(ctx)
 
 	// Close listener when context is cancelled
 	go func() {
@@ -296,21 +296,7 @@ func (s *Server) sendPeerAddrReady(client *ClientConn, publicAddr, privateAddr s
 
 // handleTunnelData 处理隧道数据
 func (s *Server) handleTunnelData(client *ClientConn, payload json.RawMessage) {
-	var target *ClientConn
-
-	s.sessions.mu.RLock()
-	for _, session := range s.sessions.sessions {
-		if session.Share != nil && session.Share.ID == client.ID {
-			target = session.Help
-			break
-		}
-		if session.Help != nil && session.Help.ID == client.ID {
-			target = session.Share
-			break
-		}
-	}
-	s.sessions.mu.RUnlock()
-
+	target := s.sessions.FindPeer(client.ID)
 	if target != nil {
 		msg, _ := proto.NewMessage(proto.MsgTunnelData, nil)
 		msg.Payload = payload
@@ -347,17 +333,22 @@ func sendMsg(client *ClientConn, msg *proto.Message) {
 }
 
 // cleanupLoop 定期清理
-func (s *Server) cleanupLoop() {
+func (s *Server) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		expired := s.sessions.CleanupExpired()
-		for _, id := range expired {
-			logger.LogSessionClosed(id, "expired")
-		}
-		if len(expired) > 0 {
-			log.Printf("Cleaned up %d expired sessions", len(expired))
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			expired := s.sessions.CleanupExpired()
+			for _, id := range expired {
+				logger.LogSessionClosed(id, "expired")
+			}
+			if len(expired) > 0 {
+				log.Printf("Cleaned up %d expired sessions", len(expired))
+			}
 		}
 	}
 }

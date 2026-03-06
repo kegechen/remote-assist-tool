@@ -10,8 +10,7 @@ import (
 )
 
 var (
-	ErrCodeGenerateFailed = errors.New("failed to generate unique code")
-	ErrSessionNotFound    = errors.New("session not found")
+	ErrSessionNotFound = errors.New("session not found")
 	ErrCodeExpired        = errors.New("code expired")
 	ErrCodeInvalid        = errors.New("invalid code")
 	ErrSessionHasHelper   = errors.New("session already has helper")
@@ -258,6 +257,22 @@ func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAdd
 				return &PeerAddrUpdate{Peer: session.Share, IsShareSide: false}
 			}
 			return nil
+		}
+	}
+	return nil
+}
+
+// FindPeer finds the paired client for a given client ID
+func (sm *SessionManager) FindPeer(clientID string) *ClientConn {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	for _, session := range sm.sessions {
+		if session.Share != nil && session.Share.ID == clientID {
+			return session.Help
+		}
+		if session.Help != nil && session.Help.ID == clientID {
+			return session.Share
 		}
 	}
 	return nil
