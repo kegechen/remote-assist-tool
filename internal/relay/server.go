@@ -340,7 +340,12 @@ func sendMsg(client *ClientConn, msg *proto.Message) {
 	if client == nil || client.Conn == nil {
 		return
 	}
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal message: %v", err)
+		return
+	}
+	data = append(data, '\n')
 	client.Conn.Write(data)
 }
 
