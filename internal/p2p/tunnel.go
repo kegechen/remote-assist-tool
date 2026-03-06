@@ -3,7 +3,6 @@ package p2p
 import (
 	"encoding/binary"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -162,44 +161,3 @@ func (t *UDPTunnel) RemoteAddr() string {
 	return t.remoteAddr.String()
 }
 
-// TryHolePunching tries to establish a P2P connection
-func TryHolePunching(localConn *net.UDPConn, peerAddrs []*net.UDPAddr) (*UDPTunnel, error) {
-	log.Printf("Trying hole punching to %d addresses", len(peerAddrs))
-
-	// Send punch packets to all addresses
-	testData := []byte("HELLO_P2P")
-	for _, addr := range peerAddrs {
-		if addr == nil {
-			continue
-		}
-		log.Printf("Punching to %v", addr)
-		for i := 0; i < 5; i++ {
-			_, _ = localConn.WriteToUDP(testData, addr)
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
-
-	// Wait for response
-	buf := make([]byte, 1500)
-	localConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-
-	for {
-		n, addr, err := localConn.ReadFromUDP(buf)
-		if err != nil {
-			break
-		}
-
-		log.Printf("Received response from %v: %q", addr, string(buf[:n]))
-
-		// Check if this is a P2P response
-		if string(buf[:n]) == "HELLO_P2P" || string(buf[:n]) == "HELLO_ACK" {
-			// Send ack
-			_, _ = localConn.WriteToUDP([]byte("HELLO_ACK"), addr)
-
-			log.Printf("P2P connection established with %v", addr)
-			return NewUDPTunnel(localConn, addr), nil
-		}
-	}
-
-	return nil, nil
-}
