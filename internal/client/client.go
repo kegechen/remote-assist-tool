@@ -49,9 +49,10 @@ func (c *Client) Connect() error {
 	var err error
 
 	if c.config.UseTLS {
-		tlsConfig, err := crypto.NewTLSClientConfig(c.config.InsecureSkip, c.config.CAFile)
+		var tlsConfig *tls.Config
+		tlsConfig, err = crypto.NewTLSClientConfig(c.config.InsecureSkip, c.config.CAFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create TLS config: %w", err)
 		}
 		conn, err = tls.Dial("tcp", c.config.ServerAddr, tlsConfig)
 	} else {
