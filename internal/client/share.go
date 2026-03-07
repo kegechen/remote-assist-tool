@@ -10,6 +10,7 @@ import (
 
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/version"
 )
 
 // ShareMode 被协助模式
@@ -36,7 +37,7 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 	defer s.client.Close()
 
 	clientID, _ := GetOrCreateClientID()
-	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID}); err != nil {
+	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info()}); err != nil {
 		return "", time.Time{}, err
 	}
 
@@ -77,6 +78,7 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 			}
 		}
 
+		s.client.ResetDecoder() // P2P 协商超时会导致 json.Decoder 缓存错误
 		fmt.Println("开始中转转发SSH流量...")
 		return s.code, s.expiresAt, s.handleTunnel()
 	}
@@ -99,6 +101,9 @@ func (s *ShareMode) waitSessionReady() (string, error) {
 				return "", err
 			}
 			fmt.Println("协助端已连接！")
+			if ready.PeerVersion != "" {
+				fmt.Printf("对端版本: %s\n", ready.PeerVersion)
+			}
 			return ready.SessionID, nil
 		case proto.MsgHeartbeat:
 		case proto.MsgError:

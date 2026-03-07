@@ -11,6 +11,7 @@ import (
 
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/version"
 )
 
 // HelpMode 协助模式
@@ -36,7 +37,7 @@ func (h *HelpMode) Run() error {
 	}
 	defer h.client.Close()
 
-	req := &proto.JoinRequest{Code: h.code}
+	req := &proto.JoinRequest{Code: h.code, Version: version.Info()}
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return err
 	}
@@ -56,6 +57,9 @@ func (h *HelpMode) Run() error {
 		}
 
 		fmt.Println("已连接到被协助端！")
+		if resp.PeerVersion != "" {
+			fmt.Printf("对端版本: %s\n", resp.PeerVersion)
+		}
 		fmt.Printf("会话ID: %s\n", resp.SessionID)
 		fmt.Printf("本地监听: %s\n", h.listenAddr)
 
@@ -76,6 +80,7 @@ func (h *HelpMode) Run() error {
 		}
 
 		// relay 模式
+		h.client.ResetDecoder() // P2P 协商超时会导致 json.Decoder 缓存错误
 		fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 		return h.handleTunnel()
 	}

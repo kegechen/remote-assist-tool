@@ -157,6 +157,18 @@ func (c *Client) SetReadDeadline(t time.Time) {
 	}
 }
 
+// ResetDecoder 重建 JSON 解码器
+// json.Decoder 在遇到超时等临时错误时会缓存错误，后续所有 Decode 调用
+// 都会直接返回该缓存错误而不再尝试读取。P2P 协商超时后必须调用此方法。
+func (c *Client) ResetDecoder() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil && c.dec != nil {
+		buffered := c.dec.Buffered()
+		c.dec = json.NewDecoder(io.MultiReader(buffered, c.conn))
+	}
+}
+
 // StartHeartbeatLoop 启动心跳循环
 func (c *Client) StartHeartbeatLoop(interval time.Duration) {
 	go func() {

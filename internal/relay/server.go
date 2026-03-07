@@ -129,7 +129,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	clientID := generateClientID()
 	clientIP := conn.RemoteAddr().String()
 
-	log.Printf("New connection from %s (client_id: %s)", clientIP, clientID)
+	log.Printf("New connection from %s (client_id: %s, version: pending)", clientIP, clientID)
 	logger.LogConnection(clientIP, clientID, true, "客户端已连接")
 
 	wrapped := &connWrapper{Conn: conn}
@@ -177,11 +177,13 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) {
 		var req proto.RegisterRequest
 		if proto.DecodePayload(msg, &req) == nil {
 			client.ClientID = req.ClientID
+			client.Version = req.Version
 		}
 		s.handleRegister(client)
 	case proto.MsgJoinRequest:
 		var req proto.JoinRequest
 		if err := proto.DecodePayload(msg, &req); err == nil {
+			client.Version = req.Version
 			s.handleJoin(client, req.Code)
 		}
 	case proto.MsgTunnelData:
@@ -213,7 +215,7 @@ func (s *Server) handleRegister(client *ClientConn) {
 			expiresAt = existingSession.ExpiresAt
 			s.sessions.ReuseSession(existingSession, client)
 			reused = true
-			log.Printf("Reusing existing session for client %s, code: %s", client.ClientID, FormatCode(code))
+			log.Printf("Reusing existing session for client %s, code: %s (version: %s)", client.ClientID, FormatCode(code), client.Version)
 		}
 	}
 
@@ -228,7 +230,7 @@ func (s *Server) handleRegister(client *ClientConn) {
 		session := s.sessions.CreateSession(code, client, s.config.CodeTTL, client.ClientID)
 		expiresAt = session.ExpiresAt
 		logger.LogCodeGenerated(code, client.ID, session.ExpiresAt)
-		log.Printf("Share client registered, code: %s", FormatCode(code))
+		log.Printf("Share client registered, code: %s (version: %s)", FormatCode(code), client.Version)
 	}
 
 	resp := &proto.RegisterResponse{
@@ -257,18 +259,21 @@ func (s *Server) handleJoin(client *ClientConn, code string) {
 
 	client.Type = "help"
 
+	// JoinResponse 附带 share 端版本
 	resp := &proto.JoinResponse{
-		Success:   true,
-		SessionID: session.ID,
+		Success:     true,
+		SessionID:   session.ID,
+		PeerVersion: session.Share.Version,
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 
-	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: session.ID})
+	// SessionReady 附带 help 端版本
+	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: session.ID, PeerVersion: client.Version})
 	sendMsg(session.Share, readyMsg)
 
 	logger.LogSessionEstablished(session.ID, code, client.ID, session.Share.ID)
-	log.Printf("Session established: %s", session.ID)
+	log.Printf("Session established: %s (share version: %s, help version: %s)", session.ID, session.Share.Version, client.Version)
 }
 
 // handlePeerAddrAdvertise 处理对等端地址通告
@@ -276,6 +281,22 @@ func (s *Server) handlePeerAddrAdvertise(client *ClientConn, msg *proto.Message)
 	var advert proto.PeerAddrAdvertise
 	if err := proto.DecodePayload(msg, &advert); err != nil {
 		return
+	}
+
+	// 当 STUN 失败导致公网地址为空时，使用 TCP 连接的源 IP 作为回退
+	// 注意：TCP 源 IP 是正确的，但 UDP 端口未知，所以用对端的 STUN 端口（如果有）
+	if advert.PublicAddr == "" && client.Conn != nil {
+		remoteAddr := client.Conn.RemoteAddr()
+		if host, _, err := net.SplitHostPort(remoteAddr); err == nil && host != "" {
+			// 使用 TCP 源 IP + 客户端私网端口（同一 NAT 下 UDP 端口可能一致）
+			_, privPort, _ := net.SplitHostPort(advert.PrivateAddr)
+			if privPort != "" && privPort != "0" {
+				advert.PublicAddr = net.JoinHostPort(host, privPort)
+				log.Printf("Using TCP source IP as public address fallback for %s: %s (port from private addr)", client.ID, advert.PublicAddr)
+			} else {
+				log.Printf("STUN failed for %s, TCP source IP=%s but no usable port, skipping public addr fallback", client.ID, host)
+			}
+		}
 	}
 
 	log.Printf("Received peer address from %s: public=%s, private=%s", client.ID, advert.PublicAddr, advert.PrivateAddr)

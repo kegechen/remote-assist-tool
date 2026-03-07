@@ -32,6 +32,7 @@ type Message struct {
 // RegisterRequest 被协助端注册请求
 type RegisterRequest struct {
 	ClientID string `json:"client_id,omitempty"`
+	Version  string `json:"version,omitempty"`
 }
 
 // RegisterResponse 注册响应
@@ -42,14 +43,16 @@ type RegisterResponse struct {
 
 // JoinRequest 协助端加入请求
 type JoinRequest struct {
-	Code string `json:"code"`
+	Code    string `json:"code"`
+	Version string `json:"version,omitempty"`
 }
 
 // JoinResponse 加入响应
 type JoinResponse struct {
-	Success   bool   `json:"success"`
-	SessionID string `json:"session_id,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Success     bool   `json:"success"`
+	SessionID   string `json:"session_id,omitempty"`
+	Error       string `json:"error,omitempty"`
+	PeerVersion string `json:"peer_version,omitempty"`
 }
 
 // TunnelData 隧道数据
@@ -64,7 +67,8 @@ type Heartbeat struct {
 
 // SessionReady 会话就绪通知
 type SessionReady struct {
-	SessionID string `json:"session_id"`
+	SessionID   string `json:"session_id"`
+	PeerVersion string `json:"peer_version,omitempty"`
 }
 
 // ErrorMessage 错误消息

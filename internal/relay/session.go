@@ -28,6 +28,7 @@ type ClientConn struct {
 	ID       string
 	Type     string // "share" or "help"
 	ClientID string // 持久化客户端ID
+	Version  string // 客户端版本
 	Conn     Conn
 	Send     chan []byte
 }
