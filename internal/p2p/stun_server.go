@@ -16,12 +16,12 @@ type STUNServer struct {
 
 // NewSTUNServer creates a new STUN server
 func NewSTUNServer(addr string) (*STUNServer, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
 	if err != nil {
 		return nil, err
 	}
 
-	conn, err := net.ListenUDP("udp", udpAddr)
+	conn, err := net.ListenUDP("udp4", udpAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -56,12 +56,16 @@ func (s *STUNServer) serve() {
 func (s *STUNServer) handlePacket(data []byte, remoteAddr *net.UDPAddr) {
 	msg, err := UnpackSTUN(data)
 	if err != nil {
+		log.Printf("STUN: invalid packet from %v: %v", remoteAddr, err)
 		return
 	}
 
 	if msg.Type != STUNBindingRequest {
+		log.Printf("STUN: non-binding request (type=0x%04x) from %v", msg.Type, remoteAddr)
 		return
 	}
+
+	log.Printf("STUN: binding request from %v", remoteAddr)
 
 	// Build response
 	resp := &STUNMessage{
@@ -78,7 +82,10 @@ func (s *STUNServer) handlePacket(data []byte, remoteAddr *net.UDPAddr) {
 
 	// Send response
 	respBytes := resp.Pack()
-	_, _ = s.conn.WriteToUDP(respBytes, remoteAddr)
+	_, err = s.conn.WriteToUDP(respBytes, remoteAddr)
+	if err != nil {
+		log.Printf("STUN: failed to send response to %v: %v", remoteAddr, err)
+	}
 }
 
 // AddXorMappedAddress adds the XOR-MAPPED-ADDRESS attribute

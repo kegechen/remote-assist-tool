@@ -96,19 +96,38 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 		return p.resultCh, nil
 	}
 
-	// Create local UDP socket
+	// Create local UDP socket bound to IPv4
 	var err error
-	p.localConn, err = net.ListenUDP("udp", nil)
+	p.localConn, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, fmt.Errorf("listen UDP: %w", err)
 	}
+	// Get real local IP instead of wildcard
 	p.localAddr = p.localConn.LocalAddr().(*net.UDPAddr)
+	if outboundIP := getOutboundIP(); outboundIP != nil {
+		log.Printf("Local outbound IP: %v", outboundIP)
+		p.localAddr = &net.UDPAddr{IP: outboundIP, Port: p.localAddr.Port}
+	} else {
+		log.Printf("getOutboundIP failed, advertising wildcard private address")
+	}
 
 	// Discover public address via STUN
 	if p.stunServer != "" {
 		p.publicAddr, err = DiscoverPublicAddrVia(p.localConn, p.stunServer)
 		if err != nil {
-			log.Printf("STUN discovery failed: %v, will try without", err)
+			log.Printf("STUN discovery failed: %v, trying external STUN servers", err)
+			// 回退到公共 STUN 服务器
+			for _, extSTUN := range []string{"stun.l.google.com:19302", "stun1.l.google.com:19302", "stun.cloudflare.com:3478"} {
+				p.publicAddr, err = DiscoverPublicAddrVia(p.localConn, extSTUN)
+				if err == nil {
+					log.Printf("Discovered public address via external STUN (%s): %v", extSTUN, p.publicAddr)
+					break
+				}
+				log.Printf("External STUN %s failed: %v", extSTUN, err)
+			}
+			if p.publicAddr == nil {
+				log.Printf("All STUN servers failed, will try without public address")
+			}
 		} else {
 			log.Printf("Discovered public address: %v", p.publicAddr)
 		}
@@ -174,17 +193,28 @@ func (p *P2PManager) startHolePunching() {
 		return
 	}
 
-	// Try private address first
-	if p.peerInfo.PrivateAddr != nil {
-		log.Printf("Trying to connect via private address: %v", p.peerInfo.PrivateAddr)
-		p.sendTestPackets(p.peerInfo.PrivateAddr, 10, 100*time.Millisecond)
+	var wg sync.WaitGroup
+
+	// 并发尝试公网和私网地址
+	if p.peerInfo.PublicAddr != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("Trying to connect via public address: %v", p.peerInfo.PublicAddr)
+			p.sendTestPackets(p.peerInfo.PublicAddr, 30, 50*time.Millisecond)
+		}()
 	}
 
-	// Try public address
-	if p.peerInfo.PublicAddr != nil {
-		log.Printf("Trying to connect via public address: %v", p.peerInfo.PublicAddr)
-		p.sendTestPackets(p.peerInfo.PublicAddr, 20, 50*time.Millisecond)
+	if p.peerInfo.PrivateAddr != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			log.Printf("Trying to connect via private address: %v", p.peerInfo.PrivateAddr)
+			p.sendTestPackets(p.peerInfo.PrivateAddr, 20, 100*time.Millisecond)
+		}()
 	}
+
+	wg.Wait()
 }
 
 func (p *P2PManager) sendTestPackets(addr *net.UDPAddr, count int, interval time.Duration) {
@@ -299,6 +329,18 @@ func (p *P2PManager) Close() {
 			p.localConn.Close()
 		}
 	})
+}
+
+// getOutboundIP gets the preferred outbound IP of this machine
+// by dialing a public address (doesn't actually send packets)
+func getOutboundIP() net.IP {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP
 }
 
 func randomString(n int) string {

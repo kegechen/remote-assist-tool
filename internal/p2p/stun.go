@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"time"
 )
@@ -214,101 +215,70 @@ func (m *STUNMessage) AddSoftwareAttribute(name string) {
 }
 
 // DiscoverPublicAddrVia discovers the public address using an existing UDP connection
+// with retry logic for transient network failures
 func DiscoverPublicAddrVia(conn *net.UDPConn, stunServer string) (*net.UDPAddr, error) {
 	serverAddr, err := net.ResolveUDPAddr("udp", stunServer)
 	if err != nil {
 		return nil, fmt.Errorf("resolve STUN server: %w", err)
 	}
 
-	req := NewBindingRequest()
-	req.AddSoftwareAttribute("remote-assist-tool/1.0")
-	reqBytes := req.Pack()
+	timeouts := []time.Duration{3 * time.Second, 5 * time.Second, 8 * time.Second}
+	var lastErr error
 
-	_, err = conn.WriteToUDP(reqBytes, serverAddr)
-	if err != nil {
-		return nil, fmt.Errorf("send STUN request: %w", err)
-	}
+	for attempt, timeout := range timeouts {
+		if attempt > 0 {
+			log.Printf("STUN retry %d/%d (timeout: %v)", attempt, len(timeouts)-1, timeout)
+		}
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 1500)
-	n, _, err := conn.ReadFromUDP(buf)
-	if err != nil {
+		req := NewBindingRequest()
+		req.AddSoftwareAttribute("remote-assist-tool/1.0")
+		reqBytes := req.Pack()
+
+		_, err = conn.WriteToUDP(reqBytes, serverAddr)
+		if err != nil {
+			lastErr = fmt.Errorf("send STUN request: %w", err)
+			continue
+		}
+
+		conn.SetReadDeadline(time.Now().Add(timeout))
+		buf := make([]byte, 1500)
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			lastErr = ErrSTUNTimeout
+			continue
+		}
 		conn.SetReadDeadline(time.Time{})
-		return nil, ErrSTUNTimeout
-	}
-	conn.SetReadDeadline(time.Time{})
 
-	resp, err := UnpackSTUN(buf[:n])
-	if err != nil {
-		return nil, fmt.Errorf("parse STUN response: %w", err)
+		resp, err := UnpackSTUN(buf[:n])
+		if err != nil {
+			lastErr = fmt.Errorf("parse STUN response: %w", err)
+			continue
+		}
+
+		if resp.Type != STUNBindingResponse {
+			lastErr = errors.New("not a binding response")
+			continue
+		}
+
+		// 验证 TID 匹配，防止接收到上一次请求的延迟响应
+		if resp.TID != req.TID {
+			lastErr = errors.New("STUN response TID mismatch (stale response)")
+			continue
+		}
+
+		mappedAddr, err := resp.GetMappedAddress()
+		if err != nil {
+			lastErr = fmt.Errorf("get mapped address: %w", err)
+			continue
+		}
+
+		return &net.UDPAddr{
+			IP:   mappedAddr.IP,
+			Port: int(mappedAddr.Port),
+		}, nil
 	}
 
-	if resp.Type != STUNBindingResponse {
-		return nil, errors.New("not a binding response")
-	}
-
-	mappedAddr, err := resp.GetMappedAddress()
-	if err != nil {
-		return nil, fmt.Errorf("get mapped address: %w", err)
-	}
-
-	return &net.UDPAddr{
-		IP:   mappedAddr.IP,
-		Port: int(mappedAddr.Port),
-	}, nil
+	return nil, lastErr
 }
 
-// DiscoverPublicAddr discovers the public address using a STUN server
-func DiscoverPublicAddr(stunServer string) (*net.UDPAddr, error) {
-	// Resolve STUN server address
-	serverAddr, err := net.ResolveUDPAddr("udp", stunServer)
-	if err != nil {
-		return nil, fmt.Errorf("resolve STUN server: %w", err)
-	}
-
-	// Create UDP socket
-	conn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		return nil, fmt.Errorf("listen UDP: %w", err)
-	}
-	defer conn.Close()
-
-	// Send binding request
-	req := NewBindingRequest()
-	req.AddSoftwareAttribute("remote-assist-tool/1.0")
-	reqBytes := req.Pack()
-
-	_, err = conn.WriteToUDP(reqBytes, serverAddr)
-	if err != nil {
-		return nil, fmt.Errorf("send STUN request: %w", err)
-	}
-
-	// Wait for response
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 1500)
-	n, _, err := conn.ReadFromUDP(buf)
-	if err != nil {
-		return nil, ErrSTUNTimeout
-	}
-
-	// Parse response
-	resp, err := UnpackSTUN(buf[:n])
-	if err != nil {
-		return nil, fmt.Errorf("parse STUN response: %w", err)
-	}
-
-	if resp.Type != STUNBindingResponse {
-		return nil, errors.New("not a binding response")
-	}
-
-	// Get mapped address
-	mappedAddr, err := resp.GetMappedAddress()
-	if err != nil {
-		return nil, fmt.Errorf("get mapped address: %w", err)
-	}
-
-	return &net.UDPAddr{
-		IP:   mappedAddr.IP,
-		Port: int(mappedAddr.Port),
-	}, nil
-}
