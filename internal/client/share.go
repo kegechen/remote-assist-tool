@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +13,9 @@ import (
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/version"
 )
+
+// ErrPeerDisconnected 协助端断开连接（可恢复）
+var ErrPeerDisconnected = errors.New("peer disconnected")
 
 // ShareMode 被协助模式
 type ShareMode struct {
@@ -29,61 +33,75 @@ func NewShareMode(cfg *Config, sshAddr string) *ShareMode {
 	}
 }
 
-// Run 运行被协助模式
+// Run 运行被协助模式，协助端断开时自动等待新连接
 func (s *ShareMode) Run() (string, time.Time, error) {
+	for {
+		err := s.runSession()
+		if err == nil {
+			return s.code, s.expiresAt, nil
+		}
+		if !errors.Is(err, ErrPeerDisconnected) {
+			return s.code, s.expiresAt, err
+		}
+		fmt.Println("\n协助端已断开连接，准备等待新的连接...")
+	}
+}
+
+// runSession 运行一次会话（连接relay、注册、等待协助端、转发流量）
+func (s *ShareMode) runSession() error {
 	if err := s.client.Connect(); err != nil {
-		return "", time.Time{}, err
+		return err
 	}
 	defer s.client.Close()
 
 	clientID, _ := GetOrCreateClientID()
 	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info()}); err != nil {
-		return "", time.Time{}, err
+		return err
 	}
 
 	msg, err := s.client.ReadMessage()
 	if err != nil {
-		return "", time.Time{}, err
+		return err
 	}
 
-	if msg.Type == proto.MsgRegisterResponse {
-		var resp proto.RegisterResponse
-		if err := proto.DecodePayload(msg, &resp); err != nil {
-			return "", time.Time{}, err
-		}
-		s.code = resp.Code
-		s.expiresAt = time.Unix(resp.ExpiresAt, 0)
-		fmt.Printf("\n协助码已生成: %s\n", formatCode(resp.Code))
-		fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
-		fmt.Println("等待协助端连接...")
+	if msg.Type != proto.MsgRegisterResponse {
+		return fmt.Errorf("unexpected response: %s", msg.Type)
+	}
 
-		sessionID, err := s.waitSessionReady()
+	var resp proto.RegisterResponse
+	if err := proto.DecodePayload(msg, &resp); err != nil {
+		return err
+	}
+	s.code = resp.Code
+	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
+	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
+	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Println("等待协助端连接...")
+
+	sessionID, err := s.waitSessionReady()
+	if err != nil {
+		return err
+	}
+
+	// 尝试 P2P 直连
+	p2pMode := p2p.ParseP2PMode(s.client.config.P2PMode)
+	if p2pMode != p2p.P2PModeDisabled {
+		tunnel, err := s.negotiateP2P(p2pMode, sessionID)
 		if err != nil {
-			return s.code, s.expiresAt, err
-		}
-
-		// 尝试 P2P 直连
-		p2pMode := p2p.ParseP2PMode(s.client.config.P2PMode)
-		if p2pMode != p2p.P2PModeDisabled {
-			tunnel, err := s.negotiateP2P(p2pMode, sessionID)
-			if err != nil {
-				if p2pMode == p2p.P2PModeRequired {
-					return s.code, s.expiresAt, fmt.Errorf("P2P 连接失败: %w", err)
-				}
-				log.Printf("P2P negotiation failed, falling back to relay: %v", err)
+			if p2pMode == p2p.P2PModeRequired {
+				return fmt.Errorf("P2P 连接失败: %w", err)
 			}
-			if tunnel != nil {
-				fmt.Println("开始 P2P 直连转发SSH流量...")
-				return s.code, s.expiresAt, s.handleTunnelP2P(tunnel)
-			}
+			log.Printf("P2P negotiation failed, falling back to relay: %v", err)
 		}
-
-		s.client.ResetDecoder() // P2P 协商超时会导致 json.Decoder 缓存错误
-		fmt.Println("开始中转转发SSH流量...")
-		return s.code, s.expiresAt, s.handleTunnel()
+		if tunnel != nil {
+			fmt.Println("开始 P2P 直连转发SSH流量...")
+			return s.handleTunnelP2P(tunnel)
+		}
 	}
 
-	return s.code, s.expiresAt, fmt.Errorf("unexpected response: %s", msg.Type)
+	s.client.ResetDecoder() // P2P 协商超时会导致 json.Decoder 缓存错误
+	fmt.Println("开始中转转发SSH流量...")
+	return s.handleTunnel()
 }
 
 // waitSessionReady 等待会话就绪
@@ -242,7 +260,8 @@ func (s *ShareMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 				sshConn.Close()
 			}
 			connMu.Unlock()
-			return err
+			// P2P 隧道断开，视为协助端断开
+			return ErrPeerDisconnected
 		}
 		if n == 0 {
 			continue
@@ -264,6 +283,9 @@ func (s *ShareMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 
 // handleTunnel 处理隧道（支持多次SSH连接）
 func (s *ShareMode) handleTunnel() error {
+	// Start heartbeat to keep relay connection alive through NAT/firewalls
+	s.client.StartHeartbeatLoop(30 * time.Second)
+
 	// Shared state: current SSH connection to local SSH server
 	var sshConn net.Conn
 	var connMu sync.Mutex
@@ -311,6 +333,8 @@ func (s *ShareMode) handleTunnel() error {
 
 	// Main loop: read from relay, forward to SSH (connecting on demand)
 	for {
+		// Set read timeout to detect dead connections (reset after each successful read)
+		s.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		msg, err := s.client.ReadMessage()
 		if err != nil {
 			connMu.Lock()
@@ -346,6 +370,14 @@ func (s *ShareMode) handleTunnel() error {
 		case proto.MsgError:
 			var errMsg proto.ErrorMessage
 			proto.DecodePayload(msg, &errMsg)
+			connMu.Lock()
+			if sshConn != nil {
+				sshConn.Close()
+			}
+			connMu.Unlock()
+			if errMsg.Code == "PEER_DISCONNECTED" {
+				return ErrPeerDisconnected
+			}
 			return fmt.Errorf("server error: %s - %s", errMsg.Code, errMsg.Message)
 		}
 	}

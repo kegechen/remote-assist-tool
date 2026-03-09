@@ -238,6 +238,7 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 }
 
 // CleanupExpired 清理过期会话
+// 如果会话有活跃的 help 连接（正在使用中），跳过清理，只移除协助码映射防止新连接加入
 func (sm *SessionManager) CleanupExpired() []string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -246,6 +247,15 @@ func (sm *SessionManager) CleanupExpired() []string {
 	var expired []string
 	for id, session := range sm.sessions {
 		if now.After(session.ExpiresAt) {
+			// 移除协助码映射，防止新的 help 通过过期码加入
+			delete(sm.byCode, session.Code)
+
+			// 如果会话正在使用中（share 和 help 都在），保持连接
+			if session.Share != nil && session.Help != nil {
+				continue
+			}
+
+			// 非活跃会话（缺少一方或双方已断开），清理
 			expired = append(expired, id)
 			session.closed = true
 			if session.Share != nil && session.Share.Conn != nil {
@@ -255,7 +265,6 @@ func (sm *SessionManager) CleanupExpired() []string {
 				session.Help.Conn.Close()
 			}
 			delete(sm.sessions, id)
-			delete(sm.byCode, session.Code)
 			if session.ClientID != "" {
 				delete(sm.byClientID, session.ClientID)
 			}

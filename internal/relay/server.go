@@ -129,6 +129,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	clientID := generateClientID()
 	clientIP := conn.RemoteAddr().String()
 
+	// Enable TCP KeepAlive to detect dead connections
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	} else if tlsConn, ok := conn.(*tls.Conn); ok {
+		if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		}
+	}
+
 	log.Printf("New connection from %s (client_id: %s, version: pending)", clientIP, clientID)
 	logger.LogConnection(clientIP, clientID, true, "客户端已连接")
 
@@ -354,7 +365,10 @@ func sendMsg(client *ClientConn, msg *proto.Message) {
 		return
 	}
 	data = append(data, '\n')
-	client.Conn.Write(data)
+	if _, err := client.Conn.Write(data); err != nil {
+		log.Printf("Write failed to %s: %v, closing connection", client.ID, err)
+		client.Conn.Close()
+	}
 }
 
 // cleanupLoop 定期清理

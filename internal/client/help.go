@@ -245,6 +245,9 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 
 // handleTunnel 处理隧道（支持多次SSH连接）
 func (h *HelpMode) handleTunnel() error {
+	// Start heartbeat to keep relay connection alive through NAT/firewalls
+	h.client.StartHeartbeatLoop(30 * time.Second)
+
 	listener, err := net.Listen("tcp", h.listenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
@@ -259,6 +262,8 @@ func (h *HelpMode) handleTunnel() error {
 	// Single long-lived goroutine: reads from relay, writes to current local SSH connection
 	go func() {
 		for {
+			// Set read timeout to detect dead connections (reset after each successful read)
+			h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			msg, err := h.client.ReadMessage()
 			if err != nil {
 				relayDone <- err

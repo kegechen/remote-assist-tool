@@ -41,10 +41,12 @@ func NewClient(cfg *Config) *Client {
 	}
 }
 
-// Connect 连接服务器
+// Connect 连接服务器（支持 Close 后重新连接）
 func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.closed = false // 允许 Close 后重新连接
 
 	var conn net.Conn
 	var err error
@@ -62,6 +64,17 @@ func (c *Client) Connect() error {
 
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
+	}
+
+	// Enable TCP KeepAlive to detect dead connections
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	} else if tlsConn, ok := conn.(*tls.Conn); ok {
+		if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		}
 	}
 
 	c.conn = conn
