@@ -35,25 +35,54 @@ func NewShareMode(cfg *Config, sshAddr string) *ShareMode {
 
 // Run 运行被协助模式，协助端断开时自动等待新连接
 func (s *ShareMode) Run() (string, time.Time, error) {
-	for {
-		err := s.runSession()
-		if err == nil {
-			return s.code, s.expiresAt, nil
-		}
-		if !errors.Is(err, ErrPeerDisconnected) {
-			return s.code, s.expiresAt, err
-		}
-		fmt.Println("\n协助端已断开连接，准备等待新的连接...")
-	}
-}
-
-// runSession 运行一次会话（连接relay、注册、等待协助端、转发流量）
-func (s *ShareMode) runSession() error {
 	if err := s.client.Connect(); err != nil {
-		return err
+		return "", time.Time{}, err
 	}
 	defer s.client.Close()
 
+	if err := s.register(); err != nil {
+		return s.code, s.expiresAt, err
+	}
+
+	for {
+		tunnelErr := s.waitAndHandleTunnel()
+		if tunnelErr == nil {
+			return s.code, s.expiresAt, nil
+		}
+
+		isPeerDisconnect := errors.Is(tunnelErr, ErrPeerDisconnected)
+		codeExpired := time.Now().After(s.expiresAt)
+
+		// 非对端断开 + 协助码已过期 → 不可恢复
+		if !isPeerDisconnect && codeExpired {
+			return s.code, s.expiresAt, tunnelErr
+		}
+
+		// 对端断开 + 协助码仍有效 → 在当前连接上等待新的协助端
+		if isPeerDisconnect && !codeExpired {
+			fmt.Printf("\n协助端已断开连接，协助码仍有效: %s\n", formatCode(s.code))
+			fmt.Println("等待新的协助端连接...")
+			continue
+		}
+
+		// 其余情况需要重连：协助码过期，或连接异常但码有效
+		if codeExpired {
+			fmt.Println("\n协助端已断开连接，协助码已过期，正在获取新协助码...")
+		} else {
+			fmt.Printf("\n连接中断，协助码仍有效: %s，正在重连...\n", formatCode(s.code))
+		}
+		s.client.Close()
+		if err := s.client.Connect(); err != nil {
+			return s.code, s.expiresAt, err
+		}
+		if err := s.register(); err != nil {
+			return s.code, s.expiresAt, err
+		}
+	}
+}
+
+// register 向 relay 注册并获取协助码
+func (s *ShareMode) register() error {
 	clientID, _ := GetOrCreateClientID()
 	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info()}); err != nil {
 		return err
@@ -77,7 +106,11 @@ func (s *ShareMode) runSession() error {
 	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
 	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
 	fmt.Println("等待协助端连接...")
+	return nil
+}
 
+// waitAndHandleTunnel 等待协助端连接，然后处理隧道
+func (s *ShareMode) waitAndHandleTunnel() error {
 	sessionID, err := s.waitSessionReady()
 	if err != nil {
 		return err

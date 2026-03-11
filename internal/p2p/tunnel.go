@@ -25,6 +25,8 @@ const (
 	recvChanSize       = 256                    // In-order delivery channel buffer
 	maxRecvBuf         = 256                    // Max out-of-order buffered packets
 	retransmitInterval = 50 * time.Millisecond  // How often to check for retransmits
+	peerTimeout        = 60 * time.Second        // Close tunnel if no packet from peer for this long
+	readDeadline       = 30 * time.Second        // UDP read deadline (shorter than peerTimeout for responsive detection)
 )
 
 // pendingPacket tracks an unacknowledged sent packet
@@ -51,6 +53,9 @@ type UDPTunnel struct {
 	recvMu      sync.Mutex        // protects nextRecvSeq and recvBuf
 	recvCh      chan []byte        // in-order delivery channel
 
+	// Peer liveness detection
+	lastRecvTime time.Time // last time any packet was received from peer
+
 	// Partial read buffer (when payload > caller's Read buffer)
 	partialData []byte
 	partialOff  int
@@ -63,11 +68,12 @@ type UDPTunnel struct {
 // NewUDPTunnel creates a new reliable UDP tunnel
 func NewUDPTunnel(conn *net.UDPConn, remoteAddr *net.UDPAddr) *UDPTunnel {
 	t := &UDPTunnel{
-		conn:       conn,
-		remoteAddr: remoteAddr,
-		sendWin:    make(map[uint32]*pendingPacket),
-		recvBuf:    make(map[uint32][]byte),
-		recvCh:     make(chan []byte, recvChanSize),
+		conn:         conn,
+		remoteAddr:   remoteAddr,
+		lastRecvTime: time.Now(),
+		sendWin:      make(map[uint32]*pendingPacket),
+		recvBuf:      make(map[uint32][]byte),
+		recvCh:       make(chan []byte, recvChanSize),
 		stopCh:     make(chan struct{}),
 	}
 	go t.recvLoop()
@@ -182,11 +188,17 @@ func (t *UDPTunnel) recvLoop() {
 		default:
 		}
 
-		t.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		t.conn.SetReadDeadline(time.Now().Add(readDeadline))
 		n, addr, err := t.conn.ReadFromUDP(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue // timeout is not fatal, keepalive keeps NAT alive
+				// Check if peer is still alive (keepalive arrives every 10s)
+				if time.Since(t.lastRecvTime) > peerTimeout {
+					log.Printf("P2P: no packet from peer for %v, closing tunnel", peerTimeout)
+					t.Close()
+					return
+				}
+				continue
 			}
 			// Fatal error - close tunnel
 			t.Close()
@@ -201,6 +213,9 @@ func (t *UDPTunnel) recvLoop() {
 		if n < 5 {
 			continue
 		}
+
+		// Peer is alive - update liveness tracker
+		t.lastRecvTime = time.Now()
 
 		pktType := buf[0]
 		seq := binary.BigEndian.Uint32(buf[1:5])
