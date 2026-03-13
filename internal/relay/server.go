@@ -270,21 +270,33 @@ func (s *Server) handleJoin(client *ClientConn, code string) {
 
 	client.Type = "help"
 
+	// Snapshot Share into local var to avoid TOCTOU race with DisconnectClient
+	share := session.Share
+	if share == nil {
+		resp := &proto.JoinResponse{
+			Success: false,
+			Error:   "share client disconnected",
+		}
+		msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
+		sendMsg(client, msg)
+		return
+	}
+
 	// JoinResponse 附带 share 端版本
 	resp := &proto.JoinResponse{
 		Success:     true,
 		SessionID:   session.ID,
-		PeerVersion: session.Share.Version,
+		PeerVersion: share.Version,
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 
 	// SessionReady 附带 help 端版本
 	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: session.ID, PeerVersion: client.Version})
-	sendMsg(session.Share, readyMsg)
+	sendMsg(share, readyMsg)
 
-	logger.LogSessionEstablished(session.ID, code, client.ID, session.Share.ID)
-	log.Printf("Session established: %s (share version: %s, help version: %s)", session.ID, session.Share.Version, client.Version)
+	logger.LogSessionEstablished(session.ID, code, client.ID, share.ID)
+	log.Printf("Session established: %s (share version: %s, help version: %s)", session.ID, share.Version, client.Version)
 }
 
 // handlePeerAddrAdvertise 处理对等端地址通告

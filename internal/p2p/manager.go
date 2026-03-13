@@ -50,6 +50,7 @@ type PeerInfo struct {
 type P2PManager struct {
 	mode         P2PMode
 	stunServer   string
+	stunAddr     *net.UDPAddr // resolved STUN server address for UDP relay
 	localConn    *net.UDPConn
 	localAddr    *net.UDPAddr
 	publicAddr   *net.UDPAddr
@@ -109,6 +110,11 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 		p.localAddr = &net.UDPAddr{IP: outboundIP, Port: p.localAddr.Port}
 	} else {
 		log.Printf("getOutboundIP failed, advertising wildcard private address")
+	}
+
+	// Resolve STUN server address for UDP relay
+	if p.stunServer != "" {
+		p.stunAddr, _ = net.ResolveUDPAddr("udp", p.stunServer)
 	}
 
 	// Discover public address via STUN
@@ -188,36 +194,49 @@ func (p *P2PManager) HandlePeerAddrReady(msg *proto.PeerAddrReady) {
 	go p.startHolePunching()
 }
 
+// portPredictionRange 端口预测范围，用于对称型 NAT
+const portPredictionRange = 10
+
 func (p *P2PManager) startHolePunching() {
 	if p.peerInfo == nil {
 		return
 	}
 
-	var wg sync.WaitGroup
-
-	// 并发尝试公网和私网地址
+	// 公网地址：精确端口高频 + 端口预测应对对称型 NAT
 	if p.peerInfo.PublicAddr != nil {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-			log.Printf("Trying to connect via public address: %v", p.peerInfo.PublicAddr)
-			p.sendTestPackets(p.peerInfo.PublicAddr, 30, 50*time.Millisecond)
+			log.Printf("Hole punching public address: %v", p.peerInfo.PublicAddr)
+			p.sendTestPackets(p.peerInfo.PublicAddr, 100*time.Millisecond)
+		}()
+		go func() {
+			log.Printf("Port prediction around %v (±%d ports)", p.peerInfo.PublicAddr, portPredictionRange)
+			p.sendPortPredictionPackets(p.peerInfo.PublicAddr, portPredictionRange, 300*time.Millisecond)
 		}()
 	}
 
+	// 私网地址：低频率持续打洞
 	if p.peerInfo.PrivateAddr != nil {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-			log.Printf("Trying to connect via private address: %v", p.peerInfo.PrivateAddr)
-			p.sendTestPackets(p.peerInfo.PrivateAddr, 20, 100*time.Millisecond)
+			log.Printf("Hole punching private address: %v", p.peerInfo.PrivateAddr)
+			p.sendTestPackets(p.peerInfo.PrivateAddr, 200*time.Millisecond)
 		}()
 	}
 
-	wg.Wait()
+	// UDP 中继：延迟 2s 启动，优先直连
+	if p.stunAddr != nil {
+		go func() {
+			select {
+			case <-time.After(2 * time.Second):
+			case <-p.stopChan:
+				return
+			}
+			log.Printf("Trying UDP relay via %v", p.stunAddr)
+			p.sendRelayTestPackets(p.stunAddr, 200*time.Millisecond)
+		}()
+	}
 }
 
-func (p *P2PManager) sendTestPackets(addr *net.UDPAddr, count int, interval time.Duration) {
+func (p *P2PManager) sendTestPackets(addr *net.UDPAddr, interval time.Duration) {
 	testPacket := &proto.P2PTestPacket{
 		SessionID: p.sessionID,
 		Random:    randomString(16),
@@ -225,13 +244,76 @@ func (p *P2PManager) sendTestPackets(addr *net.UDPAddr, count int, interval time
 
 	data, _ := json.Marshal(testPacket)
 
-	for i := 0; i < count; i++ {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
 		select {
 		case <-p.stopChan:
 			return
-		default:
-			_, _ = p.localConn.WriteToUDP(data, addr)
-			time.Sleep(interval)
+		case <-ticker.C:
+			p.localConn.WriteToUDP(data, addr)
+		}
+	}
+}
+
+// sendRelayTestPackets 通过 STUN 服务器中继发送测试包
+func (p *P2PManager) sendRelayTestPackets(relayAddr *net.UDPAddr, interval time.Duration) {
+	testPacket := &proto.P2PTestPacket{
+		SessionID: p.sessionID,
+		Random:    randomString(16),
+	}
+	testData, _ := json.Marshal(testPacket)
+
+	header := makeRelayHeader(p.sessionID)
+	data := make([]byte, len(header)+len(testData))
+	copy(data, header)
+	copy(data[len(header):], testData)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+			p.localConn.WriteToUDP(data, relayAddr)
+		}
+	}
+}
+
+// sendPortPredictionPackets 向基准端口附近的端口发送打洞包，应对对称型 NAT
+func (p *P2PManager) sendPortPredictionPackets(baseAddr *net.UDPAddr, portRange int, interval time.Duration) {
+	testPacket := &proto.P2PTestPacket{
+		SessionID: p.sessionID,
+		Random:    randomString(16),
+	}
+	data, _ := json.Marshal(testPacket)
+
+	// 生成预测地址列表（排除精确端口，由 sendTestPackets 处理）
+	var addrs []*net.UDPAddr
+	for offset := -portRange; offset <= portRange; offset++ {
+		if offset == 0 {
+			continue
+		}
+		port := baseAddr.Port + offset
+		if port > 0 && port <= 65535 {
+			addrs = append(addrs, &net.UDPAddr{IP: baseAddr.IP, Port: port})
+		}
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+			for _, addr := range addrs {
+				p.localConn.WriteToUDP(data, addr)
+			}
 		}
 	}
 }
@@ -272,7 +354,36 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 	p.connected = true
 	p.connectedMu.Unlock()
 
-	log.Printf("P2P connection established with %v", addr)
+	// 检测是否通过 UDP 中继连接
+	isRelay := p.stunAddr != nil && addr.IP.Equal(p.stunAddr.IP) && addr.Port == p.stunAddr.Port
+
+	if isRelay {
+		log.Printf("P2P connection established via UDP relay through %v", addr)
+	} else {
+		log.Printf("P2P connection established with %v (direct)", addr)
+	}
+
+	// 回发确认包，帮助对方也检测到连接
+	confirmPacket := &proto.P2PTestPacket{
+		SessionID: p.sessionID,
+		Random:    randomString(16),
+	}
+	confirmData, _ := json.Marshal(confirmPacket)
+	if isRelay {
+		header := makeRelayHeader(p.sessionID)
+		wrapped := make([]byte, len(header)+len(confirmData))
+		copy(wrapped, header)
+		copy(wrapped[len(header):], confirmData)
+		for i := 0; i < 5; i++ {
+			p.localConn.WriteToUDP(wrapped, addr)
+			time.Sleep(20 * time.Millisecond)
+		}
+	} else {
+		for i := 0; i < 5; i++ {
+			p.localConn.WriteToUDP(confirmData, addr)
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 
 	// Notify relay that we're switching to P2P
 	if p.relayConn != nil {
@@ -281,12 +392,17 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 		})
 	}
 
-	tunnel := NewUDPTunnel(p.localConn, addr)
+	var tunnel *UDPTunnel
+	if isRelay {
+		tunnel = NewUDPRelayTunnel(p.localConn, addr, p.sessionID)
+	} else {
+		tunnel = NewUDPTunnel(p.localConn, addr)
+	}
 	p.resultCh <- P2PResult{Tunnel: tunnel}
 }
 
 func (p *P2PManager) p2pTimeout() {
-	timeout := 10 * time.Second
+	timeout := 8 * time.Second
 	if p.mode == P2PModeRequired {
 		timeout = 30 * time.Second
 	}

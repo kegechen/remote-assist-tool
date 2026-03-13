@@ -17,6 +17,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	log.Printf("remote-assist %s", version.Info())
+
 	switch os.Args[1] {
 	case "share":
 		runShare(os.Args[2:])

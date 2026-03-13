@@ -5,13 +5,51 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
-// STUNServer is a simple STUN server implementation
+// Relay constants
+const (
+	relayMarker     = 0xFF
+	relaySessionTTL = 5 * time.Minute
+)
+
+// makeRelayHeader creates the binary header for a relay packet
+func makeRelayHeader(sessionID string) []byte {
+	header := make([]byte, 2+len(sessionID))
+	header[0] = relayMarker
+	header[1] = byte(len(sessionID))
+	copy(header[2:], sessionID)
+	return header
+}
+
+// parseRelayHeader parses a relay packet, returns sessionID, payload
+func parseRelayHeader(data []byte) (sessionID string, payload []byte, ok bool) {
+	if len(data) < 2 || data[0] != relayMarker {
+		return "", nil, false
+	}
+	sidLen := int(data[1])
+	if len(data) < 2+sidLen {
+		return "", nil, false
+	}
+	return string(data[2 : 2+sidLen]), data[2+sidLen:], true
+}
+
+// relaySession tracks two peers for UDP relay forwarding
+type relaySession struct {
+	peers    [2]*net.UDPAddr
+	count    int
+	lastSeen time.Time
+}
+
+// STUNServer is a simple STUN server with UDP relay capability
 type STUNServer struct {
 	conn     *net.UDPConn
 	closed   bool
 	closeMu  sync.Mutex
+	// UDP relay sessions (auto-discovered from relay packets)
+	relaySessions   map[string]*relaySession
+	relayMu         sync.Mutex
 }
 
 // NewSTUNServer creates a new STUN server
@@ -27,10 +65,12 @@ func NewSTUNServer(addr string) (*STUNServer, error) {
 	}
 
 	s := &STUNServer{
-		conn: conn,
+		conn:          conn,
+		relaySessions: make(map[string]*relaySession),
 	}
 
 	go s.serve()
+	go s.cleanupRelaySessions()
 	return s, nil
 }
 
@@ -49,7 +89,12 @@ func (s *STUNServer) serve() {
 			continue
 		}
 
-		go s.handlePacket(buf[:n], remoteAddr)
+		// Route: relay packets (0xFF prefix) vs STUN packets
+		if n > 0 && buf[0] == relayMarker {
+			s.handleRelayPacket(buf[:n], remoteAddr)
+		} else {
+			go s.handlePacket(buf[:n], remoteAddr)
+		}
 	}
 }
 
@@ -150,4 +195,89 @@ func (s *STUNServer) Close() {
 // LocalAddr returns the local address the server is listening on
 func (s *STUNServer) LocalAddr() net.Addr {
 	return s.conn.LocalAddr()
+}
+
+// handleRelayPacket handles UDP relay packets (0xFF prefix)
+// Auto-discovers peers: first packet from each peer registers it,
+// subsequent packets are forwarded to the other peer.
+func (s *STUNServer) handleRelayPacket(data []byte, fromAddr *net.UDPAddr) {
+	sessionID, payload, ok := parseRelayHeader(data)
+	if !ok || len(payload) == 0 {
+		return
+	}
+
+	s.relayMu.Lock()
+	session, exists := s.relaySessions[sessionID]
+	if !exists {
+		session = &relaySession{lastSeen: time.Now()}
+		s.relaySessions[sessionID] = session
+	}
+	session.lastSeen = time.Now()
+
+	// Find or register this peer
+	peerIdx := -1
+	for i := 0; i < session.count; i++ {
+		if session.peers[i].IP.Equal(fromAddr.IP) && session.peers[i].Port == fromAddr.Port {
+			peerIdx = i
+			break
+		}
+	}
+	if peerIdx == -1 {
+		if session.count >= 2 {
+			// Try matching by IP only (port may have changed)
+			for i := 0; i < session.count; i++ {
+				if session.peers[i].IP.Equal(fromAddr.IP) {
+					peerIdx = i
+					session.peers[i] = fromAddr // update port
+					break
+				}
+			}
+			if peerIdx == -1 {
+				s.relayMu.Unlock()
+				return // session full, unknown peer
+			}
+		} else {
+			peerIdx = session.count
+			session.peers[peerIdx] = fromAddr
+			session.count++
+			log.Printf("UDP relay: peer %d registered for session %.30s...: %v", peerIdx+1, sessionID, fromAddr)
+		}
+	}
+
+	// Forward to other peer
+	otherIdx := 1 - peerIdx
+	var targetAddr *net.UDPAddr
+	if otherIdx < session.count {
+		targetAddr = session.peers[otherIdx]
+	}
+	s.relayMu.Unlock()
+
+	if targetAddr != nil {
+		s.conn.WriteToUDP(payload, targetAddr)
+	}
+}
+
+// cleanupRelaySessions removes stale relay sessions periodically
+func (s *STUNServer) cleanupRelaySessions() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		s.closeMu.Lock()
+		if s.closed {
+			s.closeMu.Unlock()
+			return
+		}
+		s.closeMu.Unlock()
+
+		<-ticker.C
+
+		s.relayMu.Lock()
+		now := time.Now()
+		for id, session := range s.relaySessions {
+			if now.Sub(session.lastSeen) > relaySessionTTL {
+				delete(s.relaySessions, id)
+			}
+		}
+		s.relayMu.Unlock()
+	}
 }

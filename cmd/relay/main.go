@@ -84,6 +84,8 @@ func main() {
 		log.Fatalf("Failed to create server: %v", err)
 	}
 
+	log.Printf("Relay server version: %s", version.Info())
+
 	if *plain {
 		log.Printf("WARNING: Running in plain mode (INSECURE - for development only)")
 	}

@@ -163,6 +163,9 @@ func (sm *SessionManager) JoinSession(code string, help *ClientConn) (*TunnelSes
 	if session.Help != nil {
 		return nil, ErrSessionHasHelper
 	}
+	if session.Share == nil {
+		return nil, ErrSessionNotFound
+	}
 
 	session.Help = help
 	return session, nil

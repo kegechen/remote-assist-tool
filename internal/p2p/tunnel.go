@@ -41,6 +41,9 @@ type UDPTunnel struct {
 	conn       *net.UDPConn
 	remoteAddr *net.UDPAddr
 
+	// Relay mode: if non-nil, prepend this header to all outbound packets
+	relayHeader []byte
+
 	// Send state
 	sendMutex   sync.Mutex                // protects Write (chunking + seq assignment)
 	nextSendSeq uint32                    // next sequence number to assign
@@ -80,6 +83,37 @@ func NewUDPTunnel(conn *net.UDPConn, remoteAddr *net.UDPAddr) *UDPTunnel {
 	go t.retransmitLoop()
 	go t.keepaliveLoop()
 	return t
+}
+
+// NewUDPRelayTunnel creates a tunnel that routes through a UDP relay server
+func NewUDPRelayTunnel(conn *net.UDPConn, relayAddr *net.UDPAddr, sessionID string) *UDPTunnel {
+	t := &UDPTunnel{
+		conn:         conn,
+		remoteAddr:   relayAddr,
+		relayHeader:  makeRelayHeader(sessionID),
+		lastRecvTime: time.Now(),
+		sendWin:      make(map[uint32]*pendingPacket),
+		recvBuf:      make(map[uint32][]byte),
+		recvCh:       make(chan []byte, recvChanSize),
+		stopCh:       make(chan struct{}),
+	}
+	go t.recvLoop()
+	go t.retransmitLoop()
+	go t.keepaliveLoop()
+	return t
+}
+
+// sendPacket sends a packet, adding relay header if in relay mode
+func (t *UDPTunnel) sendPacket(pkt []byte) error {
+	if t.relayHeader != nil {
+		wrapped := make([]byte, len(t.relayHeader)+len(pkt))
+		copy(wrapped, t.relayHeader)
+		copy(wrapped[len(t.relayHeader):], pkt)
+		_, err := t.conn.WriteToUDP(wrapped, t.remoteAddr)
+		return err
+	}
+	_, err := t.conn.WriteToUDP(pkt, t.remoteAddr)
+	return err
 }
 
 // Read reads in-order data from the tunnel
@@ -150,7 +184,7 @@ func (t *UDPTunnel) Write(b []byte) (int, error) {
 		t.sendWinMu.Unlock()
 
 		// Send packet
-		if _, err := t.conn.WriteToUDP(pkt, t.remoteAddr); err != nil {
+		if err := t.sendPacket(pkt); err != nil {
 			return totalWritten, err
 		}
 
@@ -284,7 +318,7 @@ func (t *UDPTunnel) sendAck(seq uint32) {
 	pkt := make([]byte, 5)
 	pkt[0] = pktTypeAck
 	binary.BigEndian.PutUint32(pkt[1:5], seq)
-	t.conn.WriteToUDP(pkt, t.remoteAddr)
+	t.sendPacket(pkt)
 }
 
 // retransmitLoop periodically checks for unacked packets and retransmits them
@@ -314,7 +348,7 @@ func (t *UDPTunnel) retransmitLoop() {
 				}
 				pkt.retries++
 				pkt.sentAt = now
-				t.conn.WriteToUDP(pkt.data, t.remoteAddr)
+				t.sendPacket(pkt.data)
 			}
 			t.sendWinMu.Unlock()
 		}
@@ -335,7 +369,7 @@ func (t *UDPTunnel) keepaliveLoop() {
 		case <-t.stopCh:
 			return
 		case <-ticker.C:
-			if _, err := t.conn.WriteToUDP(pkt, t.remoteAddr); err != nil {
+			if err := t.sendPacket(pkt); err != nil {
 				log.Printf("Keepalive send failed: %v", err)
 				return
 			}
