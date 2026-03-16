@@ -63,6 +63,7 @@ type P2PManager struct {
 	resultCh     chan P2PResult
 	stopChan     chan struct{}
 	closeOnce    sync.Once
+	sameNetwork  bool // 是否检测到同网络
 }
 
 // RelayConn is the interface for relay fallback communication
@@ -183,11 +184,25 @@ func parseAddr(addrStr string) *net.UDPAddr {
 
 // HandlePeerAddrReady handles peer address ready message
 func (p *P2PManager) HandlePeerAddrReady(msg *proto.PeerAddrReady) {
-	log.Printf("Received peer address: public=%s, private=%s", msg.PeerPublicAddr, msg.PeerPrivateAddr)
+	log.Printf("Received peer address: public=%s, private=%s, same_network=%v", msg.PeerPublicAddr, msg.PeerPrivateAddr, msg.SameNetwork)
 
 	p.peerInfo = &PeerInfo{
 		PublicAddr:  parseAddr(msg.PeerPublicAddr),
 		PrivateAddr: parseAddr(msg.PeerPrivateAddr),
+	}
+
+	p.sameNetwork = msg.SameNetwork
+	// 本地二次确认：本机 IP 和对端私网 IP 在同一 /16
+	if !p.sameNetwork && p.localAddr != nil && p.peerInfo.PrivateAddr != nil {
+		l := p.localAddr.IP.To4()
+		r := p.peerInfo.PrivateAddr.IP.To4()
+		if l != nil && r != nil && l[0] == r[0] && l[1] == r[1] {
+			p.sameNetwork = true
+		}
+	}
+
+	if p.sameNetwork {
+		log.Printf("Same network detected, using LAN fast path")
 	}
 
 	// Start hole punching
@@ -201,6 +216,19 @@ func (p *P2PManager) startHolePunching() {
 	if p.peerInfo == nil {
 		return
 	}
+
+	if p.sameNetwork {
+		// LAN 快速通道：只打私网地址，高频率
+		if p.peerInfo.PrivateAddr != nil {
+			go func() {
+				log.Printf("LAN hole punching private address: %v", p.peerInfo.PrivateAddr)
+				p.sendTestPackets(p.peerInfo.PrivateAddr, 50*time.Millisecond)
+			}()
+		}
+		return // 跳过公网打洞、端口预测、UDP 中继
+	}
+
+	// === 以下为原有逻辑，非 LAN 场景 ===
 
 	// 公网地址：精确端口高频 + 端口预测应对对称型 NAT
 	if p.peerInfo.PublicAddr != nil {

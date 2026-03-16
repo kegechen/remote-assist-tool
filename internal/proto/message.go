@@ -87,7 +87,8 @@ type PeerAddrAdvertise struct {
 type PeerAddrReady struct {
 	PeerPublicAddr  string `json:"peer_public_addr"`
 	PeerPrivateAddr string `json:"peer_private_addr"`
-	IsShare         bool   `json:"is_share"` // true if this is for the share side
+	IsShare         bool   `json:"is_share"`                  // true if this is for the share side
+	SameNetwork     bool   `json:"same_network,omitempty"`    // 两端是否在同一网络
 }
 
 // P2PTestPacket P2P 测试包

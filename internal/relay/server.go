@@ -326,16 +326,17 @@ func (s *Server) handlePeerAddrAdvertise(client *ClientConn, msg *proto.Message)
 
 	update := s.sessions.UpdatePeerAddr(client.ID, advert.PublicAddr, advert.PrivateAddr)
 	if update != nil {
-		s.sendPeerAddrReady(update.Peer, advert.PublicAddr, advert.PrivateAddr, update.IsShareSide)
+		s.sendPeerAddrReady(update.Peer, advert.PublicAddr, advert.PrivateAddr, update.IsShareSide, update.SameNetwork)
 	}
 }
 
 // sendPeerAddrReady 发送对等端地址就绪消息
-func (s *Server) sendPeerAddrReady(client *ClientConn, publicAddr, privateAddr string, isShare bool) {
+func (s *Server) sendPeerAddrReady(client *ClientConn, publicAddr, privateAddr string, isShare bool, sameNetwork bool) {
 	ready := &proto.PeerAddrReady{
 		PeerPublicAddr:  publicAddr,
 		PeerPrivateAddr: privateAddr,
 		IsShare:         isShare,
+		SameNetwork:     sameNetwork,
 	}
 	msg, _ := proto.NewMessage(proto.MsgPeerAddrReady, ready)
 	sendMsg(client, msg)

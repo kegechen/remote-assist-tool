@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"sync"
 	"time"
 )
@@ -285,6 +286,7 @@ func generateSessionID() string {
 type PeerAddrUpdate struct {
 	Peer        *ClientConn
 	IsShareSide bool
+	SameNetwork bool // 两端是否在同一网络
 }
 
 // UpdatePeerAddr updates a client's peer addresses and returns the paired client info
@@ -297,7 +299,11 @@ func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAdd
 			session.SharePublicAddr = publicAddr
 			session.SharePrivateAddr = privateAddr
 			if session.Help != nil {
-				return &PeerAddrUpdate{Peer: session.Help, IsShareSide: true}
+				sameNet := detectSameNetwork(
+					session.Share.Conn.RemoteAddr(), session.Help.Conn.RemoteAddr(),
+					session.SharePrivateAddr, session.HelpPrivateAddr,
+				)
+				return &PeerAddrUpdate{Peer: session.Help, IsShareSide: true, SameNetwork: sameNet}
 			}
 			return nil
 		}
@@ -305,12 +311,43 @@ func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAdd
 			session.HelpPublicAddr = publicAddr
 			session.HelpPrivateAddr = privateAddr
 			if session.Share != nil {
-				return &PeerAddrUpdate{Peer: session.Share, IsShareSide: false}
+				sameNet := detectSameNetwork(
+					session.Share.Conn.RemoteAddr(), session.Help.Conn.RemoteAddr(),
+					session.SharePrivateAddr, session.HelpPrivateAddr,
+				)
+				return &PeerAddrUpdate{Peer: session.Share, IsShareSide: false, SameNetwork: sameNet}
 			}
 			return nil
 		}
 	}
 	return nil
+}
+
+// detectSameNetwork 检测两端是否在同一网络
+func detectSameNetwork(shareRemote, helpRemote string, sharePrivate, helpPrivate string) bool {
+	// Check 1: 同一公网 IP（同一 NAT 出口）
+	shareHost, _, _ := net.SplitHostPort(shareRemote)
+	helpHost, _, _ := net.SplitHostPort(helpRemote)
+	if shareHost != "" && shareHost == helpHost {
+		log.Printf("Same network detected: same public IP %s", shareHost)
+		return true
+	}
+	// Check 2: 私网 IP 同一 /16 子网
+	if sharePrivate != "" && helpPrivate != "" {
+		sIP, _, _ := net.SplitHostPort(sharePrivate)
+		hIP, _, _ := net.SplitHostPort(helpPrivate)
+		sNetIP := net.ParseIP(sIP)
+		hNetIP := net.ParseIP(hIP)
+		if sNetIP != nil && hNetIP != nil {
+			s4 := sNetIP.To4()
+			h4 := hNetIP.To4()
+			if s4 != nil && h4 != nil && s4[0] == h4[0] && s4[1] == h4[1] {
+				log.Printf("Same network detected: private IPs %s and %s in same /16 subnet", sIP, hIP)
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FindPeer finds the paired client for a given client ID
