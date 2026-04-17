@@ -169,7 +169,7 @@ func (s *ShareMode) waitSessionReady() (string, error) {
 
 // negotiateP2P 尝试 P2P 直连协商
 func (s *ShareMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTunnel, error) {
-	mgr := p2p.NewP2PManager(mode, s.client.config.STUNServer)
+	mgr := p2p.NewP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
 	mgr.SetRelayConn(s.client)
 
 	resultCh, err := mgr.Start(sessionID, true)

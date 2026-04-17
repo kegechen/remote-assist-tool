@@ -90,7 +90,7 @@ func (h *HelpMode) Run() error {
 
 // negotiateP2P 尝试 P2P 直连协商
 func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTunnel, error) {
-	mgr := p2p.NewP2PManager(mode, h.client.config.STUNServer)
+	mgr := p2p.NewP2PManager(mode, h.client.config.STUNServer, h.client.config.BindIP)
 	mgr.SetRelayConn(h.client)
 
 	resultCh, err := mgr.Start(sessionID, false)

@@ -22,6 +22,7 @@ type Config struct {
 	UseTLS       bool
 	P2PMode      string // "disabled", "auto", "required"
 	STUNServer   string // STUN server address for P2P
+	BindIP       string // 手动指定绑定 IP，为空则自动检测
 }
 
 // Client 基础客户端

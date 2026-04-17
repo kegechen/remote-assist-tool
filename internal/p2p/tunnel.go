@@ -1,6 +1,8 @@
 package p2p
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -27,7 +29,83 @@ const (
 	retransmitInterval = 50 * time.Millisecond  // How often to check for retransmits
 	peerTimeout        = 60 * time.Second        // Close tunnel if no packet from peer for this long
 	readDeadline       = 30 * time.Second        // UDP read deadline (shorter than peerTimeout for responsive detection)
+
+	// 压缩相关
+	compressThreshold = 128  // 小于此大小不压缩
+	compressFlag      = 0x01 // payload 首字节标记：已压缩
+	rawFlag           = 0x00 // payload 首字节标记：未压缩
 )
+
+var (
+	flateWriterPool = sync.Pool{
+		New: func() interface{} {
+			w, _ := flate.NewWriter(nil, flate.DefaultCompression)
+			return w
+		},
+	}
+	bufPool = sync.Pool{
+		New: func() interface{} {
+			return new(bytes.Buffer)
+		},
+	}
+)
+
+// compressData 压缩数据，小包或压缩膨胀时返回带 rawFlag 前缀的原始数据
+func compressData(data []byte) []byte {
+	if len(data) < compressThreshold {
+		out := make([]byte, 1+len(data))
+		out[0] = rawFlag
+		copy(out[1:], data)
+		return out
+	}
+
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.WriteByte(compressFlag)
+
+	w := flateWriterPool.Get().(*flate.Writer)
+	w.Reset(buf)
+	w.Write(data)
+	w.Close()
+	flateWriterPool.Put(w)
+
+	// 如果压缩后反而更大，返回原始数据
+	if buf.Len() >= 1+len(data) {
+		bufPool.Put(buf)
+		out := make([]byte, 1+len(data))
+		out[0] = rawFlag
+		copy(out[1:], data)
+		return out
+	}
+
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	bufPool.Put(buf)
+	return out
+}
+
+// decompressData 根据首字节标记决定是否解压
+func decompressData(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty payload")
+	}
+	if data[0] == rawFlag {
+		out := make([]byte, len(data)-1)
+		copy(out, data[1:])
+		return out, nil
+	}
+	if data[0] == compressFlag {
+		r := flate.NewReader(bytes.NewReader(data[1:]))
+		defer r.Close()
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			return nil, fmt.Errorf("decompress: %w", err)
+		}
+		return buf.Bytes(), nil
+	}
+	// 兼容：未知标记视为原始数据（不应发生）
+	return data, nil
+}
 
 // pendingPacket tracks an unacknowledged sent packet
 type pendingPacket struct {
@@ -162,18 +240,21 @@ func (t *UDPTunnel) Write(b []byte) (int, error) {
 
 	totalWritten := 0
 	for totalWritten < len(b) {
+		// 预留 1 字节给压缩标记
 		chunkSize := len(b) - totalWritten
-		if chunkSize > maxPacketSize-5 {
-			chunkSize = maxPacketSize - 5
+		if chunkSize > maxPacketSize-6 {
+			chunkSize = maxPacketSize - 6
 		}
+
+		chunk := compressData(b[totalWritten : totalWritten+chunkSize])
 
 		seq := t.nextSendSeq
 		t.nextSendSeq++
 
-		pkt := make([]byte, 5+chunkSize)
+		pkt := make([]byte, 5+len(chunk))
 		pkt[0] = pktTypeData
 		binary.BigEndian.PutUint32(pkt[1:5], seq)
-		copy(pkt[5:], b[totalWritten:totalWritten+chunkSize])
+		copy(pkt[5:], chunk)
 
 		// Track for retransmission
 		t.sendWinMu.Lock()
@@ -273,8 +354,12 @@ func (t *UDPTunnel) recvLoop() {
 				continue
 			}
 
-			payload := make([]byte, dataLen)
-			copy(payload, buf[5:n])
+			// 解压缩 payload
+			payload, err := decompressData(buf[5:n])
+			if err != nil {
+				log.Printf("P2P: decompress error seq=%d: %v", seq, err)
+				continue
+			}
 
 			t.recvMu.Lock()
 			if seq == t.nextRecvSeq {

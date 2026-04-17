@@ -43,6 +43,7 @@ func runShare(args []string) {
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
+	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Share mode - allow others to assist you\n\n")
@@ -69,6 +70,7 @@ func runShare(args []string) {
 		UseTLS:       !*plain,
 		P2PMode:      *p2pMode,
 		STUNServer:   *stunServer,
+		BindIP:       *bindIP,
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr)
@@ -90,6 +92,7 @@ func runHelp(args []string) {
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
+	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Help mode - assist someone else\n\n")
@@ -122,6 +125,7 @@ func runHelp(args []string) {
 		UseTLS:       !*plain,
 		P2PMode:      *p2pMode,
 		STUNServer:   *stunServer,
+		BindIP:       *bindIP,
 	}
 
 	help := client.NewHelpMode(cfg, *code, *listenAddr)
