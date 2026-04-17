@@ -79,8 +79,9 @@ type ErrorMessage struct {
 
 // PeerAddrAdvertise 对等端地址通告（发送给服务器）
 type PeerAddrAdvertise struct {
-	PublicAddr  string `json:"public_addr"`  // "ip:port"
-	PrivateAddr string `json:"private_addr"` // "ip:port"
+	PublicAddr  string `json:"public_addr"`            // "ip:port"
+	PrivateAddr string `json:"private_addr"`           // "ip:port"
+	NATType     string `json:"nat_type,omitempty"`     // NAT 类型: "open", "cone", "symmetric"
 }
 
 // PeerAddrReady 对等端地址就绪（服务器转发给对方）
@@ -89,6 +90,7 @@ type PeerAddrReady struct {
 	PeerPrivateAddr string `json:"peer_private_addr"`
 	IsShare         bool   `json:"is_share"`                  // true if this is for the share side
 	SameNetwork     bool   `json:"same_network,omitempty"`    // 两端是否在同一网络
+	PeerNATType     string `json:"peer_nat_type,omitempty"`   // 对端 NAT 类型
 }
 
 // P2PTestPacket P2P 测试包

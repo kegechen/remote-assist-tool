@@ -205,6 +205,51 @@ func parseMappedAddress(data []byte, magic uint32, tid [12]byte, xor bool) (*Map
 	return addr, nil
 }
 
+// StunQueryPort sends a STUN binding request to the given server via conn
+// and returns the mapped port. Used by NAT type detection.
+func StunQueryPort(conn *net.UDPConn, stunServer string) (int, error) {
+	serverAddr, err := net.ResolveUDPAddr("udp", stunServer)
+	if err != nil {
+		return 0, fmt.Errorf("resolve STUN server: %w", err)
+	}
+
+	req := NewBindingRequest()
+	reqBytes := req.Pack()
+
+	_, err = conn.WriteToUDP(reqBytes, serverAddr)
+	if err != nil {
+		return 0, fmt.Errorf("send STUN request: %w", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 1500)
+	n, _, err := conn.ReadFromUDP(buf)
+	conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return 0, ErrSTUNTimeout
+	}
+
+	resp, err := UnpackSTUN(buf[:n])
+	if err != nil {
+		return 0, fmt.Errorf("parse STUN response: %w", err)
+	}
+
+	if resp.Type != STUNBindingResponse {
+		return 0, errors.New("not a binding response")
+	}
+
+	if resp.TID != req.TID {
+		return 0, errors.New("STUN response TID mismatch")
+	}
+
+	mappedAddr, err := resp.GetMappedAddress()
+	if err != nil {
+		return 0, fmt.Errorf("get mapped address: %w", err)
+	}
+
+	return int(mappedAddr.Port), nil
+}
+
 // AddSoftwareAttribute adds a software attribute to the message
 func (m *STUNMessage) AddSoftwareAttribute(name string) {
 	m.Attrs = append(m.Attrs, STUNAttribute{

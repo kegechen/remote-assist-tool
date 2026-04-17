@@ -322,21 +322,22 @@ func (s *Server) handlePeerAddrAdvertise(client *ClientConn, msg *proto.Message)
 		}
 	}
 
-	log.Printf("Received peer address from %s: public=%s, private=%s", client.ID, advert.PublicAddr, advert.PrivateAddr)
+	log.Printf("Received peer address from %s: public=%s, private=%s, nat=%s", client.ID, advert.PublicAddr, advert.PrivateAddr, advert.NATType)
 
-	update := s.sessions.UpdatePeerAddr(client.ID, advert.PublicAddr, advert.PrivateAddr)
+	update := s.sessions.UpdatePeerAddr(client.ID, advert.PublicAddr, advert.PrivateAddr, advert.NATType)
 	if update != nil {
-		s.sendPeerAddrReady(update.Peer, advert.PublicAddr, advert.PrivateAddr, update.IsShareSide, update.SameNetwork)
+		s.sendPeerAddrReady(update.Peer, advert.PublicAddr, advert.PrivateAddr, update.IsShareSide, update.SameNetwork, update.NATType)
 	}
 }
 
 // sendPeerAddrReady 发送对等端地址就绪消息
-func (s *Server) sendPeerAddrReady(client *ClientConn, publicAddr, privateAddr string, isShare bool, sameNetwork bool) {
+func (s *Server) sendPeerAddrReady(client *ClientConn, publicAddr, privateAddr string, isShare bool, sameNetwork bool, peerNATType string) {
 	ready := &proto.PeerAddrReady{
 		PeerPublicAddr:  publicAddr,
 		PeerPrivateAddr: privateAddr,
 		IsShare:         isShare,
 		SameNetwork:     sameNetwork,
+		PeerNATType:     peerNATType,
 	}
 	msg, _ := proto.NewMessage(proto.MsgPeerAddrReady, ready)
 	sendMsg(client, msg)

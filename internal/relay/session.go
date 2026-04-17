@@ -45,11 +45,17 @@ type TunnelSession struct {
 	ClientID         string // 持久化客户端ID
 	SharePublicAddr  string // Share 端公网地址
 	SharePrivateAddr string // Share 端内网地址
+	ShareNATType     string // Share 端 NAT 类型
 	HelpPublicAddr   string // Help 端公网地址
 	HelpPrivateAddr  string // Help 端内网地址
+	HelpNATType      string // Help 端 NAT 类型
 	P2PEnabled       bool   // 是否启用 P2P
 	closed           bool
 	mu               sync.Mutex
+
+	// Help 断连去抖
+	helpDisconnectTimer *time.Timer // Help 断连延迟计时器
+	pendingHelpID       string      // 待断连的 Help ID
 }
 
 // SessionManager 会话管理器
@@ -161,11 +167,20 @@ func (sm *SessionManager) JoinSession(code string, help *ClientConn) (*TunnelSes
 	if session.closed {
 		return nil, ErrSessionNotFound
 	}
-	if session.Help != nil {
+	// 如果当前 Help 正在 pending 断连中，允许新 Help 替换
+	if session.Help != nil && session.pendingHelpID == "" {
 		return nil, ErrSessionHasHelper
 	}
 	if session.Share == nil {
 		return nil, ErrSessionNotFound
+	}
+
+	// 取消挂起的断连计时器
+	if session.helpDisconnectTimer != nil {
+		session.helpDisconnectTimer.Stop()
+		session.helpDisconnectTimer = nil
+		session.pendingHelpID = ""
+		log.Printf("Help disconnect debounce cancelled for session %s (new help joined)", session.ID)
 	}
 
 	session.Help = help
@@ -220,8 +235,18 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 
 	for _, session := range sm.sessions {
 		if session.Help != nil && session.Help.ID == clientID {
-			session.Help = nil
-			log.Printf("Cleared helper from session %s", session.ID)
+			// Help 断连去抖：延迟 5 秒再清除，防止网络抖动导致不必要的重连
+			session.pendingHelpID = clientID
+			session.helpDisconnectTimer = time.AfterFunc(5*time.Second, func() {
+				sm.mu.Lock()
+				defer sm.mu.Unlock()
+				if session.Help != nil && session.Help.ID == session.pendingHelpID {
+					session.Help = nil
+					session.pendingHelpID = ""
+					log.Printf("Cleared helper from session %s (after debounce)", session.ID)
+				}
+			})
+			log.Printf("Help disconnect debounce started for session %s (5s)", session.ID)
 			return nil
 		}
 		if session.Share != nil && session.Share.ID == clientID {
@@ -286,11 +311,12 @@ func generateSessionID() string {
 type PeerAddrUpdate struct {
 	Peer        *ClientConn
 	IsShareSide bool
-	SameNetwork bool // 两端是否在同一网络
+	SameNetwork bool   // 两端是否在同一网络
+	NATType     string // 本端 NAT 类型（透传给对端）
 }
 
 // UpdatePeerAddr updates a client's peer addresses and returns the paired client info
-func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAddr string) *PeerAddrUpdate {
+func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAddr, natType string) *PeerAddrUpdate {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -298,24 +324,26 @@ func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAdd
 		if session.Share != nil && session.Share.ID == clientID {
 			session.SharePublicAddr = publicAddr
 			session.SharePrivateAddr = privateAddr
+			session.ShareNATType = natType
 			if session.Help != nil {
 				sameNet := detectSameNetwork(
 					session.Share.Conn.RemoteAddr(), session.Help.Conn.RemoteAddr(),
 					session.SharePrivateAddr, session.HelpPrivateAddr,
 				)
-				return &PeerAddrUpdate{Peer: session.Help, IsShareSide: true, SameNetwork: sameNet}
+				return &PeerAddrUpdate{Peer: session.Help, IsShareSide: true, SameNetwork: sameNet, NATType: natType}
 			}
 			return nil
 		}
 		if session.Help != nil && session.Help.ID == clientID {
 			session.HelpPublicAddr = publicAddr
 			session.HelpPrivateAddr = privateAddr
+			session.HelpNATType = natType
 			if session.Share != nil {
 				sameNet := detectSameNetwork(
 					session.Share.Conn.RemoteAddr(), session.Help.Conn.RemoteAddr(),
 					session.SharePrivateAddr, session.HelpPrivateAddr,
 				)
-				return &PeerAddrUpdate{Peer: session.Share, IsShareSide: false, SameNetwork: sameNet}
+				return &PeerAddrUpdate{Peer: session.Share, IsShareSide: false, SameNetwork: sameNet, NATType: natType}
 			}
 			return nil
 		}
