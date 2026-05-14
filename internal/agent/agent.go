@@ -134,6 +134,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		req.ArgsJSON = plain
 	}
 	ctx, cancel := context.WithCancel(parent)
+	defer cancel() // 防止 ctx goroutine 泄漏
 	d.cancels.Store(req.ID, context.CancelFunc(cancel))
 	defer d.cancels.Delete(req.ID)
 	defer func() {
