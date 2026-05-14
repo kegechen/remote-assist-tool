@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -11,10 +12,18 @@ import (
 	"github.com/remote-assist/tool/internal/proto"
 )
 
-// callToolHardTimeout 是 Bridge.CallTool 的硬超时上限。
-// 防御性兜底：即便心跳保活失败、relay TCP 真死，单次工具调用最多挂 60s
-// 就返 tunnel_lost 错误，MCP server 仍存活可接受新调用（含重新 connect）。
-const callToolHardTimeout = 60 * time.Second
+// callToolFallbackTimeout 是 Bridge.CallTool 的兜底 deadline，仅在调用方没在 ctx
+// 上显式设过 deadline 时生效。
+//
+// 设计意图：
+//   - 调用方（MCP server / 测试代码）若已通过 ctx.WithDeadline 表达了"我愿意等多久"，
+//     就尊重调用方意图；这样长跑工具（exec 默认 5 分钟、grep 大仓库等）只要 ctx
+//     deadline 够长就不会被 bridge 多事切掉。
+//   - 调用方没设 deadline → 加一个保守的 10 分钟兜底，防止单条 ToolResp 永远不来
+//     导致 MCP server 整个挂死，又不至于把合理长跑工具误杀。
+//
+// 上一版用 time.After(60s) 硬切：太短，60s 内跑不完的工具被误杀（回归 bug）。
+const callToolFallbackTimeout = 10 * time.Minute
 
 // MsgConn help 端发给 share 端的对外契约（client.Client 已经实现 SendMessage）
 type MsgConn interface {
@@ -31,12 +40,20 @@ type Bridge struct {
 
 func NewBridge(c MsgConn, key [32]byte) *Bridge { return &Bridge{conn: c, key: key} }
 
-// CallTool 发 ToolReq，阻塞等 ToolResp（或 ctx 取消）
+// CallTool 发 ToolReq，阻塞等 ToolResp 或 ctx 完成。
+// ctx 没设 deadline 时自动加 callToolFallbackTimeout（10 分钟）兜底。
 func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	id := atomic.AddUint64(&b.nextID, 1)
 	ch := make(chan proto.ToolResp, 1)
 	b.pending.Store(id, ch)
 	defer b.pending.Delete(id)
+
+	// 调用方没设 deadline 才加兜底；尊重调用方显式 deadline。
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, callToolFallbackTimeout)
+		defer cancel()
+	}
 
 	encArgs := args
 	if b.key != [32]byte{} && len(args) > 0 {
@@ -51,11 +68,16 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 	}
 	select {
 	case <-ctx.Done():
-		b.conn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: "ctx_cancelled"})
+		// 区分 deadline 到期（疑似 tunnel 死）与上层主动取消（用户中断）。
+		reason := "ctx_cancelled"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			reason = "deadline_exceeded"
+		}
+		b.conn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: reason})
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("tunnel_lost: no response within deadline")
+		}
 		return nil, ctx.Err()
-	case <-time.After(callToolHardTimeout):
-		b.conn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: "hard_timeout"})
-		return nil, fmt.Errorf("tunnel_lost: no response in %s", callToolHardTimeout)
 	case resp := <-ch:
 		if !resp.OK {
 			return nil, fmt.Errorf("%s: %s", resp.ErrorCode, resp.ErrorMsg)
