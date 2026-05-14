@@ -142,3 +142,57 @@ ssh -p 2222 user@127.0.0.1
 3. **专注单一功能** - 只做远程协助，不复杂
 4. **完全自托管** - 所有数据自己控制
 5. **计划支持 P2P** - 未来可以直连不耗服务器流量
+
+## Claude Code 远程调试（新）
+
+让本地 Claude Code 直接调试远端机器，无需在远端开 openssh-server。
+工具通道（9 个 MCP 工具）与原 SSH 模式并存，向后兼容。
+
+### 远端启动 share（带沙箱）
+
+```bash
+remote share --server relay.example.com:8443 --root /path/to/project --insecure
+```
+
+控制台显示协助码（如 `ABCD-EFGHIJ`）与沙箱配置摘要。
+
+### 本地配置 Claude Code
+
+项目根目录或 `~/.claude/mcp.json` 加入：
+
+```jsonc
+{
+  "mcpServers": {
+    "remote-debug": {
+      "command": "remote",
+      "args": [
+        "help", "--server", "relay.example.com:8443",
+        "--code", "ABCD-EFGHIJ",
+        "--mcp-stdio", "--insecure"
+      ]
+    }
+  }
+}
+```
+
+启动 Claude Code，`/mcp` 应看到 `remote-debug` 服务下的 9 个工具。
+
+### 工具一览
+
+- `exec` —— 远端运行 argv（不过 shell）
+- `read_file` / `write_file` —— 受 `--root` 沙箱
+- `list_dir` / `stat` / `glob` / `grep` —— 远端文件系统探索
+- `process_list` —— 远端进程
+- `tail_log` —— 日志尾随（支持 follow）
+
+### 沙箱与安全
+
+- `--root <dir>` 是文件操作沙箱根；未设置时默认 CWD。
+- `--allow-exec a,b,c` / `--deny-exec rm,shutdown,...` 控制可执行命令。默认 deny: `rm,shutdown,reboot,mkfs,dd`。
+- `--elevate`（仅 Windows）：启动时通过 UAC 请求管理员权限。
+- `--unsafe-full-system`：**关闭所有沙箱**，启动时强制 5 秒红色确认倒计时。
+- 工具调用流量以协助码派生的 session_key 做 XChaCha20-Poly1305 AEAD 加密，relay 看不见也不能伪造。
+
+### 旧 SSH 模式
+
+`remote help --legacy-ssh`（或不带 `--mcp-stdio`）即为原 SSH 隧道行为，向后兼容。
