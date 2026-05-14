@@ -72,3 +72,102 @@ func classifyError(err error) (code, msg string) {
 		return "internal_error", s
 	}
 }
+
+// MsgConn agent 与 share Client 之间的最小依赖契约（便于单测注入）
+type MsgConn interface {
+	SendMessage(t proto.MessageType, payload interface{}) error
+	// agent 不主动 read；share 端 dispatch 把收到的 Tool 消息通过 Inject 投递
+}
+
+// Daemon share 端工具消息分发器；持有 Registry + outbound conn
+type Daemon struct {
+	reg     *Registry
+	conn    MsgConn
+	key     [32]byte
+	inbound chan *proto.Message
+	cancels sync.Map // id -> context.CancelFunc
+}
+
+func NewDaemon(reg *Registry, conn MsgConn, key [32]byte) *Daemon {
+	return &Daemon{reg: reg, conn: conn, key: key, inbound: make(chan *proto.Message, 64)}
+}
+
+// Inject share 端 dispatch 收到 MsgToolReq/MsgToolCancel 时调用
+func (d *Daemon) Inject(msg *proto.Message) { d.inbound <- msg }
+
+// RunLoop 直到 ctx 完成
+func (d *Daemon) RunLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-d.inbound:
+			switch msg.Type {
+			case proto.MsgToolReq:
+				go d.handleReq(ctx, msg)
+			case proto.MsgToolCancel:
+				var c proto.Cancel
+				proto.DecodePayload(msg, &c)
+				if v, ok := d.cancels.Load(c.ID); ok {
+					v.(context.CancelFunc)()
+				}
+			}
+		}
+	}
+}
+
+func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
+	var req proto.ToolReq
+	if err := proto.DecodePayload(msg, &req); err != nil {
+		return
+	}
+	// 解密 args（key 非零时才解密）
+	if d.key != [32]byte{} && len(req.ArgsJSON) > 0 {
+		plain, err := proto.AEADOpen(&d.key, req.ArgsJSON)
+		if err != nil {
+			d.conn.SendMessage(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
+			return
+		}
+		req.ArgsJSON = plain
+	}
+	ctx, cancel := context.WithCancel(parent)
+	d.cancels.Store(req.ID, context.CancelFunc(cancel))
+	defer d.cancels.Delete(req.ID)
+	defer func() {
+		if r := recover(); r != nil {
+			d.conn.SendMessage(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
+		}
+	}()
+	sink := &chunkSink{daemon: d, id: req.ID}
+	resp := d.reg.Dispatch(ctx, &req, sink)
+	// 加密 result
+	if d.key != [32]byte{} && len(resp.ResultJSON) > 0 {
+		if ct, err := proto.AEADSeal(&d.key, resp.ResultJSON); err == nil {
+			resp.ResultJSON = ct
+		}
+	}
+	d.conn.SendMessage(proto.MsgToolResp, &resp)
+}
+
+type chunkSink struct {
+	daemon *Daemon
+	id     uint64
+	seq    uint32
+	mu     sync.Mutex
+}
+
+func (s *chunkSink) Send(stream string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	payload := data
+	if s.daemon.key != [32]byte{} {
+		ct, err := proto.AEADSeal(&s.daemon.key, data)
+		if err != nil {
+			return err
+		}
+		payload = ct
+	}
+	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: payload}
+	s.seq++
+	return s.daemon.conn.SendMessage(proto.MsgToolStream, &c)
+}
