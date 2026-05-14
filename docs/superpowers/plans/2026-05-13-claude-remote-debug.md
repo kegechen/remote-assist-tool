@@ -18,7 +18,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `internal/proto/tool.go` | 4 个新 MessageType 常量 + ToolReq/ToolResp/StreamChunk/Cancel/Hello/HelloAck struct |
+| `internal/proto/tool.go` | 6 个新 MessageType 常量 + ToolReq/ToolResp/StreamChunk/Cancel/Hello/HelloAck struct |
 | `internal/proto/aead.go` | XChaCha20-Poly1305 包装：Seal/Open helpers |
 | `internal/proto/handshake.go` | HKDF 派生 session_key + 握手状态机 |
 | `internal/agent/agent.go` | Tool 接口 + Registry + Dispatcher（接收 ToolReq、调用具体 tool、回 ToolResp/StreamChunk） |
