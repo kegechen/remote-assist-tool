@@ -27,13 +27,13 @@ func TestInitializeHandshake(t *testing.T) {
 	}
 }
 
-func TestToolsListReturnsNineTools(t *testing.T) {
+func TestToolsListReturnsTenTools(t *testing.T) {
 	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n")
 	var out bytes.Buffer
 	srv := NewServer(nil)
 	srv.Serve(context.Background(), in, &out)
-	if !strings.Contains(out.String(), `"exec"`) || !strings.Contains(out.String(), `"tail_log"`) {
+	if !strings.Contains(out.String(), `"connect"`) || !strings.Contains(out.String(), `"tail_log"`) {
 		t.Fatalf("missing tools: %s", out.String())
 	}
 }
