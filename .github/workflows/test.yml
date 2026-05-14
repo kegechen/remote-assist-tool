@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+    branches: [master, main, "feat/**"]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build binaries (for e2e)
+        shell: bash
+        run: |
+          mkdir -p bin
+          go build -o bin/relay ./cmd/relay
+          go build -o bin/remote ./cmd/remote
+      - name: Run all tests
+        shell: bash
+        run: go test ./... -timeout 120s

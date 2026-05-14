@@ -21,6 +21,13 @@ const (
 	MsgPeerAddrReady     MessageType = "peer_addr_ready"
 	MsgP2PTestPacket     MessageType = "p2p_test_packet"
 	MsgP2PConnected      MessageType = "p2p_connected"
+	// Claude Code 工具通道
+	MsgToolHello    MessageType = "tool_hello"
+	MsgToolHelloAck MessageType = "tool_hello_ack"
+	MsgToolReq      MessageType = "tool_req"
+	MsgToolResp     MessageType = "tool_resp"
+	MsgToolStream   MessageType = "tool_stream"
+	MsgToolCancel   MessageType = "tool_cancel"
 )
 
 // Message 协议消息

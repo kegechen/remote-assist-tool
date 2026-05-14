@@ -1,10 +1,12 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ type HelpMode struct {
 	client     *Client
 	code       string
 	listenAddr string
+	mcpStdio   bool
 }
 
 // NewHelpMode 创建协助模式
@@ -27,6 +30,15 @@ func NewHelpMode(cfg *Config, code, listenAddr string) *HelpMode {
 		client:     NewClient(cfg),
 		code:       normalizeCode(code),
 		listenAddr: listenAddr,
+	}
+}
+
+// NewHelpModeMCP 创建 MCP stdio 模式的协助模式（无 SSH 监听）
+func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
+	return &HelpMode{
+		client:   NewClient(cfg),
+		code:     normalizeCode(code),
+		mcpStdio: true,
 	}
 }
 
@@ -56,12 +68,27 @@ func (h *HelpMode) Run() error {
 			return fmt.Errorf("failed to join: %s", resp.Error)
 		}
 
-		fmt.Println("已连接到被协助端！")
-		if resp.PeerVersion != "" {
-			fmt.Printf("对端版本: %s\n", resp.PeerVersion)
+		// mcp-stdio 模式下所有 user-facing 输出走 stderr，避免污染 MCP JSON-RPC 帧流
+		out := os.Stdout
+		if h.mcpStdio {
+			out = os.Stderr
 		}
-		fmt.Printf("会话ID: %s\n", resp.SessionID)
-		fmt.Printf("本地监听: %s\n", h.listenAddr)
+		println := func(args ...any) { fmt.Fprintln(out, args...) }
+		printf := func(f string, args ...any) { fmt.Fprintf(out, f, args...) }
+
+		println("已连接到被协助端！")
+		if resp.PeerVersion != "" {
+			printf("对端版本: %s\n", resp.PeerVersion)
+		}
+		printf("会话ID: %s\n", resp.SessionID)
+
+		// MCP stdio 模式：跳过 SSH 监听，直接运行工具通道
+		if h.mcpStdio {
+			fmt.Fprintln(os.Stderr, "MCP stdio 模式：跳过 SSH 监听")
+			return h.RunMCPMode(context.Background())
+		}
+
+		printf("本地监听: %s\n", h.listenAddr)
 
 		// 尝试 P2P 直连
 		p2pMode := p2p.ParseP2PMode(h.client.config.P2PMode)
@@ -74,14 +101,14 @@ func (h *HelpMode) Run() error {
 				log.Printf("P2P negotiation failed, falling back to relay: %v", err)
 			}
 			if tunnel != nil {
-				fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
+				printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 				return h.handleTunnelP2P(tunnel)
 			}
 		}
 
 		// relay 模式
 		h.client.ResetDecoder() // P2P 协商超时会导致 json.Decoder 缓存错误
-		fmt.Printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
+		printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 		return h.handleTunnel()
 	}
 
