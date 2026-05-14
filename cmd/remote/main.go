@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -168,8 +169,8 @@ func runHelp(args []string) {
 	}
 	fs.Parse(args)
 
-	if *code == "" {
-		fmt.Fprintf(os.Stderr, "Error: --code is required\n\n")
+	if *code == "" && !*mcpStdio {
+		fmt.Fprintf(os.Stderr, "Error: --code is required (or use --mcp-stdio for bootstrap mode where the code is supplied via Claude's connect tool)\n\n")
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -198,9 +199,16 @@ func runHelp(args []string) {
 	}
 
 	if *mcpStdio {
-		help := client.NewHelpModeMCP(cfg, *code)
-		if err := help.Run(); err != nil {
-			log.Fatalf("Error: %v", err)
+		if *code == "" {
+			boot := client.NewHelpMCPBootstrap(cfg)
+			if err := boot.Run(context.Background()); err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+		} else {
+			help := client.NewHelpModeMCP(cfg, *code)
+			if err := help.Run(); err != nil {
+				log.Fatalf("Error: %v", err)
+			}
 		}
 	} else {
 		help := client.NewHelpMode(cfg, *code, *listenAddr)
