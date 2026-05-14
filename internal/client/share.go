@@ -504,6 +504,7 @@ func (s *ShareMode) startDaemonOnce(key [32]byte) {
 		reg.Register(tools.NewProcessList())
 		reg.Register(tools.NewTailLog(sb))
 		d := agent.NewDaemon(reg, s.client, key)
+		d.OnActivity = func(line string) { fmt.Println(line) }
 		s.daemon = d
 		go d.RunLoop(context.Background())
 	})

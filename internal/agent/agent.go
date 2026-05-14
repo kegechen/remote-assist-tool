@@ -83,11 +83,12 @@ type MsgConn interface {
 
 // Daemon share 端工具消息分发器；持有 Registry + outbound conn
 type Daemon struct {
-	reg     *Registry
-	conn    MsgConn
-	key     [32]byte
-	inbound chan *proto.Message
-	cancels sync.Map // id -> context.CancelFunc
+	reg        *Registry
+	conn       MsgConn
+	key        [32]byte
+	inbound    chan *proto.Message
+	cancels    sync.Map // id -> context.CancelFunc
+	OnActivity func(line string) // 可选钩子，每条工具调用完成时触发
 }
 
 func NewDaemon(reg *Registry, conn MsgConn, key [32]byte) *Daemon {
@@ -157,6 +158,10 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	dur := time.Since(start).Milliseconds()
 	argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
 	log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
+	if d.OnActivity != nil {
+		d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
+			time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
+	}
 	d.conn.SendMessage(proto.MsgToolResp, &resp)
 }
 
