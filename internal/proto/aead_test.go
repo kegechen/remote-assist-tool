@@ -3,6 +3,7 @@ package proto
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"testing"
 )
 
@@ -40,5 +41,45 @@ func TestAEADOpenRejectsWrongKey(t *testing.T) {
 	ct, _ := AEADSeal(&k1, []byte("hello"))
 	if _, err := AEADOpen(&k2, ct); err == nil {
 		t.Fatal("expected open to fail under wrong key")
+	}
+}
+
+func TestAEADSealOpenJSONRoundtrip(t *testing.T) {
+	var key [32]byte
+	rand.Read(key[:])
+	plain := []byte(`{"path":"/etc/passwd","offset":0}`)
+	wrapped, err := AEADSealJSON(&key, plain)
+	if err != nil {
+		t.Fatalf("SealJSON: %v", err)
+	}
+	// wrapped 应该是合法 JSON string literal
+	var s string
+	if err := json.Unmarshal(wrapped, &s); err != nil {
+		t.Fatalf("wrapped is not valid JSON string: %v", err)
+	}
+	out, err := AEADOpenJSON(&key, wrapped)
+	if err != nil {
+		t.Fatalf("OpenJSON: %v", err)
+	}
+	if !bytes.Equal(out, plain) {
+		t.Fatalf("roundtrip mismatch: got %s", out)
+	}
+}
+
+func TestAEADOpenJSONRejectsInvalidBase64(t *testing.T) {
+	var key [32]byte
+	rand.Read(key[:])
+	bad := json.RawMessage(`"not-valid-base64!!!"`)
+	if _, err := AEADOpenJSON(&key, bad); err == nil {
+		t.Fatal("expected base64 decode failure")
+	}
+}
+
+func TestAEADOpenJSONRejectsNonStringJSON(t *testing.T) {
+	var key [32]byte
+	rand.Read(key[:])
+	bad := json.RawMessage(`{"not":"a string"}`)
+	if _, err := AEADOpenJSON(&key, bad); err == nil {
+		t.Fatal("expected JSON string unmarshal failure")
 	}
 }

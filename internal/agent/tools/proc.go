@@ -51,6 +51,7 @@ func (t *ProcessListTool) Run(ctx context.Context, raw json.RawMessage, _ agent.
 		if err != nil {
 			return nil, err
 		}
+		// 注：ps 输出本身已把 args 内的多空格压缩为单空格，cmdline 字段无法 100% 还原原始值；v1 acceptable。
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			line = strings.TrimSpace(line)
 			parts := strings.Fields(line)
