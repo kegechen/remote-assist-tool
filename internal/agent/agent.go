@@ -95,6 +95,18 @@ func NewDaemon(reg *Registry, conn MsgConn, key [32]byte) *Daemon {
 	return &Daemon{reg: reg, conn: conn, key: key, inbound: make(chan *proto.Message, 64)}
 }
 
+// RotateKey 用新的 session_key 替换；用于同一 share 服务多个 help 端续连。
+// 取消所有 in-flight 请求（旧 key 加密的不再有意义）。
+func (d *Daemon) RotateKey(key [32]byte) {
+	d.cancels.Range(func(k, v any) bool {
+		if cancel, ok := v.(context.CancelFunc); ok {
+			cancel()
+		}
+		return true
+	})
+	d.key = key
+}
+
 // Inject share 端 dispatch 收到 MsgToolReq/MsgToolCancel 时调用。
 // 非阻塞：如果 daemon 处理慢、inbound buffer 满，丢弃该消息（log warning），
 // 避免回灌 share 端的主 dispatch 循环阻塞 SSH 隧道与心跳。

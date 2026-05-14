@@ -395,7 +395,7 @@ func (s *ShareMode) handleTunnel() error {
 			ack, key := buildHelloAck(hello, s.code)
 			s.client.SendMessage(proto.MsgToolHelloAck, &ack)
 			if ack.Accept {
-				s.startDaemonOnce(key)
+				s.ensureDaemon(key)
 			}
 		case proto.MsgToolReq, proto.MsgToolCancel:
 			if s.daemon != nil {
@@ -489,8 +489,9 @@ func buildHelloAck(hello proto.Hello, code string) (proto.HelloAck, [32]byte) {
 	return ack, key
 }
 
-// startDaemonOnce 用 session_key 构造并启动 agent.Daemon；只生效一次
-func (s *ShareMode) startDaemonOnce(key [32]byte) {
+// ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅 rotate key。
+// sync.Once 保证 reg/goroutine 只初始化一次；每次 hello 后都用最新 key 覆盖。
+func (s *ShareMode) ensureDaemon(key [32]byte) {
 	s.daemonOnce.Do(func() {
 		reg := agent.NewRegistry()
 		sb := agent.NewSandbox(s.sbCfg)
@@ -508,4 +509,6 @@ func (s *ShareMode) startDaemonOnce(key [32]byte) {
 		s.daemon = d
 		go d.RunLoop(context.Background())
 	})
+	// 不管是首次还是续连，都用最新 key 覆盖（首次 RotateKey 等同于设置已有 key，无害）
+	s.daemon.RotateKey(key)
 }

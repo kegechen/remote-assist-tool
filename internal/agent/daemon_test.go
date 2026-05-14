@@ -52,3 +52,21 @@ func TestDaemonRoutesToolReq(t *testing.T) {
 		t.Fatal("no response in 1s")
 	}
 }
+
+func TestDaemonRotateKeyCancelsInflight(t *testing.T) {
+	in := make(chan *proto.Message, 4)
+	out := make(chan *proto.Message, 16)
+	conn := &fakeConn{in: in, out: out}
+
+	r := NewRegistry()
+	r.Register(&fakeTool{name: "ping"})
+	d := NewDaemon(r, conn, [32]byte{1})
+	go d.RunLoop(context.Background())
+
+	// rotate 不应该 panic，cancel 空 in-flight 是 no-op
+	d.RotateKey([32]byte{2})
+
+	if d.key != [32]byte{2} {
+		t.Fatalf("key not rotated: got %v", d.key)
+	}
+}
