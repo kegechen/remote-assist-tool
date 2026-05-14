@@ -9,9 +9,10 @@ type Schema struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-// AllSchemas 返回 9 个工具的固定 schema
+// AllSchemas 返回 10 个工具的固定 schema（connect + 9 个真实工具）
 func AllSchemas() []Schema {
 	return []Schema{
+		{Name: "connect", Description: "Pair with a remote share by providing the assist code. Must be called first before any other tool. The other tools will return 'not_connected' until this succeeds.", InputSchema: json.RawMessage(`{"type":"object","required":["code"],"properties":{"code":{"type":"string","description":"Assist code from the share side, e.g. 'ABCD-EFGHIJ' or 'ABCDEFGHIJ' (hyphen optional)"}}}`)},
 		{Name: "exec", Description: "Run a command via argv (no shell) on the remote. Stream mode is not supported in v1; output is returned as a single ExecResult after completion.", InputSchema: json.RawMessage(`{"type":"object","required":["argv"],"properties":{"argv":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"},"timeout_ms":{"type":"integer"}}}`)},
 		{Name: "read_file", Description: "Read a remote file. Returns up to 1 MiB per call; set offset to read further chunks until eof=true.", InputSchema: json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"offset":{"type":"integer"},"length":{"type":"integer"}}}`)},
 		{Name: "write_file", Description: "Write/overwrite a remote file.", InputSchema: json.RawMessage(`{"type":"object","required":["path","content"],"properties":{"path":{"type":"string"},"content":{"type":"string","contentEncoding":"base64"},"append":{"type":"boolean"}}}`)},
