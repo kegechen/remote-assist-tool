@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os/exec"
-	"sync"
 	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
@@ -71,39 +69,7 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 		cmd.Stdin = bytes.NewReader(a.StdinBytes)
 	}
 
-	if a.Stream && sink != nil {
-		stdout, _ := cmd.StdoutPipe()
-		stderr, _ := cmd.StderrPipe()
-		if err := cmd.Start(); err != nil {
-			return nil, err
-		}
-		var wg sync.WaitGroup
-		pump := func(name string, r io.Reader) {
-			defer wg.Done()
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := r.Read(buf)
-				if n > 0 {
-					sink.Send(name, append([]byte{}, buf[:n]...))
-				}
-				if err != nil {
-					return
-				}
-			}
-		}
-		wg.Add(2)
-		go pump("stdout", stdout)
-		go pump("stderr", stderr)
-		err := cmd.Wait()
-		wg.Wait()
-		exitCode := exitCodeOf(err)
-		if runCtx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("deadline_exceeded: exec timed out")
-		}
-		return json.Marshal(ExecResult{ExitCode: exitCode})
-	}
-
-	// 同步收集
+	// v1: stream 模式不支持，始终同步收集
 	out, err := cmd.Output()
 	stderr := capturedStderr(err)
 	exitCode := exitCodeOf(err)

@@ -79,8 +79,6 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			}
 		}
 	case proto.MsgToolStream:
-		// v1：流式工具的 chunk 暂存进 buffer，由调用端通过 MCP progress 拉取（MVP 简化：丢弃）
-		// 注：tail_log/exec stream 在 v1 由 share 端最终 ToolResp 收尾；中间 chunk 暂不直透到 Claude。
-		// v2 用 MCP progress notification 推送。
+		// v1: 流式工具已从 schema 删除；如仍收到此帧（旧 share 端版本），忽略。
 	}
 }

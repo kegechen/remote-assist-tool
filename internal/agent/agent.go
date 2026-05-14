@@ -165,6 +165,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	d.conn.SendMessage(proto.MsgToolResp, &resp)
 }
 
+// chunkSink reserved for v2 streaming; v1 tools do not use sink
 type chunkSink struct {
 	daemon *Daemon
 	id     uint64

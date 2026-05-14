@@ -5,19 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"io/fs"
 	"os"
-	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/remote-assist/tool/internal/agent"
 )
 
 type TailLogArgs struct {
-	Path   string `json:"path"`
-	Lines  int    `json:"lines,omitempty"`
-	Follow bool   `json:"follow,omitempty"`
+	Path  string `json:"path"`
+	Lines int    `json:"lines,omitempty"`
+	// Follow は v1 では非対応。フィールドは後方互換のため残す。
+	Follow bool `json:"follow,omitempty"`
 }
 
 type TailLogTool struct{ sb *agent.Sandbox }
@@ -35,7 +33,6 @@ func (t *TailLogTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 	if err != nil {
 		return nil, err
 	}
-
 	last, err := readLastLines(resolved, a.Lines)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -46,57 +43,8 @@ func (t *TailLogTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 	if sink != nil && len(last) > 0 {
 		sink.Send("stdout", last)
 	}
-
-	if !a.Follow {
-		return json.RawMessage(`{"followed":false}`), nil
-	}
-
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
-	defer w.Close()
-	w.Add(resolved)
-
-	f, err := os.Open(resolved)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	f.Seek(0, io.SeekEnd)
-
-	buf := make([]byte, 32*1024)
-	for {
-		select {
-		case <-ctx.Done():
-			return json.RawMessage(`{"followed":true,"closed":"context"}`), nil
-		case ev, ok := <-w.Events:
-			if !ok {
-				return json.RawMessage(`{"followed":true,"closed":"watcher"}`), nil
-			}
-			if ev.Op&fsnotify.Write != 0 {
-				for {
-					n, _ := f.Read(buf)
-					if n == 0 {
-						break
-					}
-					if sink != nil {
-						sink.Send("stdout", append([]byte{}, buf[:n]...))
-					}
-				}
-			}
-		case <-time.After(500 * time.Millisecond):
-			for {
-				n, _ := f.Read(buf)
-				if n == 0 {
-					break
-				}
-				if sink != nil {
-					sink.Send("stdout", append([]byte{}, buf[:n]...))
-				}
-			}
-		}
-	}
+	// v1: follow 模式不支持，始终返回静态结果
+	return json.RawMessage(`{"followed":false}`), nil
 }
 
 func readLastLines(path string, n int) ([]byte, error) {

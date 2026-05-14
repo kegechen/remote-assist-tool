@@ -42,23 +42,6 @@ func TestExecSyncEchoes(t *testing.T) {
 	}
 }
 
-func TestExecStreamPushesChunks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip()
-	}
-	tool := NewExec(nil)
-	args, _ := json.Marshal(map[string]any{"argv": []string{"/bin/echo", "line"}, "stream": true})
-	sink := &captureSink{}
-	out, err := tool.Run(context.Background(), args, sink)
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	var r ExecResult
-	json.Unmarshal(out, &r)
-	if r.ExitCode != 0 || string(sink.stdout) != "line\n" {
-		t.Fatalf("exit=%d stdout=%q", r.ExitCode, sink.stdout)
-	}
-}
 
 func TestExecTimeoutKills(t *testing.T) {
 	if runtime.GOOS == "windows" {
