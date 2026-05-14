@@ -42,6 +42,30 @@ func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
 	}
 }
 
+// join 向 relay 发 JoinRequest 并等待 JoinResponse；返回 resp 或 error。
+// 不打印 stdout，让调用方决定输出。
+func (h *HelpMode) join() (*proto.JoinResponse, error) {
+	req := &proto.JoinRequest{Code: h.code, Version: version.Info()}
+	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
+		return nil, err
+	}
+	msg, err := h.client.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+	if msg.Type != proto.MsgJoinResponse {
+		return nil, fmt.Errorf("unexpected response: %s", msg.Type)
+	}
+	var resp proto.JoinResponse
+	if err := proto.DecodePayload(msg, &resp); err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("join failed: %s", resp.Error)
+	}
+	return &resp, nil
+}
+
 // Run 运行协助模式
 func (h *HelpMode) Run() error {
 	if err := h.client.Connect(); err != nil {
@@ -49,25 +73,12 @@ func (h *HelpMode) Run() error {
 	}
 	defer h.client.Close()
 
-	req := &proto.JoinRequest{Code: h.code, Version: version.Info()}
-	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
-		return err
-	}
-
-	msg, err := h.client.ReadMessage()
+	resp, err := h.join()
 	if err != nil {
 		return err
 	}
 
-	if msg.Type == proto.MsgJoinResponse {
-		var resp proto.JoinResponse
-		if err := proto.DecodePayload(msg, &resp); err != nil {
-			return err
-		}
-		if !resp.Success {
-			return fmt.Errorf("failed to join: %s", resp.Error)
-		}
-
+	{
 		// mcp-stdio 模式下所有 user-facing 输出走 stderr，避免污染 MCP JSON-RPC 帧流
 		out := os.Stdout
 		if h.mcpStdio {
@@ -111,8 +122,6 @@ func (h *HelpMode) Run() error {
 		printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 		return h.handleTunnel()
 	}
-
-	return fmt.Errorf("unexpected response: %s", msg.Type)
 }
 
 // negotiateP2P 尝试 P2P 直连协商
