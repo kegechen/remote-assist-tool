@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/user"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func runShare(args []string) {
 	rootDir := fs.String("root", "", "Sandbox root for file operations (required unless --unsafe-full-system)")
 	allowExec := fs.String("allow-exec", "", "Comma-separated exec basename allowlist (empty = no restriction beyond deny)")
 	denyExec := fs.String("deny-exec", "rm,shutdown,reboot,mkfs,dd", "Comma-separated exec basename denylist")
-	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup (effective Task 20; no-op now)")
+	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup via ShellExecuteW runas")
 	unsafe := fs.Bool("unsafe-full-system", false, "DANGER: disable sandbox entirely")
 
 	fs.Usage = func() {
@@ -89,7 +90,26 @@ func runShare(args []string) {
 		Unsafe:    *unsafe,
 	}
 
-	_ = *elevate // Task 20 will wire up actual elevation; flag declared now for stability
+	hasElevatedChild := false
+	for _, a := range args {
+		if a == "--elevated-child" {
+			hasElevatedChild = true
+			break
+		}
+	}
+	if *elevate && !hasElevatedChild {
+		if err := agent.RelaunchElevated(); err != nil {
+			fmt.Fprintf(os.Stderr, "Elevation failed: %v\nContinuing without elevation.\n", err)
+		}
+	}
+
+	if hasElevatedChild || agent.IsElevated() {
+		fmt.Println("Running as: ELEVATED")
+	} else if u, err := user.Current(); err == nil {
+		fmt.Printf("Running as: %s (non-elevated)\n", u.Username)
+	} else {
+		fmt.Println("Running as: unknown (non-elevated)")
+	}
 
 	// Derive STUN server if not specified
 	if *stunServer == "" && *server != "" {
