@@ -49,10 +49,16 @@ func (s *Sandbox) ResolvePath(p string) (string, error) {
 		return "", err
 	}
 	cleaned := filepath.Clean(abs)
-	// 对已存在路径走 EvalSymlinks；不存在的（write_file 创建）退化到 lexical
+	// 对已存在路径走 EvalSymlinks；不存在的（write_file 创建）对父目录 EvalSymlinks 再拼文件名
 	resolved := cleaned
 	if eval, err := filepath.EvalSymlinks(cleaned); err == nil {
 		resolved = eval
+	} else {
+		// 路径不存在时，对父目录解析符号链接（处理 Windows 短路径等问题）
+		parent := filepath.Dir(cleaned)
+		if evalParent, err := filepath.EvalSymlinks(parent); err == nil {
+			resolved = filepath.Join(evalParent, filepath.Base(cleaned))
+		}
 	}
 	rel, err := filepath.Rel(s.root, resolved)
 	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
