@@ -124,9 +124,9 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if err := proto.DecodePayload(msg, &req); err != nil {
 		return
 	}
-	// 解密 args（key 非零时才解密）
+	// 解密 args（key 非零时才解密；密文以 JSON 字符串 base64 形式承载）
 	if d.key != [32]byte{} && len(req.ArgsJSON) > 0 {
-		plain, err := proto.AEADOpen(&d.key, req.ArgsJSON)
+		plain, err := proto.AEADOpenJSON(&d.key, req.ArgsJSON)
 		if err != nil {
 			d.conn.SendMessage(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
 			return
@@ -145,10 +145,10 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	sink := &chunkSink{daemon: d, id: req.ID}
 	start := time.Now()
 	resp := d.reg.Dispatch(ctx, &req, sink)
-	// 加密 result
+	// 加密 result（密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法）
 	if d.key != [32]byte{} && len(resp.ResultJSON) > 0 {
-		if ct, err := proto.AEADSeal(&d.key, resp.ResultJSON); err == nil {
-			resp.ResultJSON = ct
+		if wrapped, err := proto.AEADSealJSON(&d.key, resp.ResultJSON); err == nil {
+			resp.ResultJSON = wrapped
 		}
 	}
 	status := "ok"

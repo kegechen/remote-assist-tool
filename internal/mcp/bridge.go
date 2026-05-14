@@ -34,11 +34,11 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 
 	encArgs := args
 	if b.key != [32]byte{} && len(args) > 0 {
-		ct, err := proto.AEADSeal(&b.key, args)
+		wrapped, err := proto.AEADSealJSON(&b.key, args)
 		if err != nil {
 			return nil, err
 		}
-		encArgs = ct
+		encArgs = wrapped
 	}
 	if err := b.conn.SendMessage(proto.MsgToolReq, &proto.ToolReq{ID: id, Tool: name, ArgsJSON: encArgs}); err != nil {
 		return nil, err
@@ -53,7 +53,7 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 		}
 		result := resp.ResultJSON
 		if b.key != [32]byte{} && len(result) > 0 {
-			plain, err := proto.AEADOpen(&b.key, result)
+			plain, err := proto.AEADOpenJSON(&b.key, result)
 			if err != nil {
 				return nil, err
 			}

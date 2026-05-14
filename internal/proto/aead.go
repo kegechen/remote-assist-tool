@@ -2,6 +2,8 @@ package proto
 
 import (
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -39,4 +41,32 @@ func AEADOpen(key *[32]byte, ct []byte) ([]byte, error) {
 		return nil, fmt.Errorf("aead open: %w", err)
 	}
 	return plain, nil
+}
+
+// AEADSealJSON 加密 plaintext 并以 JSON 字符串字面量（"<base64>"）形式返回，
+// 可作为 json.RawMessage 嵌入到外层结构的 RawMessage 字段而不破坏 json.Marshal。
+// 原始 AEAD ciphertext 是任意二进制，不是合法 JSON，所以必须先 base64。
+func AEADSealJSON(key *[32]byte, plain []byte) (json.RawMessage, error) {
+	ct, err := AEADSeal(key, plain)
+	if err != nil {
+		return nil, err
+	}
+	wrapped, err := json.Marshal(base64.StdEncoding.EncodeToString(ct))
+	if err != nil {
+		return nil, fmt.Errorf("aead json marshal: %w", err)
+	}
+	return wrapped, nil
+}
+
+// AEADOpenJSON 反解 AEADSealJSON 的输出：解 JSON 字符串 → base64 → AEAD Open。
+func AEADOpenJSON(key *[32]byte, raw json.RawMessage) ([]byte, error) {
+	var b64 string
+	if err := json.Unmarshal(raw, &b64); err != nil {
+		return nil, fmt.Errorf("aead json unmarshal: %w", err)
+	}
+	ct, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("aead base64 decode: %w", err)
+	}
+	return AEADOpen(key, ct)
 }
