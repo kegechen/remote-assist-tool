@@ -144,7 +144,13 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		}
 		req.ArgsJSON = plain
 	}
-	ctx, cancel := context.WithCancel(parent)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if req.DeadlineMs > 0 {
+		ctx, cancel = context.WithTimeout(parent, time.Duration(req.DeadlineMs)*time.Millisecond)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
 	defer cancel() // 防止 ctx goroutine 泄漏
 	d.cancels.Store(req.ID, context.CancelFunc(cancel))
 	defer d.cancels.Delete(req.ID)
