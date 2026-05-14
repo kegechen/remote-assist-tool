@@ -158,7 +158,7 @@ remote share --server relay.example.com:8443 --root /path/to/project --insecure
 
 ### 本地配置 Claude Code
 
-项目根目录或 `~/.claude/mcp.json` 加入：
+项目根目录或 `~/.claude/mcp.json`：
 
 ```jsonc
 {
@@ -167,7 +167,6 @@ remote share --server relay.example.com:8443 --root /path/to/project --insecure
       "command": "remote",
       "args": [
         "help", "--server", "relay.example.com:8443",
-        "--code", "ABCD-EFGHIJ",
         "--mcp-stdio", "--insecure"
       ]
     }
@@ -175,7 +174,17 @@ remote share --server relay.example.com:8443 --root /path/to/project --insecure
 }
 ```
 
-启动 Claude Code，`/mcp` 应看到 `remote-debug` 服务下的 9 个工具。
+注意 **不带 `--code`** —— 这是 bootstrap 模式，MCP server 启动时还不知道协助码。
+
+**每次调试会话**：
+1. 远端跑 `remote share`，拿到协助码 `ABCD-EFGHIJ`
+2. 在 Claude Code 里直接说："**协助码 ABCD-EFGHIJ，连上去**"
+3. Claude 调用 `remote-debug:connect("ABCD-EFGHIJ")` 完成握手
+4. 其后所有调用直接走 9 个真实工具，不需要重启 Claude
+
+`/mcp` 看到的工具：`connect / exec / read_file / write_file / list_dir / stat / glob / grep / process_list / tail_log`。
+
+**旧用法（写死协助码）** 仍然支持：在 args 里加 `"--code", "ABCD-EFGHIJ"`，跳过 bootstrap 步骤直接连。
 
 ### 工具一览
 
