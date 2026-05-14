@@ -8,14 +8,14 @@ import (
 	"io"
 )
 
-// Bridge MCP server 把 tools/call 转发给 share 端的契约
-type Bridge interface {
+// ToolCaller MCP server 把 tools/call 转发给 share 端的契约
+type ToolCaller interface {
 	CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
 }
 
-type Server struct{ bridge Bridge }
+type Server struct{ bridge ToolCaller }
 
-func NewServer(b Bridge) *Server { return &Server{bridge: b} }
+func NewServer(b ToolCaller) *Server { return &Server{bridge: b} }
 
 type rpcReq struct {
 	JSONRPC string          `json:"jsonrpc"`
