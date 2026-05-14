@@ -432,3 +432,21 @@ func formatCode(code string) string {
 	}
 	return code[:4] + "-" + code[4:]
 }
+
+// daemonSink share 端把 Tool 消息转给 agent.Daemon 的契约
+type daemonSink interface {
+	Inject(msg *proto.Message)
+}
+
+// dispatchToolMessage 若 msg 属于工具通道则投递并返回 true，否则 false。
+// 注意：Task 13 仅提供 helper；Task 17 才在 handleTunnel 的 dispatch 循环中调用并启动 daemon。
+func dispatchToolMessage(msg *proto.Message, d daemonSink) bool {
+	switch msg.Type {
+	case proto.MsgToolReq, proto.MsgToolCancel, proto.MsgToolHello:
+		if d != nil {
+			d.Inject(msg)
+		}
+		return true
+	}
+	return false
+}
