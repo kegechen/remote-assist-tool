@@ -95,8 +95,16 @@ func NewDaemon(reg *Registry, conn MsgConn, key [32]byte) *Daemon {
 	return &Daemon{reg: reg, conn: conn, key: key, inbound: make(chan *proto.Message, 64)}
 }
 
-// Inject share 端 dispatch 收到 MsgToolReq/MsgToolCancel 时调用
-func (d *Daemon) Inject(msg *proto.Message) { d.inbound <- msg }
+// Inject share 端 dispatch 收到 MsgToolReq/MsgToolCancel 时调用。
+// 非阻塞：如果 daemon 处理慢、inbound buffer 满，丢弃该消息（log warning），
+// 避免回灌 share 端的主 dispatch 循环阻塞 SSH 隧道与心跳。
+func (d *Daemon) Inject(msg *proto.Message) {
+	select {
+	case d.inbound <- msg:
+	default:
+		log.Printf("daemon: inbound full, dropping %s", msg.Type)
+	}
+}
 
 // RunLoop 直到 ctx 完成
 func (d *Daemon) RunLoop(ctx context.Context) {
@@ -110,7 +118,10 @@ func (d *Daemon) RunLoop(ctx context.Context) {
 				go d.handleReq(ctx, msg)
 			case proto.MsgToolCancel:
 				var c proto.Cancel
-				proto.DecodePayload(msg, &c)
+				if err := proto.DecodePayload(msg, &c); err != nil {
+					log.Printf("daemon: bad cancel payload: %v", err)
+					continue
+				}
 				if v, ok := d.cancels.Load(c.ID); ok {
 					v.(context.CancelFunc)()
 				}
