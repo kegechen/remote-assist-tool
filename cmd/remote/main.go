@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/remote-assist/tool/internal/agent"
 	"github.com/remote-assist/tool/internal/client"
 	"github.com/remote-assist/tool/internal/version"
 )
@@ -73,7 +74,7 @@ func runShare(args []string) {
 		BindIP:       *bindIP,
 	}
 
-	share := client.NewShareMode(cfg, *sshAddr)
+	share := client.NewShareMode(cfg, *sshAddr, agent.SandboxConfig{})
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)

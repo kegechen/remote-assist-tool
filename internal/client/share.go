@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/remote-assist/tool/internal/agent"
+	"github.com/remote-assist/tool/internal/agent/tools"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/version"
@@ -19,17 +22,21 @@ var ErrPeerDisconnected = errors.New("peer disconnected")
 
 // ShareMode 被协助模式
 type ShareMode struct {
-	client    *Client
-	sshAddr   string
-	code      string
-	expiresAt time.Time
+	client     *Client
+	sshAddr    string
+	code       string
+	expiresAt  time.Time
+	sbCfg      agent.SandboxConfig
+	daemon     *agent.Daemon
+	daemonOnce sync.Once
 }
 
 // NewShareMode 创建被协助模式
-func NewShareMode(cfg *Config, sshAddr string) *ShareMode {
+func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig) *ShareMode {
 	return &ShareMode{
 		client:  NewClient(cfg),
 		sshAddr: sshAddr,
+		sbCfg:   sbCfg,
 	}
 }
 
@@ -382,6 +389,18 @@ func (s *ShareMode) handleTunnel() error {
 		}
 
 		switch msg.Type {
+		case proto.MsgToolHello:
+			var hello proto.Hello
+			proto.DecodePayload(msg, &hello)
+			ack, key := buildHelloAck(hello, s.code)
+			s.client.SendMessage(proto.MsgToolHelloAck, &ack)
+			if ack.Accept {
+				s.startDaemonOnce(key)
+			}
+		case proto.MsgToolReq, proto.MsgToolCancel:
+			if s.daemon != nil {
+				s.daemon.Inject(msg)
+			}
 		case proto.MsgTunnelData:
 			var dataMsg proto.TunnelData
 			if err := json.Unmarshal(msg.Payload, &dataMsg); err != nil {
@@ -449,4 +468,43 @@ func dispatchToolMessage(msg *proto.Message, d daemonSink) bool {
 		return true
 	}
 	return false
+}
+
+// buildHelloAck share 端对 Hello 的应答 + 派生 session_key
+func buildHelloAck(hello proto.Hello, code string) (proto.HelloAck, [32]byte) {
+	if hello.Version != proto.ToolProtocolVersion {
+		return proto.HelloAck{
+			Version:  proto.ToolProtocolVersion,
+			Accept:   false,
+			ErrorMsg: "unsupported tool protocol version: " + hello.Version,
+		}, [32]byte{}
+	}
+	ack := proto.HelloAck{
+		Version:      proto.ToolProtocolVersion,
+		Capabilities: []string{"exec", "read_file", "write_file", "list_dir", "stat", "glob", "grep", "process_list", "tail_log"},
+		NonceB64:     proto.NewHello().NonceB64,
+		Accept:       true,
+	}
+	key := proto.DeriveSessionKey(code, ack.NonceB64, hello.NonceB64)
+	return ack, key
+}
+
+// startDaemonOnce 用 session_key 构造并启动 agent.Daemon；只生效一次
+func (s *ShareMode) startDaemonOnce(key [32]byte) {
+	s.daemonOnce.Do(func() {
+		reg := agent.NewRegistry()
+		sb := agent.NewSandbox(s.sbCfg)
+		reg.Register(tools.NewExec(sb))
+		reg.Register(tools.NewReadFile(sb))
+		reg.Register(tools.NewWriteFile(sb))
+		reg.Register(tools.NewListDir(sb))
+		reg.Register(tools.NewStat(sb))
+		reg.Register(tools.NewGlob(sb))
+		reg.Register(tools.NewGrep(sb))
+		reg.Register(tools.NewProcessList())
+		reg.Register(tools.NewTailLog(sb))
+		d := agent.NewDaemon(reg, s.client, key)
+		s.daemon = d
+		go d.RunLoop(context.Background())
+	})
 }
