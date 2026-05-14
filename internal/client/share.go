@@ -222,6 +222,19 @@ func (s *ShareMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTu
 			}
 			peerReady = true
 		case proto.MsgHeartbeat:
+		case proto.MsgToolHello:
+			// 工具通道握手可能在 P2P 协商窗口期到达，必须就地处理否则消息会被丢
+			var hello proto.Hello
+			proto.DecodePayload(msg, &hello)
+			ack, key := buildHelloAck(hello, s.code)
+			s.client.SendMessage(proto.MsgToolHelloAck, &ack)
+			if ack.Accept {
+				s.ensureDaemon(key)
+			}
+		case proto.MsgToolReq, proto.MsgToolCancel:
+			if s.daemon != nil {
+				s.daemon.Inject(msg)
+			}
 		case proto.MsgError:
 			s.client.SetReadDeadline(time.Time{})
 			var errMsg proto.ErrorMessage
