@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/remote-assist/tool/internal/proto"
 )
@@ -135,10 +137,12 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	defer d.cancels.Delete(req.ID)
 	defer func() {
 		if r := recover(); r != nil {
+			log.Printf("tool | %s | panic | 0ms | err:remote_panic", req.Tool)
 			d.conn.SendMessage(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
 		}
 	}()
 	sink := &chunkSink{daemon: d, id: req.ID}
+	start := time.Now()
 	resp := d.reg.Dispatch(ctx, &req, sink)
 	// 加密 result
 	if d.key != [32]byte{} && len(resp.ResultJSON) > 0 {
@@ -146,6 +150,13 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 			resp.ResultJSON = ct
 		}
 	}
+	status := "ok"
+	if !resp.OK {
+		status = "err:" + resp.ErrorCode
+	}
+	dur := time.Since(start).Milliseconds()
+	argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
+	log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
 	d.conn.SendMessage(proto.MsgToolResp, &resp)
 }
 
@@ -170,4 +181,31 @@ func (s *chunkSink) Send(stream string, data []byte) error {
 	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: payload}
 	s.seq++
 	return s.daemon.conn.SendMessage(proto.MsgToolStream, &c)
+}
+
+// summarizeArgs 对各工具脱敏：read_file/write_file 只记 path+size；exec 记 argv[0]+argc
+func summarizeArgs(tool string, raw json.RawMessage) string {
+	var generic map[string]json.RawMessage
+	json.Unmarshal(raw, &generic)
+	switch tool {
+	case "exec":
+		var argv []string
+		json.Unmarshal(generic["argv"], &argv)
+		if len(argv) == 0 {
+			return "exec[]"
+		}
+		return fmt.Sprintf("exec %s argc=%d", argv[0], len(argv))
+	case "read_file", "stat", "tail_log", "list_dir":
+		var p string
+		json.Unmarshal(generic["path"], &p)
+		return tool + " " + p
+	case "write_file":
+		var p string
+		var content []byte
+		json.Unmarshal(generic["path"], &p)
+		json.Unmarshal(generic["content"], &content)
+		return fmt.Sprintf("write_file %s bytes=%d", p, len(content))
+	default:
+		return tool
+	}
 }
