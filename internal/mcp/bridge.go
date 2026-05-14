@@ -6,9 +6,15 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/remote-assist/tool/internal/proto"
 )
+
+// callToolHardTimeout 是 Bridge.CallTool 的硬超时上限。
+// 防御性兜底：即便心跳保活失败、relay TCP 真死，单次工具调用最多挂 60s
+// 就返 tunnel_lost 错误，MCP server 仍存活可接受新调用（含重新 connect）。
+const callToolHardTimeout = 60 * time.Second
 
 // MsgConn help 端发给 share 端的对外契约（client.Client 已经实现 SendMessage）
 type MsgConn interface {
@@ -47,6 +53,9 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 	case <-ctx.Done():
 		b.conn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: "ctx_cancelled"})
 		return nil, ctx.Err()
+	case <-time.After(callToolHardTimeout):
+		b.conn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: "hard_timeout"})
+		return nil, fmt.Errorf("tunnel_lost: no response in %s", callToolHardTimeout)
 	case resp := <-ch:
 		if !resp.OK {
 			return nil, fmt.Errorf("%s: %s", resp.ErrorCode, resp.ErrorMsg)

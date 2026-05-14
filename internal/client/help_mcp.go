@@ -68,6 +68,9 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 		return fmt.Errorf("tool handshake: %w", err)
 	}
 	bridge := mcp.NewBridge(h.client, key)
+	// 心跳保活：每 30s 发 Heartbeat，relay 回 echo，避免 ReadMessage 2-min deadline
+	// 因为空闲被触发，导致后台 goroutine 退出 → MCP 工具调用全部失效。
+	h.client.StartHeartbeatLoop(30 * time.Second)
 	// 后台 ReadMessage 循环，把工具消息投给 bridge
 	go func() {
 		for {
