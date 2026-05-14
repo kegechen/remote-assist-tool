@@ -27,28 +27,37 @@ func dispatchHelpToolMessage(msg *proto.Message, b inboundSink) bool {
 	return false
 }
 
-// handshakeTool 工具通道握手；返回 session_key 与失败原因
+// handshakeTool 工具通道握手；返回 session_key 与失败原因。
+// 等待 HelloAck 期间会跳过非相关消息（PeerAddrReady、Heartbeat 等），
+// 防止 relay 主动推的 P2P 寻址通知抢先到达打断握手。
 func (h *HelpMode) handshakeTool() ([32]byte, error) {
 	hello := proto.NewHello()
 	if err := h.client.SendMessage(proto.MsgToolHello, &hello); err != nil {
 		return [32]byte{}, err
 	}
-	h.client.SetReadDeadline(time.Now().Add(10 * time.Second))
+	h.client.SetReadDeadline(time.Now().Add(15 * time.Second))
 	defer h.client.SetReadDeadline(time.Time{})
-	msg, err := h.client.ReadMessage()
-	if err != nil {
-		return [32]byte{}, err
+	for {
+		msg, err := h.client.ReadMessage()
+		if err != nil {
+			return [32]byte{}, err
+		}
+		switch msg.Type {
+		case proto.MsgToolHelloAck:
+			var ack proto.HelloAck
+			proto.DecodePayload(msg, &ack)
+			if !ack.Accept {
+				return [32]byte{}, fmt.Errorf("share rejected tool channel: %s", ack.ErrorMsg)
+			}
+			return proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64), nil
+		case proto.MsgHeartbeat, proto.MsgPeerAddrReady, proto.MsgError:
+			// 跳过 relay 在 Join 之后主动推送的消息，继续等 Ack
+			continue
+		default:
+			// 其他类型也忽略（保守做法，让握手尽量稳定）
+			continue
+		}
 	}
-	if msg.Type != proto.MsgToolHelloAck {
-		return [32]byte{}, fmt.Errorf("expected hello_ack, got %s", msg.Type)
-	}
-	var ack proto.HelloAck
-	proto.DecodePayload(msg, &ack)
-	if !ack.Accept {
-		return [32]byte{}, fmt.Errorf("share rejected tool channel: %s", ack.ErrorMsg)
-	}
-	key := proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64)
-	return key, nil
 }
 
 // RunMCPMode 阻塞跑 MCP stdio server 到 stdin EOF / 隧道断开。
