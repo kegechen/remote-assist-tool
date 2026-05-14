@@ -35,11 +35,22 @@ func TestToolReqRoundtrip(t *testing.T) {
 
 func TestStreamChunkFinMarker(t *testing.T) {
 	c := StreamChunk{ID: 1, Seq: 7, Fin: true, Data: []byte("hello")}
-	msg, _ := NewMessage(MsgToolStream, &c)
-	raw, _ := json.Marshal(msg)
-	parsed, _ := ParseMessage(raw)
+	msg, err := NewMessage(MsgToolStream, &c)
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parsed, err := ParseMessage(raw)
+	if err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
 	var got StreamChunk
-	DecodePayload(parsed, &got)
+	if err := DecodePayload(parsed, &got); err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
 	if !got.Fin || got.Seq != 7 || string(got.Data) != "hello" {
 		t.Fatalf("got %+v", got)
 	}
