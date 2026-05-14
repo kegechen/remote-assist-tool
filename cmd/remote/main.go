@@ -62,6 +62,19 @@ func runShare(args []string) {
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n")
 	}
+	// --elevated-child 是内部旗标，不注册为 flag，必须在 fs.Parse 之前预先剥离，
+	// 否则 flag.ExitOnError 会因"flag provided but not defined"直接 os.Exit(2)。
+	hasElevatedChild := false
+	clean := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--elevated-child" {
+			hasElevatedChild = true
+		} else {
+			clean = append(clean, a)
+		}
+	}
+	args = clean
+
 	fs.Parse(args)
 
 	if *unsafe {
@@ -90,13 +103,6 @@ func runShare(args []string) {
 		Unsafe:    *unsafe,
 	}
 
-	hasElevatedChild := false
-	for _, a := range args {
-		if a == "--elevated-child" {
-			hasElevatedChild = true
-			break
-		}
-	}
 	if *elevate && !hasElevatedChild {
 		if err := agent.RelaunchElevated(); err != nil {
 			fmt.Fprintf(os.Stderr, "Elevation failed: %v\nContinuing without elevation.\n", err)
