@@ -205,8 +205,20 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) {
 		s.handlePeerAddrAdvertise(client, msg)
 	case proto.MsgP2PConnected:
 		log.Printf("Client %s reports P2P connected", client.ID)
+	case proto.MsgToolHello, proto.MsgToolHelloAck,
+		proto.MsgToolReq, proto.MsgToolResp,
+		proto.MsgToolStream, proto.MsgToolCancel:
+		s.forwardToPeer(client, msg)
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)
+	}
+}
+
+// forwardToPeer 把整条消息原样转给会话对端（用于工具通道：内容已 AEAD，relay 看不见也不需要看）
+func (s *Server) forwardToPeer(client *ClientConn, msg *proto.Message) {
+	target := s.sessions.FindPeer(client.ID)
+	if target != nil {
+		sendMsg(target, msg)
 	}
 }
 
