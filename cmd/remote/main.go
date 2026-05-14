@@ -129,6 +129,8 @@ func runHelp(args []string) {
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
+	mcpStdio := fs.Bool("mcp-stdio", false, "Run as MCP stdio server for Claude Code")
+	legacySSH := fs.Bool("legacy-ssh", false, "Force original SSH tunnel mode (default if --mcp-stdio not set)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Help mode - assist someone else\n\n")
@@ -143,6 +145,11 @@ func runHelp(args []string) {
 	if *code == "" {
 		fmt.Fprintf(os.Stderr, "Error: --code is required\n\n")
 		fs.Usage()
+		os.Exit(1)
+	}
+
+	if *mcpStdio && *legacySSH {
+		fmt.Fprintln(os.Stderr, "Error: --mcp-stdio and --legacy-ssh are mutually exclusive")
 		os.Exit(1)
 	}
 
@@ -164,9 +171,16 @@ func runHelp(args []string) {
 		BindIP:       *bindIP,
 	}
 
-	help := client.NewHelpMode(cfg, *code, *listenAddr)
-	if err := help.Run(); err != nil {
-		log.Fatalf("Error: %v", err)
+	if *mcpStdio {
+		help := client.NewHelpModeMCP(cfg, *code)
+		if err := help.Run(); err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+	} else {
+		help := client.NewHelpMode(cfg, *code, *listenAddr)
+		if err := help.Run(); err != nil {
+			log.Fatalf("Error: %v", err)
+		}
 	}
 
 	fmt.Println("\nSession ended.")
