@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -59,7 +60,7 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 		cmd.Dir = a.Cwd
 	}
 	if len(a.Env) > 0 {
-		envv := make([]string, 0, len(a.Env))
+		envv := append([]string{}, os.Environ()...)
 		for k, v := range a.Env {
 			envv = append(envv, k+"="+v)
 		}
