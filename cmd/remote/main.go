@@ -13,8 +13,42 @@ import (
 
 	"github.com/remote-assist/tool/internal/agent"
 	"github.com/remote-assist/tool/internal/client"
+	"github.com/remote-assist/tool/internal/relay"
 	"github.com/remote-assist/tool/internal/version"
 )
+
+// detectLANIPv4 找一个 non-loopback、non-down 的 IPv4 私网地址（用于 standalone 模式
+// 提示用户告诉 Claude 哪个地址）。优先返回 192.168.* / 10.* / 172.16-31.*；
+// 找不到私网地址时回退到第一个非环回 IPv4。空字符串表示完全找不到 IPv4。
+func detectLANIPv4() string {
+	ifaces, _ := net.Interfaces()
+	var fallback string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() {
+				continue
+			}
+			v4 := ipnet.IP.To4()
+			if v4 == nil {
+				continue
+			}
+			if v4[0] == 10 ||
+				(v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31) ||
+				(v4[0] == 192 && v4[1] == 168) {
+				return v4.String()
+			}
+			if fallback == "" {
+				fallback = v4.String()
+			}
+		}
+	}
+	return fallback
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -54,6 +88,8 @@ func runShare(args []string) {
 	denyExec := fs.String("deny-exec", "rm,shutdown,reboot,mkfs,dd", "Comma-separated exec basename denylist")
 	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup via ShellExecuteW runas")
 	unsafe := fs.Bool("unsafe-full-system", false, "DANGER: disable sandbox entirely")
+	standalone := fs.Bool("standalone", false, "Embed relay in-process and listen on --standalone-listen; share connects to loopback. For LAN-only scenarios where no external relay is available.")
+	standaloneListen := fs.String("standalone-listen", ":8443", "Standalone mode: address relay listens on (use :port to listen on all interfaces)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Share mode - allow others to assist you\n\n")
@@ -116,6 +152,57 @@ func runShare(args []string) {
 		fmt.Printf("Running as: %s (non-elevated)\n", u.Username)
 	} else {
 		fmt.Println("Running as: unknown (non-elevated)")
+	}
+
+	// Standalone (LAN) 模式：进程内启动 relay，share 连 loopback；
+	// LAN 上其他人通过 LAN IP 直连这个 relay，不依赖任何外部服务器。
+	if *standalone {
+		if !*plain {
+			fmt.Fprintln(os.Stderr, "standalone mode: forcing --plain (LAN scenario, AEAD on tool channel already secures content)")
+			*plain = true
+		}
+		_, listenPort, err := net.SplitHostPort(*standaloneListen)
+		if err != nil || listenPort == "" {
+			log.Fatalf("invalid --standalone-listen %q: %v", *standaloneListen, err)
+		}
+		relayCfg := &relay.Config{
+			ListenAddr:     *standaloneListen,
+			UseTLS:         false,
+			CodeTTL:        30 * time.Minute,
+			CodeLength:     10,
+			AuditLogFile:   "",
+			STUNListenAddr: "", // 不启 STUN，LAN 下 P2P 没必要
+		}
+		relaySrv, err := relay.NewServer(relayCfg)
+		if err != nil {
+			log.Fatalf("standalone relay init failed: %v", err)
+		}
+		go func() {
+			if err := relaySrv.StartWithContext(context.Background()); err != nil {
+				log.Fatalf("standalone relay error: %v", err)
+			}
+		}()
+		// 等 relay listener 就绪（NewServer 已经 bind 但 Accept 需要时间）
+		time.Sleep(300 * time.Millisecond)
+
+		// share 端连 loopback；外部 LAN 用户连 LAN IP
+		*server = "127.0.0.1:" + listenPort
+		*p2pMode = "disabled" // standalone 内部不用 P2P
+		*stunServer = ""
+
+		lanIP := detectLANIPv4()
+		fmt.Println()
+		fmt.Println("================ standalone (LAN) mode ================")
+		if lanIP != "" {
+			fmt.Printf("Relay listening at: %s:%s (LAN reachable)\n", lanIP, listenPort)
+			fmt.Printf("After you see 协助码 below, tell Claude:\n")
+			fmt.Printf("    \"协助码 <code> 在 %s:%s\"\n", lanIP, listenPort)
+			fmt.Println("Claude calls connect(code, server=\"" + lanIP + ":" + listenPort + "\") to skip external relay.")
+		} else {
+			fmt.Printf("Relay listening at: 0.0.0.0:%s (LAN IP auto-detect failed; figure out this host's LAN IP manually)\n", listenPort)
+		}
+		fmt.Println("=======================================================")
+		fmt.Println()
 	}
 
 	// Derive STUN server if not specified

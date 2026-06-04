@@ -49,12 +49,14 @@ func (b *HelpMCPBootstrap) CallTool(ctx context.Context, name string, args json.
 }
 
 type connectArgs struct {
-	Code string `json:"code"`
+	Code   string `json:"code"`
+	Server string `json:"server,omitempty"` // 可选：覆盖 cfg.ServerAddr，用于 share --standalone LAN 直连
 }
 
 type connectResult struct {
 	Connected bool   `json:"connected"`
 	SessionID string `json:"session_id,omitempty"`
+	Server    string `json:"server,omitempty"` // 实际连接的 relay 地址（debug 用）
 }
 
 func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
@@ -75,7 +77,13 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	}
 	b.mu.Unlock()
 
-	h := NewHelpModeMCP(b.cfg, a.Code)
+	// 拷贝一份 cfg，避免修改影响后续 connect。若调用方传了 server 就覆盖 ServerAddr
+	// （典型场景：share --standalone 跑在 LAN 上，由用户告知地址；help 这边无需重启）
+	effectiveCfg := *b.cfg
+	if a.Server != "" {
+		effectiveCfg.ServerAddr = a.Server
+	}
+	h := NewHelpModeMCP(&effectiveCfg, a.Code)
 	if err := h.client.Connect(); err != nil {
 		return nil, fmt.Errorf("relay connect failed: %w", err)
 	}
@@ -111,5 +119,5 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	b.bridge = bridge
 	b.mu.Unlock()
 
-	return json.Marshal(connectResult{Connected: true, SessionID: resp.SessionID})
+	return json.Marshal(connectResult{Connected: true, SessionID: resp.SessionID, Server: effectiveCfg.ServerAddr})
 }
