@@ -90,6 +90,7 @@ func runShare(args []string) {
 	unsafe := fs.Bool("unsafe-full-system", false, "DANGER: disable sandbox entirely")
 	standalone := fs.Bool("standalone", false, "Embed relay in-process and listen on --standalone-listen; share connects to loopback. For LAN-only scenarios where no external relay is available.")
 	standaloneListen := fs.String("standalone-listen", ":8443", "Standalone mode: address relay listens on (use :port to listen on all interfaces)")
+	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Share mode - allow others to assist you\n\n")
@@ -223,7 +224,7 @@ func runShare(args []string) {
 		BindIP:       *bindIP,
 	}
 
-	share := client.NewShareMode(cfg, *sshAddr, sbCfg)
+	share := client.NewShareMode(cfg, *sshAddr, sbCfg, *codeFile)
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ var ErrPeerDisconnected = errors.New("peer disconnected")
 type ShareMode struct {
 	client     *Client
 	sshAddr    string
+	codeFile   string
 	code       string
 	expiresAt  time.Time
 	sbCfg      agent.SandboxConfig
@@ -31,12 +33,14 @@ type ShareMode struct {
 	daemonOnce sync.Once
 }
 
-// NewShareMode 创建被协助模式
-func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig) *ShareMode {
+// NewShareMode 创建被协助模式。codeFile 非空时，注册成功后把协助码与有效期
+// 以 JSON 原子写入该文件，供宿主程序（如管家）稳定读取，无需解析 stdout。
+func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig, codeFile string) *ShareMode {
 	return &ShareMode{
-		client:  NewClient(cfg),
-		sshAddr: sshAddr,
-		sbCfg:   sbCfg,
+		client:   NewClient(cfg),
+		sshAddr:  sshAddr,
+		codeFile: codeFile,
+		sbCfg:    sbCfg,
 	}
 }
 
@@ -113,7 +117,35 @@ func (s *ShareMode) register() error {
 	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
 	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
 	fmt.Println("等待协助端连接...")
+	if s.codeFile != "" {
+		s.writeCodeFile()
+	}
 	return nil
+}
+
+// writeCodeFile 把协助码与有效期原子写入 codeFile（先写 .tmp 再 rename），
+// 供宿主程序读取。失败仅记日志，不影响协助流程。重连刷新 code 时会覆盖写入。
+func (s *ShareMode) writeCodeFile() {
+	payload := struct {
+		Code      string `json:"code"`
+		ExpiresAt int64  `json:"expiresAt"`
+	}{Code: s.code, ExpiresAt: s.expiresAt.Unix()}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("写协助码文件失败(marshal): %v", err)
+		return
+	}
+
+	tmp := s.codeFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		log.Printf("写协助码文件失败(write): %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.codeFile); err != nil {
+		log.Printf("写协助码文件失败(rename): %v", err)
+		os.Remove(tmp)
+	}
 }
 
 // waitAndHandleTunnel 等待协助端连接，然后处理隧道
