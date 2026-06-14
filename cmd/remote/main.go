@@ -8,11 +8,13 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
 	"github.com/remote-assist/tool/internal/client"
+	"github.com/remote-assist/tool/internal/crypto"
 	"github.com/remote-assist/tool/internal/relay"
 	"github.com/remote-assist/tool/internal/version"
 )
@@ -77,7 +79,7 @@ func runShare(args []string) {
 	fs := flag.NewFlagSet("share", flag.ExitOnError)
 	server := fs.String("server", "localhost:8443", "Relay server address")
 	sshAddr := fs.String("ssh", "127.0.0.1:22", "Local SSH address")
-	insecure := fs.Bool("insecure", false, "Skip TLS verification")
+	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
@@ -158,17 +160,32 @@ func runShare(args []string) {
 	// Standalone (LAN) 模式：进程内启动 relay，share 连 loopback；
 	// LAN 上其他人通过 LAN IP 直连这个 relay，不依赖任何外部服务器。
 	if *standalone {
-		if !*plain {
-			fmt.Fprintln(os.Stderr, "standalone mode: forcing --plain (LAN scenario, AEAD on tool channel already secures content)")
-			*plain = true
-		}
 		_, listenPort, err := net.SplitHostPort(*standaloneListen)
 		if err != nil || listenPort == "" {
 			log.Fatalf("invalid --standalone-listen %q: %v", *standaloneListen, err)
 		}
+		// 进程内 relay 走 TLS（临时自签证书），让 help 端连 standalone 与连公网 relay
+		// 命令完全一致（默认 --insecure=true 跳过自签校验），消除原先必须 --plain 的陷阱。
+		if *plain {
+			fmt.Fprintln(os.Stderr, "standalone mode: ignoring --plain; embedded relay uses TLS with a self-signed cert so the help side needs no special flag")
+			*plain = false
+		}
+		certDir, err := os.MkdirTemp("", "remote-standalone-certs-")
+		if err != nil {
+			log.Fatalf("standalone: create temp cert dir failed: %v", err)
+		}
+		defer os.RemoveAll(certDir)
+		certFile := filepath.Join(certDir, "server.crt")
+		keyFile := filepath.Join(certDir, "server.key")
+		if err := crypto.GenerateSelfSignedCert(certFile, keyFile); err != nil {
+			os.RemoveAll(certDir) // log.Fatalf 会 os.Exit 跳过 defer，手动兜底清理
+			log.Fatalf("standalone: generate self-signed cert failed: %v", err)
+		}
 		relayCfg := &relay.Config{
 			ListenAddr:     *standaloneListen,
-			UseTLS:         false,
+			UseTLS:         true,
+			TLSCertFile:    certFile,
+			TLSKeyFile:     keyFile,
 			CodeTTL:        30 * time.Minute,
 			CodeLength:     10,
 			AuditLogFile:   "",
@@ -176,18 +193,21 @@ func runShare(args []string) {
 		}
 		relaySrv, err := relay.NewServer(relayCfg)
 		if err != nil {
+			os.RemoveAll(certDir) // log.Fatalf 会 os.Exit 跳过 defer，手动兜底清理
 			log.Fatalf("standalone relay init failed: %v", err)
 		}
 		go func() {
 			if err := relaySrv.StartWithContext(context.Background()); err != nil {
+				os.RemoveAll(certDir) // 后台 goroutine 内 log.Fatalf 直接 os.Exit，主 goroutine 的 defer 不会执行，手动兜底清理
 				log.Fatalf("standalone relay error: %v", err)
 			}
 		}()
 		// 等 relay listener 就绪（NewServer 已经 bind 但 Accept 需要时间）
 		time.Sleep(300 * time.Millisecond)
 
-		// share 端连 loopback；外部 LAN 用户连 LAN IP
+		// share 端连 loopback，走 TLS + insecure（自签证书）；外部 LAN 用户连 LAN IP
 		*server = "127.0.0.1:" + listenPort
+		*insecure = true      // 自签证书：share 与 help 两端都跳过校验
 		*p2pMode = "disabled" // standalone 内部不用 P2P
 		*stunServer = ""
 
@@ -195,12 +215,13 @@ func runShare(args []string) {
 		fmt.Println()
 		fmt.Println("================ standalone (LAN) mode ================")
 		if lanIP != "" {
-			fmt.Printf("Relay listening at: %s:%s (LAN reachable)\n", lanIP, listenPort)
-			fmt.Printf("After you see 协助码 below, tell Claude:\n")
-			fmt.Printf("    \"协助码 <code> 在 %s:%s\"\n", lanIP, listenPort)
-			fmt.Println("Claude calls connect(code, server=\"" + lanIP + ":" + listenPort + "\") to skip external relay.")
+			fmt.Printf("Relay (TLS, self-signed) listening at: %s:%s (LAN reachable)\n", lanIP, listenPort)
+			fmt.Printf("Help side connects exactly like a normal relay (no --plain needed):\n")
+			fmt.Printf("    remote help --server %s:%s --code <code> --p2p disabled\n", lanIP, listenPort)
+			fmt.Printf("    (self-signed cert covers localhost only — on LAN keep the default --insecure=true; --insecure=false will fail)\n")
+			fmt.Printf("Or tell Claude: \"协助码 <code> 在 %s:%s\" (connect tool overrides server).\n", lanIP, listenPort)
 		} else {
-			fmt.Printf("Relay listening at: 0.0.0.0:%s (LAN IP auto-detect failed; figure out this host's LAN IP manually)\n", listenPort)
+			fmt.Printf("Relay (TLS, self-signed) listening at: 0.0.0.0:%s (LAN IP auto-detect failed; find this host's LAN IP manually)\n", listenPort)
 		}
 		fmt.Println("=======================================================")
 		fmt.Println()
@@ -238,7 +259,7 @@ func runHelp(args []string) {
 	server := fs.String("server", "localhost:8443", "Relay server address")
 	code := fs.String("code", "", "Assist code (required)")
 	listenAddr := fs.String("listen", "127.0.0.1:2222", "Local listen address")
-	insecure := fs.Bool("insecure", false, "Skip TLS verification")
+	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
