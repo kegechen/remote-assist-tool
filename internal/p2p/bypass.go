@@ -14,6 +14,7 @@ var virtualPrefixes = []string{
 	"clash", "wintun",
 	"vethernet", "vmnet", "virbr",
 	"isatap", "teredo",
+	"vboxnet", "virtualbox", "vmware", // VirtualBox/VMware 虚拟网卡（host-only 无外网路由）
 }
 
 // cgnatNet 代理常用的 CGNAT 地址范围 198.18.0.0/15
@@ -91,7 +92,19 @@ func DetectPhysicalIP() net.IP {
 		return nil
 	}
 
-	// 优先选择有广播能力的接口（物理网卡通常有）
+	// 首选 OS 默认路由出口网卡：getOutboundIP 拨 8.8.8.8 取源 IP，永远是真正能上网的
+	// 物理网卡，绝不会是 host-only 的 VirtualBox/VMware 网卡（它们没有默认路由）。
+	// 当 TUN 代理（Clash 等）劫持默认路由时，出口 IP 指向 TUN 网卡，而 TUN 已被
+	// virtualPrefixes 过滤、不在 candidates 里，于是自然回退到下面的广播启发式，仍能绕过代理。
+	if outbound := getOutboundIP(); outbound != nil {
+		for _, c := range candidates {
+			if c.ip.Equal(outbound) {
+				return c.ip
+			}
+		}
+	}
+
+	// 回退：优先选择有广播能力的接口（物理网卡通常有）
 	for _, c := range candidates {
 		if c.hasBroadcast {
 			return c.ip
