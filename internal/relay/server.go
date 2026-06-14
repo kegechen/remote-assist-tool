@@ -1,11 +1,11 @@
 package relay
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"sync"
@@ -15,6 +15,26 @@ import (
 	"github.com/remote-assist/tool/internal/logger"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+)
+
+// 服务端加固默认值（防资源耗尽型 DoS / slowloris / 超大消息）
+const (
+	// maxMessageSize 单条消息上限。最大单条来自 read_file 响应：单次最多 1 MiB 原始字节
+	// (readFileMaxChunk)，内层 JSON 把 []byte base64(×4/3)，AEADSealJSON 再对整段密文
+	// base64(×4/3) 二次膨胀 ≈ 1.86 MiB + 信封；与 MCP 端 scanner 上限对齐取 4 MiB（约 2x 余量）。
+	// 注意：maxMessageSize 与 readFileMaxChunk 强耦合，调大任一方需同步复核另一方。
+	maxMessageSize = 4 << 20 // 4 MiB
+	// readIdleTimeout 读空闲超时。客户端每 30s 发心跳，2 分钟（≈4 个心跳周期）内
+	// 无任何消息即判定为僵尸 / slowloris 连接并断开。
+	readIdleTimeout = 2 * time.Minute
+	// writeTimeout 单次写超时，挡写端 slowloris：对端慢读撑满发送缓冲会让 Write 无限
+	// 阻塞、卡死转发方的读循环 goroutine；超时即按失败关闭连接。
+	writeTimeout = 30 * time.Second
+	// maxConnsTotal 全局并发连接数上限。
+	maxConnsTotal = 2000
+	// maxConnsPerIP 单 IP 并发连接数上限，挡住单机海量建连。公网 relay 下企业出口/CGNAT
+	// 会让多用户共用同一源 IP，故放宽到 128（全局 DoS 由 maxConnsTotal 兜底），避免误伤共享 NAT。
+	maxConnsPerIP = 128
 )
 
 // Config 服务器配置
@@ -31,12 +51,16 @@ type Config struct {
 
 // Server 中转服务器
 type Server struct {
-	config      *Config
-	sessions    *SessionManager
-	codes       *CodeManager
-	clients     map[string]*ClientConn
-	clientsMu   sync.RWMutex
-	stunServer  *p2p.STUNServer
+	config     *Config
+	sessions   *SessionManager
+	codes      *CodeManager
+	clients    map[string]*ClientConn
+	clientsMu  sync.RWMutex
+	stunServer *p2p.STUNServer
+
+	connMu    sync.Mutex     // 保护 connTotal / connPerIP
+	connTotal int            // 当前全局连接数
+	connPerIP map[string]int // 每 IP 当前连接数
 }
 
 // NewServer 创建服务器
@@ -54,10 +78,11 @@ func NewServer(cfg *Config) (*Server, error) {
 	}
 
 	return &Server{
-		config:   cfg,
-		sessions: NewSessionManager(),
-		codes:    NewCodeManager(cfg.CodeLength),
-		clients:  make(map[string]*ClientConn),
+		config:    cfg,
+		sessions:  NewSessionManager(),
+		codes:     NewCodeManager(cfg.CodeLength),
+		clients:   make(map[string]*ClientConn),
+		connPerIP: make(map[string]int),
 	}, nil
 }
 
@@ -124,10 +149,53 @@ func (s *Server) StartWithContext(ctx context.Context) error {
 	}
 }
 
+// acquireConnSlot 连接准入：未超限则占一个名额并返回 true；超限返回 false，调用方应关闭连接。
+func (s *Server) acquireConnSlot(ip string) bool {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.connTotal >= maxConnsTotal || s.connPerIP[ip] >= maxConnsPerIP {
+		return false
+	}
+	s.connTotal++
+	s.connPerIP[ip]++
+	return true
+}
+
+// releaseConnSlot 连接结束时释放名额。必须与一次成功的 acquireConnSlot 严格配对调用；
+// 内部对未持有名额的 ip 做自防御，避免误调用把 connTotal 推成负数、削弱限流。
+func (s *Server) releaseConnSlot(ip string) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	cur, ok := s.connPerIP[ip]
+	if !ok {
+		return
+	}
+	if cur <= 1 {
+		delete(s.connPerIP, ip)
+	} else {
+		s.connPerIP[ip] = cur - 1
+	}
+	if s.connTotal > 0 {
+		s.connTotal--
+	}
+}
+
 // handleConn 处理连接
 func (s *Server) handleConn(conn net.Conn) {
 	clientID := generateClientID()
 	clientIP := conn.RemoteAddr().String()
+
+	// 连接数准入：按源 IP 限流，超限直接拒绝，防资源耗尽型 DoS
+	host, _, err := net.SplitHostPort(clientIP)
+	if err != nil {
+		host = clientIP
+	}
+	if !s.acquireConnSlot(host) {
+		log.Printf("Connection rejected from %s: too many connections", clientIP)
+		conn.Close()
+		return
+	}
+	defer s.releaseConnSlot(host)
 
 	// Enable TCP KeepAlive to detect dead connections
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -167,14 +235,27 @@ func (s *Server) handleConn(conn net.Conn) {
 		log.Printf("Connection closed: %s", clientID)
 	}()
 
-	// 读循环
-	dec := json.NewDecoder(conn)
+	// 读循环：按行读。依赖写端契约——每条消息均为紧凑单行 JSON 并以 '\n' 分隔
+	// （relay sendMsg = json.Marshal+'\n'；client = json.Encoder.Encode）；禁止 MarshalIndent。
+	// 限制单条消息大小（maxMessageSize）并对每次读设空闲超时（readIdleTimeout），
+	// 挡住超大消息 OOM 与 slowloris 僵尸连接。
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMessageSize)
 	for {
-		var msg proto.Message
-		if err := dec.Decode(&msg); err != nil {
-			if err != io.EOF {
-				log.Printf("Read error: %v", err)
+		conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				log.Printf("Read error from %s: %v", clientID, err)
 			}
+			return
+		}
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var msg proto.Message
+		if err := json.Unmarshal(line, &msg); err != nil {
+			log.Printf("Invalid message from %s: %v", clientID, err)
 			return
 		}
 		s.handleMessage(client, &msg)
@@ -391,6 +472,11 @@ func sendMsg(client *ClientConn, msg *proto.Message) {
 		return
 	}
 	data = append(data, '\n')
+	// 写超时：对端慢读/半死连接撑满发送缓冲会让 Write 无限阻塞、卡死转发方读循环 goroutine
+	// （写端 slowloris）。设 writeTimeout 兜底，超时按写失败关闭连接。
+	if dl, ok := client.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(writeTimeout))
+	}
 	if _, err := client.Conn.Write(data); err != nil {
 		log.Printf("Write failed to %s: %v, closing connection", client.ID, err)
 		client.Conn.Close()
