@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        goos: [windows, linux]
+        goos: [windows, linux, darwin]
         goarch: [amd64, arm64]
     env:
       CGO_ENABLED: 0
