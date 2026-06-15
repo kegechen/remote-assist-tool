@@ -311,18 +311,21 @@ func runHelp(args []string) {
 		if *code == "" {
 			boot := client.NewHelpMCPBootstrap(cfg)
 			if err := boot.Run(context.Background()); err != nil {
-				log.Fatalf("Error: %v", err)
+				fmt.Fprintf(os.Stderr, "\n连接中断: %v\nMCP 通道已断开。请让 Claude 重新调用 connect 工具重连（或重启此 MCP server）。\n", err)
+				os.Exit(1)
 			}
 		} else {
 			help := client.NewHelpModeMCP(cfg, *code)
 			if err := help.Run(); err != nil {
-				log.Fatalf("Error: %v", err)
+				fmt.Fprintf(os.Stderr, "\n连接中断: %v\nMCP 通道已断开。请让 Claude 重新调用 connect 工具重连（或重启此 MCP server）。\n", err)
+				os.Exit(1)
 			}
 		}
 	} else {
 		help := client.NewHelpMode(cfg, *code, *listenAddr)
 		if err := help.Run(); err != nil {
-			log.Fatalf("Error: %v", err)
+			fmt.Fprintf(os.Stderr, "\n连接中断: %v\n协助会话已结束。如需继续，请重新运行 remote help（SSH 隧道断开后原 ssh 会话也需重连）。\n", err)
+			os.Exit(1)
 		}
 	}
 

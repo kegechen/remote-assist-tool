@@ -82,14 +82,47 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 		} else {
 			fmt.Printf("\n连接中断，协助码仍有效: %s，正在重连...\n", formatCode(s.code))
 		}
-		s.client.Close()
-		if err := s.client.Connect(); err != nil {
-			return s.code, s.expiresAt, err
-		}
-		if err := s.register(); err != nil {
+		if err := s.reconnectWithBackoff(); err != nil {
 			return s.code, s.expiresAt, err
 		}
 	}
+}
+
+// 重连退避参数
+const (
+	reconnectMaxAttempts = 10
+	reconnectBaseDelay   = 1 * time.Second
+	reconnectMaxDelay    = 30 * time.Second
+)
+
+// reconnectWithBackoff 重连 relay 并重新注册（register 会按 ClientID 复用会话，或在
+// 协助码过期时换新码）。失败按指数退避（1s,2s,4s,…，封顶 30s）重试，连续
+// reconnectMaxAttempts 次仍失败才放弃，避免弱网瞬断时一次连不上就直接退出。
+func (s *ShareMode) reconnectWithBackoff() error {
+	delay := reconnectBaseDelay
+	for attempt := 1; attempt <= reconnectMaxAttempts; attempt++ {
+		s.client.Close()
+		err := s.client.Connect()
+		if err == nil {
+			err = s.register()
+		}
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("重连成功（第 %d 次尝试）\n", attempt)
+			}
+			return nil
+		}
+		if attempt == reconnectMaxAttempts {
+			return fmt.Errorf("重连失败，已重试 %d 次：%w", attempt, err)
+		}
+		fmt.Printf("重连失败(第 %d/%d 次): %v；%s 后重试...\n", attempt, reconnectMaxAttempts, err, delay)
+		time.Sleep(delay)
+		delay *= 2
+		if delay > reconnectMaxDelay {
+			delay = reconnectMaxDelay
+		}
+	}
+	return fmt.Errorf("重连失败")
 }
 
 // register 向 relay 注册并获取协助码
