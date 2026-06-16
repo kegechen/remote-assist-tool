@@ -46,61 +46,72 @@ func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig, codeFi
 
 // Run 运行被协助模式，协助端断开时自动等待新连接
 func (s *ShareMode) Run() (string, time.Time, error) {
-	if err := s.client.Connect(); err != nil {
-		return "", time.Time{}, err
-	}
 	defer s.client.Close()
 
-	if err := s.register(); err != nil {
-		return s.code, s.expiresAt, err
-	}
+	// 持久守护：连接/注册/隧道任何环节出错（EOF、relay 重启、网络抖动、协助码过期…）
+	// 都【不退出】，一律退避重连重注册，只能由信号（Ctrl+C / systemctl stop）终止。
+	// 初次连接+注册也走无限退避：relay 暂时不可达不应让 share 直接退出。
+	s.reconnectWithBackoff()
 
+	// rapidFails：连续"建立即断"的会话数，用于防热循环退避（见 rapidReconnectBackoff）。
+	rapidFails := 0
 	for {
+		start := time.Now()
 		tunnelErr := s.waitAndHandleTunnel()
-		if tunnelErr == nil {
-			return s.code, s.expiresAt, nil
-		}
+		sessionDur := time.Since(start)
 
 		isPeerDisconnect := errors.Is(tunnelErr, ErrPeerDisconnected)
 		codeExpired := time.Now().After(s.expiresAt)
 
-		// 非对端断开 + 协助码已过期 → 不可恢复
-		if !isPeerDisconnect && codeExpired {
-			return s.code, s.expiresAt, tunnelErr
-		}
-
-		// 对端断开 + 协助码仍有效 → 在当前连接上等待新的协助端
+		// 对端断开 + 协助码仍有效 → 在当前连接上等待新的协助端（不重连不退出）
 		if isPeerDisconnect && !codeExpired {
+			rapidFails = 0
 			fmt.Printf("\n协助端已断开连接，协助码仍有效: %s\n", formatCode(s.code))
 			fmt.Println("等待新的协助端连接...")
 			continue
 		}
 
-		// 其余情况需要重连：协助码过期，或连接异常但码有效
-		if codeExpired {
-			fmt.Println("\n协助端已断开连接，协助码已过期，正在获取新协助码...")
-		} else {
-			fmt.Printf("\n连接中断，协助码仍有效: %s，正在重连...\n", formatCode(s.code))
+		// 其余一切情况都【不退出】：含 EOF/隧道正常关闭(tunnelErr==nil，多为 relay 重启
+		// 或网络中断)、连接异常、协助码过期。统一退避重连重注册。
+		switch {
+		case tunnelErr == nil:
+			fmt.Println("\n隧道已关闭（relay 重启或网络中断），正在重连...")
+		case codeExpired:
+			fmt.Println("\n连接中断且协助码已过期，正在重连获取新协助码...")
+		default:
+			fmt.Printf("\n连接中断: %v，协助码仍有效: %s，正在重连...\n", tunnelErr, formatCode(s.code))
 		}
-		if err := s.reconnectWithBackoff(); err != nil {
-			return s.code, s.expiresAt, err
+
+		// 防热循环：若隧道"建立后极短时间内即断"，reconnectWithBackoff 可能每次第 1 次
+		// 就成功（不退避），连续多次就变成无间隔的疯狂重连、空转 CPU + 锤 relay。这里按
+		// 连续快速失败次数线性退避；正常时长的会话重置计数、立即重连（不拖慢正常恢复）。
+		var floor time.Duration
+		rapidFails, floor = rapidReconnectBackoff(sessionDur, rapidFails)
+		if floor > 0 {
+			fmt.Printf("（隧道存活仅 %v，连续 %d 次快速断开，%v 后再重连以防空转）\n",
+				sessionDur.Round(time.Millisecond), rapidFails, floor)
+			time.Sleep(floor)
 		}
+		s.reconnectWithBackoff()
 	}
 }
 
 // 重连退避参数
 const (
-	reconnectMaxAttempts = 10
-	reconnectBaseDelay   = 1 * time.Second
-	reconnectMaxDelay    = 30 * time.Second
+	reconnectBaseDelay = 1 * time.Second
+	reconnectMaxDelay  = 30 * time.Second
+	// rapidReconnectFloor 判定"建立即断"的会话时长阈值：隧道存活短于它即认为陷入
+	// 快速失败循环，触发防热循环退避（见 rapidReconnectBackoff）。
+	rapidReconnectFloor = 2 * time.Second
 )
 
-// reconnectWithBackoff 重连 relay 并重新注册（register 会按 ClientID 复用会话，或在
-// 协助码过期时换新码）。失败按指数退避（1s,2s,4s,…，封顶 30s）重试，连续
-// reconnectMaxAttempts 次仍失败才放弃，避免弱网瞬断时一次连不上就直接退出。
-func (s *ShareMode) reconnectWithBackoff() error {
+// reconnectWithBackoff 连接 relay 并注册（register 会按 ClientID 复用会话，或在协助码
+// 过期时换新码）。失败按指数退避（1s,2s,4s,…，封顶 30s）【无限重试，永不放弃】——
+// share 是持久守护进程，relay 重启 / 弱网瞬断 / 协助码过期都不应让它退出，只能由信号
+// 终止。也用于初次连接+注册。
+func (s *ShareMode) reconnectWithBackoff() {
 	delay := reconnectBaseDelay
-	for attempt := 1; attempt <= reconnectMaxAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		s.client.Close()
 		err := s.client.Connect()
 		if err == nil {
@@ -110,19 +121,31 @@ func (s *ShareMode) reconnectWithBackoff() error {
 			if attempt > 1 {
 				fmt.Printf("重连成功（第 %d 次尝试）\n", attempt)
 			}
-			return nil
+			return
 		}
-		if attempt == reconnectMaxAttempts {
-			return fmt.Errorf("重连失败，已重试 %d 次：%w", attempt, err)
-		}
-		fmt.Printf("重连失败(第 %d/%d 次): %v；%s 后重试...\n", attempt, reconnectMaxAttempts, err, delay)
+		fmt.Printf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay)
 		time.Sleep(delay)
 		delay *= 2
 		if delay > reconnectMaxDelay {
 			delay = reconnectMaxDelay
 		}
 	}
-	return fmt.Errorf("重连失败")
+}
+
+// rapidReconnectBackoff 根据上一会话存活时长与连续快速失败次数，决定重连前的退避。
+// 会话存活 ≥ rapidReconnectFloor（正常时长）→ 重置计数、不退避，保证正常断连快速恢复；
+// 短于阈值（建立即断）→ 计数 +1，按次数线性退避（1s,2s,…，封顶 reconnectMaxDelay），
+// 避免无退避地疯狂重连。返回新计数与应 sleep 的时长。
+func rapidReconnectBackoff(sessionDur time.Duration, rapidFails int) (int, time.Duration) {
+	if sessionDur >= rapidReconnectFloor {
+		return 0, 0
+	}
+	rapidFails++
+	delay := time.Duration(rapidFails) * time.Second
+	if delay > reconnectMaxDelay {
+		delay = reconnectMaxDelay
+	}
+	return rapidFails, delay
 }
 
 // register 向 relay 注册并获取协助码
