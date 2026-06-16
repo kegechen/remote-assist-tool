@@ -77,6 +77,8 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 			h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			msg, err := h.client.ReadMessage()
 			if err != nil {
+				// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
+				bridge.Disconnect(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
 				return
 			}
 			dispatchHelpToolMessage(msg, bridge)

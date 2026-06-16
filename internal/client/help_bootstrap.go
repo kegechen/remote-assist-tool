@@ -125,6 +125,17 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 			h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			msg, err := h.client.ReadMessage()
 			if err != nil {
+				// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
+				bridge.Disconnect(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
+				// 清理 bridge/help，让后续 CallTool 入口命中 not_connected。
+				// 用身份比对：reconnect 时旧 client.Close() 也会让本循环退出，但那时
+				// b.bridge 已是新连接，绝不能误清。
+				b.mu.Lock()
+				if b.bridge == bridge {
+					b.help = nil
+					b.bridge = nil
+				}
+				b.mu.Unlock()
 				return
 			}
 			dispatchHelpToolMessage(msg, bridge)

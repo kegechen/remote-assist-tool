@@ -53,18 +53,58 @@ type Bridge struct {
 	conn    MsgConn
 	key     [32]byte
 	nextID  uint64
-	pending sync.Map // id -> chan proto.ToolResp
+	pending sync.Map    // id -> chan proto.ToolResp
+	closed  atomic.Bool // 隧道断开后置 true，CallTool 立即快速失败
+	closeMu sync.Mutex  // 串行化 Disconnect，避免重复广播
 }
 
 func NewBridge(c MsgConn, key [32]byte) *Bridge { return &Bridge{conn: c, key: key} }
 
+// Disconnect 标记隧道已断开，并唤醒所有在途 CallTool 立即返回 err。
+//
+// 设计意图：读循环 goroutine 检测到 ReadMessage 出错（隧道死）时调用本方法，
+// 让已在飞的 CallTool 不必干等兜底 deadline（2~10 分钟），立刻拿到友好错误。
+// pending 里每个 channel 是 buffered size 1，投递用非阻塞 select（HandleInbound
+// 已占用名额时 default 兜底），避免死锁。
+func (b *Bridge) Disconnect(err error) {
+	b.closeMu.Lock()
+	defer b.closeMu.Unlock()
+	if b.closed.Load() {
+		return // 已断开，避免重复广播
+	}
+	if err == nil {
+		err = errors.New("tunnel_lost: 隧道已断开，请重新 connect")
+	}
+	b.closed.Store(true)
+	// 遍历所有在途调用，投递失败结果（OK=false）唤醒它们。
+	b.pending.Range(func(_, v interface{}) bool {
+		ch := v.(chan proto.ToolResp)
+		select {
+		case ch <- proto.ToolResp{OK: false, ErrorCode: "tunnel_lost", ErrorMsg: err.Error()}:
+		default: // channel 已有结果（HandleInbound 抢先投递过），无需再唤醒
+		}
+		return true
+	})
+}
+
 // CallTool 发 ToolReq，阻塞等 ToolResp 或 ctx 完成。
 // ctx 没设 deadline 时自动加 callToolFallbackTimeout（10 分钟）兜底。
 func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	// 隧道已断开：立即快速失败，不再发消息、不再干等兜底 deadline。
+	if b.closed.Load() {
+		return nil, fmt.Errorf("not_connected: 隧道已断开，请让远端重跑 share 后重新 connect")
+	}
+
 	id := atomic.AddUint64(&b.nextID, 1)
 	ch := make(chan proto.ToolResp, 1)
 	b.pending.Store(id, ch)
 	defer b.pending.Delete(id)
+
+	// 再查一次 closed：堵住 Store 与 Disconnect.Range 之间的竞态窗口——若 Disconnect
+	// 在我们 Store 之前已遍历完 pending，本次调用不会被它唤醒，这里兜底快速失败。
+	if b.closed.Load() {
+		return nil, fmt.Errorf("not_connected: 隧道已断开，请让远端重跑 share 后重新 connect")
+	}
 
 	// 调用方没设 deadline 才加兜底；尊重调用方显式 deadline。
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
