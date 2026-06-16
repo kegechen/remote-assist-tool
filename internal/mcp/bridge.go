@@ -23,7 +23,25 @@ import (
 //     导致 MCP server 整个挂死，又不至于把合理长跑工具误杀。
 //
 // 上一版用 time.After(60s) 硬切：太短，60s 内跑不完的工具被误杀（回归 bug）。
-const callToolFallbackTimeout = 10 * time.Minute
+const (
+	// callToolFallbackTimeout 长跑工具（exec / 大仓库 grep / glob / 文件分块传输）的兜底上限。
+	callToolFallbackTimeout = 10 * time.Minute
+	// callToolQuickFallbackTimeout 元数据类快工具的兜底上限：当 ToolResp 被丢或隧道
+	// 异常时快速失败，不必干等 10 分钟。只用于“确定性快、输出有界”的工具，避免重蹈
+	// 上面提到的“60s 硬切误杀长跑工具”覆辙。
+	callToolQuickFallbackTimeout = 2 * time.Minute
+)
+
+// fallbackTimeoutFor 按工具名选择兜底超时。只有确定快、输出有界的元数据类工具走短
+// 兜底；exec/grep/glob/read_file/write_file/文件传输等可能合理长跑的仍用 10 分钟。
+func fallbackTimeoutFor(name string) time.Duration {
+	switch name {
+	case "stat", "list_dir", "process_list", "tail_log":
+		return callToolQuickFallbackTimeout
+	default:
+		return callToolFallbackTimeout
+	}
+}
 
 // MsgConn help 端发给 share 端的对外契约（client.Client 已经实现 SendMessage）
 type MsgConn interface {
@@ -51,7 +69,7 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 	// 调用方没设 deadline 才加兜底；尊重调用方显式 deadline。
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, callToolFallbackTimeout)
+		ctx, cancel = context.WithTimeout(ctx, fallbackTimeoutFor(name))
 		defer cancel()
 	}
 
