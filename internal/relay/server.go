@@ -472,6 +472,11 @@ func sendMsg(client *ClientConn, msg *proto.Message) {
 		return
 	}
 	data = append(data, '\n')
+	// per-client 写锁：sendMsg 可能被多个 goroutine 并发调用（对端读循环转发、
+	// 心跳 echo、P2P 地址推送…），裸 Conn.Write 并发会交错撕裂帧，对端 json 解码
+	// 读到半条垃圾而丢消息。锁住「设写超时 + Write」全过程串行化。
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
 	// 写超时：对端慢读/半死连接撑满发送缓冲会让 Write 无限阻塞、卡死转发方读循环 goroutine
 	// （写端 slowloris）。设 writeTimeout 兜底，超时按写失败关闭连接。
 	if dl, ok := client.Conn.(interface{ SetWriteDeadline(time.Time) error }); ok {

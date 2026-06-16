@@ -32,6 +32,7 @@ type ClientConn struct {
 	Version  string // 客户端版本
 	Conn     Conn
 	Send     chan []byte
+	writeMu  sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
 }
 
 // TunnelSession 隧道会话
