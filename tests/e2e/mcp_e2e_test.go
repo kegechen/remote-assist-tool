@@ -25,8 +25,8 @@ func TestMCPEndToEnd(t *testing.T) {
 	// 计算工作目录绝对路径与二进制路径
 	wd, _ := os.Getwd()
 	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
-	relayBin := filepath.Join(repo, "bin", "relay"+exeExt())
-	remoteBin := filepath.Join(repo, "bin", "remote"+exeExt())
+	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
+	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
 	for _, p := range []string{relayBin, remoteBin} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("binary not built: %s (run `go build` first)", p)
@@ -142,11 +142,132 @@ func TestMCPEndToEnd(t *testing.T) {
 		stdoutBuf.String(), helpErr.String(), shareOut.String(), relayOut.String())
 }
 
+// TestMCPConcurrentNotHeadOfLineBlocked 验证并发分发：一条慢 exec 不阻塞后续快调用。
+// 旧实现 MCP server 串行处理 stdin，慢调用会卡住整个读循环；修复后快调用应先返回。
+func TestMCPConcurrentNotHeadOfLineBlocked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e skipped in -short")
+	}
+	wd, _ := os.Getwd()
+	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
+	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
+	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
+	for _, p := range []string{relayBin, remoteBin} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("binary not built: %s", p)
+		}
+	}
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("world"), 0644)
+
+	certs := filepath.Join(dir, "certs")
+	if err := exec.Command(relayBin, "--gen-certs", "--certs-dir", certs).Run(); err != nil {
+		t.Fatalf("gen-certs: %v", err)
+	}
+	relayCmd := exec.Command(relayBin, "--listen", ":18445",
+		"--cert", filepath.Join(certs, "server.crt"), "--key", filepath.Join(certs, "server.key"), "--stun", "")
+	relayOut := &lockedBuffer{}
+	relayCmd.Stdout = relayOut
+	relayCmd.Stderr = relayOut
+	if err := relayCmd.Start(); err != nil {
+		t.Fatalf("relay start: %v", err)
+	}
+	defer func() { relayCmd.Process.Kill(); relayCmd.Wait() }()
+	time.Sleep(600 * time.Millisecond)
+
+	shareCmd := exec.Command(remoteBin, "share", "--server", "localhost:18445", "--insecure", "--root", dir, "--p2p", "disabled")
+	shareOut := &lockedBuffer{}
+	shareCmd.Stdout = shareOut
+	shareCmd.Stderr = shareOut
+	if err := shareCmd.Start(); err != nil {
+		t.Fatalf("share start: %v", err)
+	}
+	defer func() { shareCmd.Process.Kill(); shareCmd.Wait() }()
+
+	code := waitCode(t, shareOut, 8*time.Second)
+	if code == "" {
+		t.Fatalf("no code:\n%s", shareOut.String())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	helpCmd := exec.CommandContext(ctx, remoteBin, "help", "--server", "localhost:18445", "--insecure", "--mcp-stdio", "--p2p", "disabled")
+	stdin, _ := helpCmd.StdinPipe()
+	stdout, _ := helpCmd.StdoutPipe()
+	helpErr := &lockedBuffer{}
+	helpCmd.Stderr = helpErr
+	if err := helpCmd.Start(); err != nil {
+		t.Fatalf("help start: %v", err)
+	}
+	defer func() { helpCmd.Process.Kill(); helpCmd.Wait() }()
+
+	stdoutBuf := &lockedBuffer{}
+	go io.Copy(stdoutBuf, stdout)
+
+	send(t, stdin, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	time.Sleep(200 * time.Millisecond)
+
+	connCall, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"params": map[string]any{"name": "connect", "arguments": map[string]any{"code": code}},
+	})
+	send(t, stdin, string(connCall))
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(stdoutBuf.String(), "connected") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !strings.Contains(stdoutBuf.String(), "connected") {
+		t.Fatalf("connect failed:\n%s\nshare:\n%s", stdoutBuf.String(), shareOut.String())
+	}
+
+	// 慢 exec（id=10，ping ~4s）紧接着快 stat（id=11）
+	slow, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+		"params": map[string]any{"name": "exec", "arguments": map[string]any{"argv": []string{"ping", "-n", "5", "127.0.0.1"}}},
+	})
+	quick, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+		"params": map[string]any{"name": "stat", "arguments": map[string]any{"path": filepath.Join(dir, "hello.txt")}},
+	})
+	send(t, stdin, string(slow))
+	send(t, stdin, string(quick))
+
+	// 快调用必须先于慢调用返回：轮询直到看到 id=11，此刻 id=10 应仍未出现。
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		out := stdoutBuf.String()
+		has11 := strings.Contains(out, `"id":11`)
+		has10 := strings.Contains(out, `"id":10`)
+		if has11 && !has10 {
+			t.Logf("快调用(id=11)先于慢调用(id=10)返回——并发分发生效")
+			return // PASS
+		}
+		if has10 && !has11 {
+			t.Fatalf("慢调用(id=10)先返回、快调用(id=11)被阻塞——疑似仍串行(head-of-line blocking)\nstdout:\n%s", out)
+		}
+		time.Sleep(80 * time.Millisecond)
+	}
+	t.Fatalf("超时未观察到 id=11 先返回\nstdout:\n%s\nhelp-stderr:\n%s\nshare:\n%s", stdoutBuf.String(), helpErr.String(), shareOut.String())
+}
+
 func exeExt() string {
 	if runtime.GOOS == "windows" {
 		return ".exe"
 	}
 	return ""
+}
+
+// binDir 返回存放 relay/remote 二进制的目录；默认 repo/bin，可用 RAT_E2E_BIN_DIR
+// 覆盖（用于指向临时构建目录，避免覆盖正在运行中的 bin/remote.exe）。
+func binDir(repo string) string {
+	if d := os.Getenv("RAT_E2E_BIN_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(repo, "bin")
 }
 
 func send(t *testing.T, w io.Writer, line string) {
@@ -199,8 +320,8 @@ func TestMCPBootstrapEndToEnd(t *testing.T) {
 
 	wd, _ := os.Getwd()
 	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
-	relayBin := filepath.Join(repo, "bin", "relay"+exeExt())
-	remoteBin := filepath.Join(repo, "bin", "remote"+exeExt())
+	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
+	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
 	for _, p := range []string{relayBin, remoteBin} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("binary not built: %s", p)
