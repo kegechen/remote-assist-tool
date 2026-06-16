@@ -229,6 +229,13 @@ func (s *ShareMode) waitSessionReady() (string, error) {
 			}
 			return ready.SessionID, nil
 		case proto.MsgHeartbeat:
+		case proto.MsgToolHello, proto.MsgToolReq, proto.MsgToolCancel:
+			// 会话重同步窗口（协助端重连 / session 切换）可能收到工具通道消息。
+			// 旧实现把它们当 "Unexpected message" 丢弃，导致对应 tool_req 永远收不到
+			// ToolResp、help 端 CallTool 干等兜底超时。这里投递给 daemon（若在运行）。
+			if s.daemon != nil {
+				s.daemon.Inject(msg)
+			}
 		case proto.MsgError:
 			var errMsg proto.ErrorMessage
 			proto.DecodePayload(msg, &errMsg)
