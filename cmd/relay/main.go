@@ -27,6 +27,7 @@ var (
 	genCerts     = flag.Bool("gen-certs", false, "Generate self-signed certs and exit")
 	certsDir     = flag.String("certs-dir", "./certs", "Directory for generated certs")
 	stunAddr     = flag.String("stun", ":3478", "STUN server listen address (empty to disable)")
+	noAuth       = flag.Bool("no-auth", false, "Use fixed code (no assist code exchange needed). DANGER: any device that can reach this relay can connect and control the share side. Use ONLY on fully trusted private LANs.")
 	showVersion  = flag.Bool("version", false, "Show version information")
 )
 
@@ -60,6 +61,11 @@ func main() {
 		AuditLogFile:   *auditLog,
 		UseTLS:         !*plain,
 		STUNListenAddr: *stunAddr,
+		NoAuth:         *noAuth,
+	}
+
+	if *noAuth {
+		fmt.Fprintln(os.Stderr, "\033[1;31m!!! WARNING: NO-AUTH mode enabled. Any device that can reach this relay can connect and fully control the share side (exec, read/write files). Use ONLY on a fully trusted private LAN.\033[0m")
 	}
 
 	if !*plain && (*certFile == "" || *keyFile == "") {

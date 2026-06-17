@@ -12,6 +12,19 @@ import (
 // ToolProtocolVersion 工具通道协议版本（首版）
 const ToolProtocolVersion = "1"
 
+// NoAuthCode 是 --no-auth 模式使用的固定协助码常量。
+// 使用固定 code 省去 code 交换步骤，但 AEAD 会话密钥仍由
+// DeriveSessionKey(NoAuthCode, randomNonce, randomNonce) 派生，
+// 保留传输加密防被动窃听。
+// 安全语义：固定 code 是公开常量，不防主动连接 —— 任何能访问
+// relay 地址的设备都能连上并 exec/读写本机，仅限完全可信的私有 LAN。
+//
+// 必须是 normalizeCode 安全的值（不含 '-'/' '/'_'）：relay 按原值存入
+// byCode，而 join 端先 normalizeCode 再查表、且两端各自用本值派生会话密钥。
+// 一旦含连字符会同时引发两个 bug：join 端 normalize 后查不到 byCode（报
+// invalid code）、share 用原值/help 用 normalize 值派生导致 AEAD 密钥不一致。
+const NoAuthCode = "noauth"
+
 // DeriveSessionKey 以协助码 + 两端 nonce 派生 32 字节会话密钥。
 // 不可逆，相同输入得到相同密钥；任一输入变化得到完全不同密钥。
 func DeriveSessionKey(code, nonceShare, nonceHelp string) [32]byte {

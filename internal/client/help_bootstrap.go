@@ -72,6 +72,7 @@ func (b *HelpMCPBootstrap) CallTool(ctx context.Context, name string, args json.
 type connectArgs struct {
 	Code   string `json:"code"`
 	Server string `json:"server,omitempty"` // 可选：覆盖 cfg.ServerAddr，用于 share --standalone LAN 直连
+	NoAuth bool   `json:"no_auth,omitempty"` // true: 使用固定 NoAuthCode，无需用户提供 code
 }
 
 type connectResult struct {
@@ -86,8 +87,14 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, fmt.Errorf("bad args: %w", err)
 	}
+	if a.NoAuth {
+		if a.Code == "" {
+			a.Code = proto.NoAuthCode
+		}
+		fmt.Fprintln(os.Stderr, "WARNING: NO-AUTH mode — connecting without authentication. Only safe on trusted private LANs.")
+	}
 	if a.Code == "" {
-		return nil, fmt.Errorf("code required")
+		return nil, fmt.Errorf("code required (or set no_auth=true for trusted LANs)")
 	}
 
 	b.mu.Lock()

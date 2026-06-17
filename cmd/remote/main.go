@@ -15,6 +15,7 @@ import (
 	"github.com/remote-assist/tool/internal/agent"
 	"github.com/remote-assist/tool/internal/client"
 	"github.com/remote-assist/tool/internal/crypto"
+	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/relay"
 	"github.com/remote-assist/tool/internal/version"
 )
@@ -92,6 +93,7 @@ func runShare(args []string) {
 	unsafe := fs.Bool("unsafe-full-system", false, "DANGER: disable sandbox entirely")
 	standalone := fs.Bool("standalone", false, "Embed relay in-process and listen on --standalone-listen; share connects to loopback. For LAN-only scenarios where no external relay is available.")
 	standaloneListen := fs.String("standalone-listen", ":8443", "Standalone mode: address relay listens on (use :port to listen on all interfaces)")
+	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
 	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
 
 	fs.Usage = func() {
@@ -190,6 +192,10 @@ func runShare(args []string) {
 			CodeLength:     10,
 			AuditLogFile:   "",
 			STUNListenAddr: "", // 不启 STUN，LAN 下 P2P 没必要
+			NoAuth:         *noAuth,
+		}
+		if *noAuth {
+			fmt.Fprintln(os.Stderr, "\033[1;31m!!! WARNING: NO-AUTH mode enabled. Any device that can reach this relay can connect and fully control this machine (exec, read/write files). Use ONLY on a fully trusted private LAN.\033[0m")
 		}
 		relaySrv, err := relay.NewServer(relayCfg)
 		if err != nil {
@@ -216,10 +222,16 @@ func runShare(args []string) {
 		fmt.Println("================ standalone (LAN) mode ================")
 		if lanIP != "" {
 			fmt.Printf("Relay (TLS, self-signed) listening at: %s:%s (LAN reachable)\n", lanIP, listenPort)
-			fmt.Printf("Help side connects exactly like a normal relay (no --plain needed):\n")
-			fmt.Printf("    remote help --server %s:%s --code <code> --p2p disabled\n", lanIP, listenPort)
+			if *noAuth {
+				fmt.Printf("NO-AUTH mode: help side needs no --code:\n")
+				fmt.Printf("    remote help --server %s:%s --no-auth --p2p disabled\n", lanIP, listenPort)
+				fmt.Printf("Or tell Claude: connect(server=\"%s:%s\", no_auth=true)\n", lanIP, listenPort)
+			} else {
+				fmt.Printf("Help side connects exactly like a normal relay (no --plain needed):\n")
+				fmt.Printf("    remote help --server %s:%s --code <code> --p2p disabled\n", lanIP, listenPort)
+				fmt.Printf("Or tell Claude: \"协助码 <code> 在 %s:%s\" (connect tool overrides server).\n", lanIP, listenPort)
+			}
 			fmt.Printf("    (self-signed cert covers localhost only — on LAN keep the default --insecure=true; --insecure=false will fail)\n")
-			fmt.Printf("Or tell Claude: \"协助码 <code> 在 %s:%s\" (connect tool overrides server).\n", lanIP, listenPort)
 		} else {
 			fmt.Printf("Relay (TLS, self-signed) listening at: 0.0.0.0:%s (LAN IP auto-detect failed; find this host's LAN IP manually)\n", listenPort)
 		}
@@ -265,6 +277,7 @@ func runHelp(args []string) {
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
+	noAuthHelp := fs.Bool("no-auth", false, "Connect without an assist code (use with --no-auth share/relay). DANGER: any device that can reach the relay can connect. Use ONLY on a fully trusted private LAN.")
 	mcpStdio := fs.Bool("mcp-stdio", false, "Run as MCP stdio server for Claude Code")
 	legacySSH := fs.Bool("legacy-ssh", false, "Force original SSH tunnel mode (default if --mcp-stdio not set)")
 
@@ -278,8 +291,15 @@ func runHelp(args []string) {
 	}
 	fs.Parse(args)
 
+	if *noAuthHelp {
+		fmt.Fprintln(os.Stderr, "\033[1;31m!!! WARNING: NO-AUTH mode. Any device that can reach the relay can connect and control the remote share side. Use ONLY on a fully trusted private LAN.\033[0m")
+		if *code == "" {
+			*code = proto.NoAuthCode
+		}
+	}
+
 	if *code == "" && !*mcpStdio {
-		fmt.Fprintf(os.Stderr, "Error: --code is required (or use --mcp-stdio for bootstrap mode where the code is supplied via Claude's connect tool)\n\n")
+		fmt.Fprintf(os.Stderr, "Error: --code is required (or use --mcp-stdio for bootstrap mode where the code is supplied via Claude's connect tool, or use --no-auth for trusted LANs)\n\n")
 		fs.Usage()
 		os.Exit(1)
 	}

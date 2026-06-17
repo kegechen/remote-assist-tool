@@ -47,6 +47,7 @@ type Config struct {
 	AuditLogFile   string
 	UseTLS         bool
 	STUNListenAddr string // STUN server listen address (empty to disable)
+	NoAuth         bool   // true: use fixed proto.NoAuthCode instead of random code generation (LAN-only, no auth)
 }
 
 // Server 中转服务器
@@ -325,11 +326,16 @@ func (s *Server) handleRegister(client *ClientConn) {
 
 	// 如果没有复用到，生成新的
 	if !reused {
-		var err error
-		code, err = s.codes.Generate()
-		if err != nil {
-			s.sendError(client, "CODE_GEN_FAILED", err.Error())
-			return
+		if s.config.NoAuth {
+			// --no-auth 模式：使用固定 code，省掉 code 交换
+			code = proto.NoAuthCode
+		} else {
+			var err error
+			code, err = s.codes.Generate()
+			if err != nil {
+				s.sendError(client, "CODE_GEN_FAILED", err.Error())
+				return
+			}
 		}
 		session := s.sessions.CreateSession(code, client, s.config.CodeTTL, client.ClientID)
 		expiresAt = session.ExpiresAt
