@@ -1,5 +1,6 @@
 # Local config
 .claude/
+.omc/
 
 # Binaries
 bin/

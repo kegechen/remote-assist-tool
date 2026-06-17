@@ -77,7 +77,7 @@ func main() {
 
 func runShare(args []string) {
 	fs := flag.NewFlagSet("share", flag.ExitOnError)
-	server := fs.String("server", "localhost:8443", "Relay server address")
+	server := fs.String("server", defaultRelayServer(), "Relay server address")
 	sshAddr := fs.String("ssh", "127.0.0.1:22", "Local SSH address")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
@@ -256,7 +256,7 @@ func runShare(args []string) {
 
 func runHelp(args []string) {
 	fs := flag.NewFlagSet("help", flag.ExitOnError)
-	server := fs.String("server", "localhost:8443", "Relay server address")
+	server := fs.String("server", defaultRelayServer(), "Relay server address")
 	code := fs.String("code", "", "Assist code (required)")
 	listenAddr := fs.String("listen", "127.0.0.1:2222", "Local listen address")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
@@ -330,6 +330,17 @@ func runHelp(args []string) {
 	}
 
 	fmt.Println("\nSession ended.")
+}
+
+// defaultRelayServerAddr 是内置的公网 relay 地址，未显式 --server 时使用。
+// 可用环境变量 REMOTE_RELAY_SERVER 覆盖，避免换 IP 时重新编译。
+const defaultRelayServerAddr = "23.95.78.14:8443"
+
+func defaultRelayServer() string {
+	if v := strings.TrimSpace(os.Getenv("REMOTE_RELAY_SERVER")); v != "" {
+		return v
+	}
+	return defaultRelayServerAddr
 }
 
 // splitCSV 按逗号切分并去掉空字符串

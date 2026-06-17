@@ -85,6 +85,7 @@ type MsgConn interface {
 type Daemon struct {
 	reg        *Registry
 	conn       MsgConn
+	connMu     sync.RWMutex // protects conn for SwapConn
 	key        [32]byte
 	inbound    chan *proto.Message
 	cancels    sync.Map // id -> context.CancelFunc
@@ -105,6 +106,27 @@ func (d *Daemon) RotateKey(key [32]byte) {
 		return true
 	})
 	d.key = key
+}
+
+// SwapConn atomically replaces the outbound connection (e.g. relay → P2P)
+// and rotates the session key, so subsequent tool responses go over the new
+// conn encrypted with the new key. In-flight requests are NOT cancelled — the
+// swap happens during the tool handshake window when no tool request is
+// normally in flight; a rare relay request still in flight would have its
+// response sent over P2P (the help side ignores unknown response IDs).
+func (d *Daemon) SwapConn(conn MsgConn, key [32]byte) {
+	d.connMu.Lock()
+	d.conn = conn
+	d.connMu.Unlock()
+	d.RotateKey(key)
+}
+
+// sendMsg sends a message via the current conn, safe for concurrent SwapConn.
+func (d *Daemon) sendMsg(t proto.MessageType, payload interface{}) error {
+	d.connMu.RLock()
+	c := d.conn
+	d.connMu.RUnlock()
+	return c.SendMessage(t, payload)
 }
 
 // Inject share 端 dispatch 收到 MsgToolReq/MsgToolCancel 时调用。
@@ -151,7 +173,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if d.key != [32]byte{} && len(req.ArgsJSON) > 0 {
 		plain, err := proto.AEADOpenJSON(&d.key, req.ArgsJSON)
 		if err != nil {
-			d.conn.SendMessage(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
+			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
 			return
 		}
 		req.ArgsJSON = plain
@@ -169,7 +191,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("tool | %s | panic | 0ms | err:remote_panic", req.Tool)
-			d.conn.SendMessage(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
+			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
 		}
 	}()
 	sink := &chunkSink{daemon: d, id: req.ID}
@@ -192,7 +214,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
 			time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
 	}
-	d.conn.SendMessage(proto.MsgToolResp, &resp)
+	d.sendMsg(proto.MsgToolResp, &resp)
 }
 
 // chunkSink reserved for v2 streaming; v1 tools do not use sink
@@ -216,7 +238,7 @@ func (s *chunkSink) Send(stream string, data []byte) error {
 	}
 	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: payload}
 	s.seq++
-	return s.daemon.conn.SendMessage(proto.MsgToolStream, &c)
+	return s.daemon.sendMsg(proto.MsgToolStream, &c)
 }
 
 // summarizeArgs 对各工具脱敏：read_file/write_file 只记 path+size；exec 记 argv[0]+argc

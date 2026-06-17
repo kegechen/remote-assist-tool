@@ -353,8 +353,68 @@ func (s *ShareMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTu
 	return result.Tunnel, result.Err
 }
 
-// handleTunnelP2P 通过 P2P 隧道处理 SSH 流量
+// handleTunnelP2P 通过 P2P 隧道处理流量（SSH 或 MCP 工具通道）。
+// 通过首 2 字节判断模式：[0x00,'T'] = 工具通道，其他 = SSH（原行为）。
 func (s *ShareMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
+	// Detect mode from first bytes on tunnel
+	toolMode, consumed, err := ReadModeHeader(tunnel)
+	if err != nil {
+		tunnel.Close()
+		return ErrPeerDisconnected
+	}
+	if toolMode {
+		log.Printf("P2P tunnel: tool mode detected, starting tool-over-P2P")
+		return s.handleToolOverP2P(tunnel)
+	}
+	// SSH mode: the consumed bytes are part of the SSH stream, write them
+	// into the first SSH read iteration (handled by prefixing to the buffer)
+	log.Printf("P2P tunnel: SSH mode (first bytes: %x)", consumed)
+	return s.handleSSHTunnelP2P(tunnel, consumed[:])
+}
+
+// handleToolOverP2P runs the MCP tool channel over a P2P tunnel.
+// The help side has already sent the tool-mode header; next will be ToolHello.
+func (s *ShareMode) handleToolOverP2P(tunnel *p2p.UDPTunnel) error {
+	defer tunnel.Close()
+
+	pc := NewP2PConn(tunnel)
+
+	// NOTE: no heartbeat start here — handleTunnel (relay path) already started
+	// it during the P2P negotiation window if tool messages arrived, and
+	// waitAndHandleTunnel's caller handles relay keepalive. Avoid double-start.
+
+	// Tool message loop over P2P — mirrors handleTunnel's tool message handling
+	for {
+		msg, err := pc.ReadMessage()
+		if err != nil {
+			log.Printf("P2P tool channel read error: %v", err)
+			return ErrPeerDisconnected
+		}
+		switch msg.Type {
+		case proto.MsgToolHello:
+			var hello proto.Hello
+			proto.DecodePayload(msg, &hello)
+			ack, key := buildHelloAck(hello, s.code)
+			pc.SendMessage(proto.MsgToolHelloAck, &ack)
+			if ack.Accept {
+				// Reuse existing daemon (if relay handshake created one) by
+				// swapping its conn to P2PConn. Otherwise create a fresh one.
+				s.ensureDaemon(key)
+				s.daemon.SwapConn(pc, key)
+			}
+		case proto.MsgToolReq, proto.MsgToolCancel:
+			if s.daemon != nil {
+				s.daemon.Inject(msg)
+			}
+		case proto.MsgHeartbeat:
+			// ignore
+		}
+	}
+}
+
+// handleSSHTunnelP2P handles SSH-over-P2P (original behavior), with the first
+// consumed bytes from mode detection prepended to the SSH stream.
+func (s *ShareMode) handleSSHTunnelP2P(tunnel *p2p.UDPTunnel, prefix []byte) error {
 	defer tunnel.Close()
 
 	var sshConn net.Conn
@@ -399,6 +459,11 @@ func (s *ShareMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 		return conn
 	}
 
+	// prefixPending holds the 2 bytes consumed during mode detection. They
+	// are prepended to the very first tunnel.Read payload so both go to the
+	// same SSH connection in one Write call (no split / lost-prefix risk).
+	prefixPending := prefix
+
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := tunnel.Read(buf)
@@ -415,9 +480,19 @@ func (s *ShareMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 			continue
 		}
 
+		// Merge prefix (mode-header bytes) with first payload
+		data := buf[:n]
+		if len(prefixPending) > 0 {
+			merged := make([]byte, len(prefixPending)+n)
+			copy(merged, prefixPending)
+			copy(merged[len(prefixPending):], buf[:n])
+			data = merged
+			prefixPending = nil
+		}
+
 		conn := connectSSH()
 		if conn != nil {
-			if _, err := conn.Write(buf[:n]); err != nil {
+			if _, err := conn.Write(data); err != nil {
 				connMu.Lock()
 				if sshConn == conn {
 					sshConn = nil
