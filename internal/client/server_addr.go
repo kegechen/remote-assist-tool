@@ -35,5 +35,8 @@ func IsLANServer(addr string) bool {
 	if ip == nil {
 		return false // 普通域名 → 视为公网 relay
 	}
-	return ip.IsLoopback() || ip.IsPrivate()
+	// IsPrivate 只含 RFC1918 + fc00::/7；再补 IsLinkLocalUnicast 覆盖 169.254/16
+	// （IPv4 APIPA，DHCP 失败时自分配）与 fe80::/10（IPv6 link-local）——同属同链路/
+	// 本地场景，P2P 一样无意义。
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
