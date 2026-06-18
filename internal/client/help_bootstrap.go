@@ -177,6 +177,12 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	// 回退：relay 工具握手（p2p 失败 / disabled）。此时 share 端也已回退到 handleTunnel
 	// 读 relay，会应答这里发的 ToolHello。p2p 协商可能设过 read deadline 致 decoder 缓存
 	// 错误，回退前先重建 decoder。
+	//
+	// 已知限制：若 p2p tunnel 已建立、但其上的工具握手（WriteModeHeader /
+	// handshakeToolOverP2P）失败才回退到这里，share 端已离开 handleTunnel 进入
+	// waitSessionReady（那里对 ToolHello 只 Inject 不 buildHelloAck），此处 relay 握手
+	// 会 timeout。属罕见边缘（可靠 p2p 流上工具握手极少失败）；根治需 share 端在 p2p
+	// 工具握手失败后回退 relay 模式应答，留作后续。
 	if bridge == nil {
 		h.client.ResetDecoder()
 		k, hsErr := h.handshakeToolWithP2P(nil) // mgr=nil：纯 relay 工具握手，不再喂 PeerAddrReady
@@ -508,8 +514,15 @@ func (h *HelpMode) negotiateP2POnly(mgr *p2p.P2PManager, mode p2p.P2PMode, resul
 				mgr.HandlePeerAddrReady(&ready)
 			}
 			peerReady = true
-		case proto.MsgHeartbeat, proto.MsgError:
+		case proto.MsgHeartbeat:
 			continue
+		case proto.MsgError:
+			// 对端断 / relay 错误：提前返回以回退 relay，不干等满 timeout（对称 share 的 negotiateP2P）
+			h.client.SetReadDeadline(time.Time{})
+			var errMsg proto.ErrorMessage
+			proto.DecodePayload(msg, &errMsg)
+			mgr.Close()
+			return nil, fmt.Errorf("relay error during P2P negotiation: %s", errMsg.Message)
 		default:
 			continue
 		}
