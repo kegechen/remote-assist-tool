@@ -121,6 +121,12 @@ func (s *ShareMode) reconnectWithBackoff() {
 			if attempt > 1 {
 				fmt.Printf("重连成功（第 %d 次尝试）\n", attempt)
 			}
+			// 心跳保活绑定 relay 连接生命周期：register 成功即启动，覆盖「等待协助端 /
+			// relay 中转 / P2P 转发」全程。relay 对每个 client 有 readIdleTimeout(2min)，
+			// 任一阶段静默不发消息都会被判掉线 → DisconnectClient 置 session.Share=nil →
+			// 协助端无法 join（standalone 下还会自连内嵌 relay 每 2min 断一次、刷屏重连）。
+			// 上一连接的心跳 goroutine 会在 Close() 后经 IsClosed() 退出，故每连接只多一个。
+			s.client.StartHeartbeatLoop(30 * time.Second)
 			return
 		}
 		fmt.Printf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay)
@@ -506,8 +512,7 @@ func (s *ShareMode) handleSSHTunnelP2P(tunnel *p2p.UDPTunnel, prefix []byte) err
 
 // handleTunnel 处理隧道（支持多次SSH连接）
 func (s *ShareMode) handleTunnel() error {
-	// Start heartbeat to keep relay connection alive through NAT/firewalls
-	s.client.StartHeartbeatLoop(30 * time.Second)
+	// 心跳已由 reconnectWithBackoff 在连接建立时启动（覆盖等待/中转/P2P 全生命周期），此处不再重复
 
 	// Shared state: current SSH connection to local SSH server
 	var sshConn net.Conn
