@@ -139,39 +139,26 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		if startErr != nil {
 			log.Printf("MCP P2P manager start failed: %v", startErr)
 			p2pMgr = nil
-		} else {
-			fmt.Fprintln(os.Stderr, "MCP: P2P 协商已启动（与工具握手并行）")
 		}
 	}
 
-	// Tool handshake over relay. During this phase, PeerAddrReady may arrive
-	// from the relay — handshakeToolWithP2P feeds it to the P2P manager
-	// instead of discarding it.
-	key, err := h.handshakeToolWithP2P(p2pMgr)
-	if err != nil {
-		if p2pMgr != nil {
-			p2pMgr.Close()
-		}
-		h.client.Close()
-		return nil, fmt.Errorf("handshake failed: %w", err)
-	}
-
-	// --- P2P negotiation (phase 2: collect result after handshake) ---
 	var bridge *mcp.Bridge
 	var p2pConn *P2PConn // non-nil when P2P active
+	var key [32]byte
 
+	// --- P2P 协商优先（不发 ToolHello）---
+	// 先纯协商拿 p2p 结果：成功则在 p2p 隧道上做工具握手，失败再回退 relay 工具握手。
+	// 两端都「先 P2P 协商、结果决定握手通道」，消除 help 先 relay 握手与 share 端
+	// ReadModeHeader 互等的死锁（详见 negotiateP2POnly 注释）。
 	if p2pMgr != nil {
-		tunnel, p2pErr := h.collectP2PResult(p2pMgr, p2pMode, p2pResultCh)
-		if p2pErr != nil {
-			if p2pMode == p2p.P2PModeRequired {
-				h.client.Close()
-				return nil, fmt.Errorf("P2P required but failed: %w", p2pErr)
-			}
-			log.Printf("MCP P2P negotiation failed, falling back to relay: %v", p2pErr)
+		tunnel, p2pErr := h.negotiateP2POnly(p2pMgr, p2pMode, p2pResultCh)
+		if p2pErr != nil && p2pMode == p2p.P2PModeRequired {
+			h.client.Close()
+			return nil, fmt.Errorf("P2P required but failed: %w", p2pErr)
 		}
 		if tunnel != nil {
 			pc := NewP2PConn(tunnel)
-			// Signal tool-over-P2P mode to share, then redo tool handshake over P2P
+			// 先发 mode header 告诉 share 走工具模式，再在 p2p 上做工具握手
 			if err := pc.WriteModeHeader(); err != nil {
 				log.Printf("MCP P2P mode header send failed, falling back to relay: %v", err)
 				tunnel.Close()
@@ -187,8 +174,17 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		}
 	}
 
-	// Fallback: relay mode (original behavior)
+	// 回退：relay 工具握手（p2p 失败 / disabled）。此时 share 端也已回退到 handleTunnel
+	// 读 relay，会应答这里发的 ToolHello。p2p 协商可能设过 read deadline 致 decoder 缓存
+	// 错误，回退前先重建 decoder。
 	if bridge == nil {
+		h.client.ResetDecoder()
+		k, hsErr := h.handshakeToolWithP2P(nil) // mgr=nil：纯 relay 工具握手，不再喂 PeerAddrReady
+		if hsErr != nil {
+			h.client.Close()
+			return nil, fmt.Errorf("handshake failed: %w", hsErr)
+		}
+		key = k
 		bridge = mcp.NewBridge(h.client, key)
 	}
 
@@ -468,6 +464,69 @@ func (b *HelpMCPBootstrap) doDownloadFile(ctx context.Context, br toolCaller, ra
 	return json.Marshal(fileTransferResult{Bytes: total, Chunks: chunks})
 }
 
+// negotiateP2POnly 只做 P2P 协商：读 relay 收集 PeerAddrReady 喂给 P2P manager、
+// 等打洞结果，**不发 ToolHello**（与 share 端 negotiateP2P 对称）。返回 p2p tunnel
+// （成功）或 nil（失败/超时，调用方回退 relay）。
+//
+// 修复 MCP-over-p2p 握手死锁：旧流程 help 先在 relay 上 handshakeToolWithP2P 等
+// ToolHelloAck，但 share p2p 建立后进 handleTunnelP2P→ReadModeHeader 阻塞等 help 在
+// p2p 隧道上发 mode header；help 卡在等 relay Ack、share 卡在等 p2p header → 互相
+// 死等、connect 15s timeout（p2p 越快建立越必现）。改为两端都「先纯 P2P 协商，结果
+// 决定走 p2p 握手 or relay 握手」即消除——p2p 成功时 help 直接 WriteModeHeader，
+// share 的 ReadModeHeader 立即读到，不再死锁。
+func (h *HelpMode) negotiateP2POnly(mgr *p2p.P2PManager, mode p2p.P2PMode, resultCh <-chan p2p.P2PResult) (*p2p.UDPTunnel, error) {
+	select {
+	case result := <-resultCh:
+		return result.Tunnel, result.Err
+	default:
+	}
+	fmt.Fprintln(os.Stderr, "MCP: 正在尝试 P2P 直连...")
+	timeout := 12 * time.Second
+	if mode == p2p.P2PModeRequired {
+		timeout = 32 * time.Second
+	}
+	h.client.SetReadDeadline(time.Now().Add(timeout))
+	peerReady := false
+	for !peerReady {
+		msg, err := h.client.ReadMessage()
+		if err != nil {
+			h.client.SetReadDeadline(time.Time{})
+			if isNetTimeout(err) {
+				mgr.Close()
+				if mode == p2p.P2PModeRequired {
+					return nil, fmt.Errorf("P2P 协商超时：对端未响应")
+				}
+				return nil, nil
+			}
+			mgr.Close()
+			return nil, err
+		}
+		switch msg.Type {
+		case proto.MsgPeerAddrReady:
+			var ready proto.PeerAddrReady
+			if err := proto.DecodePayload(msg, &ready); err == nil {
+				mgr.HandlePeerAddrReady(&ready)
+			}
+			peerReady = true
+		case proto.MsgHeartbeat, proto.MsgError:
+			continue
+		default:
+			continue
+		}
+	}
+	h.client.SetReadDeadline(time.Time{})
+	result := <-resultCh
+	if result.Tunnel != nil {
+		fmt.Fprintln(os.Stderr, "MCP: P2P 直连已建立！")
+	} else if result.Err == nil {
+		fmt.Fprintln(os.Stderr, "MCP: P2P 打洞超时，回退到中转模式")
+		mgr.Close()
+	} else {
+		mgr.Close()
+	}
+	return result.Tunnel, result.Err
+}
+
 // handshakeToolWithP2P performs tool handshake over relay, while also feeding
 // PeerAddrReady messages to the P2P manager (if active). This is a variant of
 // handshakeTool that doesn't discard P2P signaling messages.
@@ -504,49 +563,6 @@ func (h *HelpMode) handshakeToolWithP2P(mgr *p2p.P2PManager) ([32]byte, error) {
 		default:
 			continue
 		}
-	}
-}
-
-// collectP2PResult waits for the P2P negotiation result with a bounded timeout.
-// If the P2P manager already produced a result (e.g. LAN fast path or hole punch
-// completed during handshake), returns immediately. Otherwise waits up to the
-// remaining negotiation budget.
-func (h *HelpMode) collectP2PResult(mgr *p2p.P2PManager, mode p2p.P2PMode, resultCh <-chan p2p.P2PResult) (*p2p.UDPTunnel, error) {
-	// Check for immediate result
-	select {
-	case result := <-resultCh:
-		if result.Tunnel != nil {
-			fmt.Fprintln(os.Stderr, "MCP: P2P 直连已建立！")
-		}
-		return result.Tunnel, result.Err
-	default:
-	}
-
-	// Wait with timeout for hole punching to complete
-	timeout := 8 * time.Second
-	if mode == p2p.P2PModeRequired {
-		timeout = 20 * time.Second
-	}
-
-	fmt.Fprintln(os.Stderr, "MCP: 等待 P2P 打洞完成...")
-	select {
-	case result := <-resultCh:
-		if result.Tunnel != nil {
-			fmt.Fprintln(os.Stderr, "MCP: P2P 直连已建立！")
-		} else if result.Err == nil {
-			fmt.Fprintln(os.Stderr, "MCP: P2P 打洞超时，回退到中转模式")
-			mgr.Close()
-		} else {
-			mgr.Close()
-		}
-		return result.Tunnel, result.Err
-	case <-time.After(timeout):
-		mgr.Close()
-		if mode == p2p.P2PModeRequired {
-			return nil, fmt.Errorf("P2P 协商超时：打洞未完成")
-		}
-		fmt.Fprintln(os.Stderr, "MCP: P2P 打洞超时，回退到中转模式")
-		return nil, nil
 	}
 }
 
