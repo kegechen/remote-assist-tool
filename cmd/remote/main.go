@@ -78,7 +78,7 @@ func main() {
 
 func runShare(args []string) {
 	fs := flag.NewFlagSet("share", flag.ExitOnError)
-	server := fs.String("server", defaultRelayServer(), "Relay server address")
+	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)")
 	sshAddr := fs.String("ssh", "127.0.0.1:22", "Local SSH address")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
@@ -118,6 +118,8 @@ func runShare(args []string) {
 	args = clean
 
 	fs.Parse(args)
+
+	*server = client.NormalizeServerAddr(*server) // 无端口补默认 :8443（standalone 走 loopback 不受影响）
 
 	if *unsafe {
 		fmt.Fprint(os.Stderr, "\033[1;31m!!! DANGER: --unsafe-full-system disables ALL sandboxing.\nFiles, exec commands have NO restriction.\nAborting in 5 seconds — press Ctrl+C to abort.\033[0m\n")
@@ -268,7 +270,7 @@ func runShare(args []string) {
 
 func runHelp(args []string) {
 	fs := flag.NewFlagSet("help", flag.ExitOnError)
-	server := fs.String("server", defaultRelayServer(), "Relay server address")
+	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)")
 	code := fs.String("code", "", "Assist code (required)")
 	listenAddr := fs.String("listen", "127.0.0.1:2222", "Local listen address")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
@@ -309,12 +311,21 @@ func runHelp(args []string) {
 		os.Exit(1)
 	}
 
+	*server = client.NormalizeServerAddr(*server) // 无端口补默认 :8443
+
 	// Derive STUN server if not specified
 	if *stunServer == "" && *server != "" {
 		host, _, _ := net.SplitHostPort(*server)
 		if host != "" {
 			*stunServer = net.JoinHostPort(host, "3478")
 		}
+	}
+
+	// 私网/loopback relay（standalone / 同 LAN）下 auto 跳过 P2P：relay 已直连、P2P 多余，
+	// 且 standalone 不启 STUN 必然打洞超时。required 仍尊重用户意图。
+	if *p2pMode == "auto" && client.IsLANServer(*server) {
+		fmt.Fprintf(os.Stderr, "P2P: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", *server)
+		*p2pMode = "disabled"
 	}
 
 	cfg := &client.Config{

@@ -112,6 +112,7 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	if a.Server != "" {
 		effectiveCfg.ServerAddr = a.Server
 	}
+	effectiveCfg.ServerAddr = NormalizeServerAddr(effectiveCfg.ServerAddr) // 无端口补默认 :8443
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
 	if err := h.client.Connect(); err != nil {
 		return nil, fmt.Errorf("relay connect failed: %w", err)
@@ -131,6 +132,12 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	var p2pResultCh <-chan p2p.P2PResult
 
 	p2pMode := p2p.ParseP2PMode(effectiveCfg.P2PMode)
+	// 私网/loopback relay（standalone / 同 LAN）下 relay 已直连、P2P 多余，且 standalone
+	// 不启 STUN 必然打洞超时；auto 模式自动跳过，省掉 8s 超时 + 后台徒劳重试。
+	if p2pMode == p2p.P2PModeAuto && IsLANServer(effectiveCfg.ServerAddr) {
+		fmt.Fprintf(os.Stderr, "MCP: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（如需强制用 --p2p required）\n", effectiveCfg.ServerAddr)
+		p2pMode = p2p.P2PModeDisabled
+	}
 	if p2pMode != p2p.P2PModeDisabled {
 		p2pMgr = p2p.NewP2PManager(p2pMode, effectiveCfg.STUNServer, effectiveCfg.BindIP)
 		p2pMgr.SetRelayConn(h.client)
