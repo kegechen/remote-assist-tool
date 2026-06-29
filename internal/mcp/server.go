@@ -105,7 +105,7 @@ func (s *Server) dispatch(ctx context.Context, req *rpcReq, out io.Writer) {
 			return
 		}
 		s.write(out, rpcResp{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-			"content": []map[string]any{{"type": "text", "text": string(result)}},
+			"content": []map[string]any{{"type": "text", "text": humanizeToolResult(p.Name, result)}},
 		}})
 	case "notifications/initialized":
 		// no-op
