@@ -178,6 +178,11 @@ func (s *ShareMode) register() error {
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
 	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
 	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
+	// 复制到系统剪贴板，方便直接粘贴给协助端（尽力而为：失败静默，不影响协助流程）。
+	// 首次注册与重连刷新 code 都走到这里，剪贴板始终是最新协助码。
+	if err := copyToClipboard(formatCode(resp.Code)); err == nil {
+		fmt.Println("（协助码已复制到剪贴板）")
+	}
 	fmt.Println("等待协助端连接...")
 	if s.codeFile != "" {
 		s.writeCodeFile()

@@ -54,9 +54,13 @@ func detectLANIPv4() string {
 }
 
 func main() {
+	// 无参数（典型场景：直接双击 exe，会弹出一个 console 窗口）默认进 share 协助端模式，
+	// 方便非命令行用户一键起协助端、看协助码。命令行完整用法见 `remote --help`。
 	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+		log.Printf("remote-assist %s", version.Info())
+		fmt.Println("（无参数启动 → 默认 share 协助端模式；命令行用法见 `remote --help`）")
+		runShare(nil)
+		return
 	}
 
 	log.Printf("remote-assist %s", version.Info())
