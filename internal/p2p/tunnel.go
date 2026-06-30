@@ -23,10 +23,13 @@ const (
 
 	// Reliable transport constants
 	retransmitBase     = 200 * time.Millisecond // Initial retransmit timeout
-	maxRetries         = 5                      // Max retransmit attempts per packet
-	recvChanSize       = 256                    // In-order delivery channel buffer
-	maxRecvBuf         = 256                    // Max out-of-order buffered packets
-	retransmitInterval = 50 * time.Millisecond  // How often to check for retransmits
+	maxRetries         = 5                      // (保留)旧的单包最大重试数；重传不再因此拆隧道
+	maxRTO             = 2 * time.Second        // 重传退避封顶，避免 rto 无限增长
+	recvChanSize       = 1024                   // In-order delivery channel buffer（增大，缓解投递背压导致的停发 ACK）
+	maxRecvBuf         = 1024                   // Max out-of-order buffered packets（≥ maxInflight，避免乱序溢出被丢弃）
+	maxInflight        = 256                    // 发送窗口上限：在途未 ACK 包数。Write 窗口满时阻塞等 ACK，
+	// 取代原先一次性 burst 整个 buffer（512KB→~370 包）压垮链路 + 撑爆对端乱序缓冲的行为
+	retransmitInterval = 50 * time.Millisecond // How often to check for retransmits
 	peerTimeout        = 60 * time.Second        // Close tunnel if no packet from peer for this long
 	readDeadline       = 30 * time.Second        // UDP read deadline (shorter than peerTimeout for responsive detection)
 
@@ -126,7 +129,9 @@ type UDPTunnel struct {
 	sendMutex   sync.Mutex                // protects Write (chunking + seq assignment)
 	nextSendSeq uint32                    // next sequence number to assign
 	sendWin     map[uint32]*pendingPacket // unacked packets awaiting ACK
-	sendWinMu   sync.Mutex               // protects sendWin
+	sendWinMu   sync.Mutex                // protects sendWin / sendClosed
+	sendCond    *sync.Cond                // 基于 sendWinMu：ACK 腾出窗口空间时唤醒被流控阻塞的 Write
+	sendClosed  bool                      // Close 时置位 + Broadcast，令流控中的 Write 返回 EOF
 
 	// Receive state
 	nextRecvSeq uint32            // next expected sequence number
@@ -157,6 +162,7 @@ func NewUDPTunnel(conn *net.UDPConn, remoteAddr *net.UDPAddr) *UDPTunnel {
 		recvCh:       make(chan []byte, recvChanSize),
 		stopCh:     make(chan struct{}),
 	}
+	t.sendCond = sync.NewCond(&t.sendWinMu)
 	go t.recvLoop()
 	go t.retransmitLoop()
 	go t.keepaliveLoop()
@@ -175,6 +181,7 @@ func NewUDPRelayTunnel(conn *net.UDPConn, relayAddr *net.UDPAddr, sessionID stri
 		recvCh:       make(chan []byte, recvChanSize),
 		stopCh:       make(chan struct{}),
 	}
+	t.sendCond = sync.NewCond(&t.sendWinMu)
 	go t.recvLoop()
 	go t.retransmitLoop()
 	go t.keepaliveLoop()
@@ -256,8 +263,17 @@ func (t *UDPTunnel) Write(b []byte) (int, error) {
 		binary.BigEndian.PutUint32(pkt[1:5], seq)
 		copy(pkt[5:], chunk)
 
-		// Track for retransmission
+		// 发送窗口流控：在途未 ACK 包达上限时阻塞，等 ACK（recvLoop）腾出空间，
+		// 避免一次性 burst 整个 buffer 压垮链路 + 撑爆对端乱序缓冲（maxRecvBuf）。
 		t.sendWinMu.Lock()
+		for len(t.sendWin) >= maxInflight && !t.sendClosed {
+			t.sendCond.Wait()
+		}
+		if t.sendClosed {
+			t.sendWinMu.Unlock()
+			return totalWritten, io.EOF
+		}
+		// Track for retransmission
 		t.sendWin[seq] = &pendingPacket{
 			data:   pkt,
 			sentAt: time.Now(),
@@ -285,6 +301,11 @@ func (t *UDPTunnel) Close() error {
 	}
 	t.closed = true
 	close(t.stopCh)
+	// 唤醒可能阻塞在发送窗口流控里的 Write，令其返回 EOF
+	t.sendWinMu.Lock()
+	t.sendClosed = true
+	t.sendCond.Broadcast()
+	t.sendWinMu.Unlock()
 	return t.conn.Close()
 }
 
@@ -342,7 +363,10 @@ func (t *UDPTunnel) recvLoop() {
 		case pktTypeAck:
 			// Remove from send window - packet was received by peer
 			t.sendWinMu.Lock()
-			delete(t.sendWin, seq)
+			if _, ok := t.sendWin[seq]; ok {
+				delete(t.sendWin, seq)
+				t.sendCond.Signal() // 腾出窗口空间，唤醒被流控阻塞的 Write
+			}
 			t.sendWinMu.Unlock()
 
 		case pktTypeData:
@@ -418,19 +442,23 @@ func (t *UDPTunnel) retransmitLoop() {
 		case <-ticker.C:
 			now := time.Now()
 			t.sendWinMu.Lock()
-			for seq, pkt := range t.sendWin {
-				// Exponential backoff: 200ms, 400ms, 800ms, 1.6s, 3.2s
-				rto := retransmitBase << uint(pkt.retries)
+			for _, pkt := range t.sendWin {
+				// 指数退避，shift 封顶避免移位溢出，rto 封顶 maxRTO
+				shift := pkt.retries
+				if shift > 4 {
+					shift = 4
+				}
+				rto := retransmitBase << uint(shift)
+				if rto > maxRTO {
+					rto = maxRTO
+				}
 				if now.Sub(pkt.sentAt) < rto {
 					continue
 				}
-				if pkt.retries >= maxRetries {
-					// Packet permanently lost after all retries - tunnel is unreliable now
-					log.Printf("P2P: packet seq=%d dropped after %d retries, closing tunnel", seq, maxRetries)
-					t.sendWinMu.Unlock()
-					t.Close()
-					return
-				}
+				// 持续重传，不因单包重试次数拆掉整条隧道——偶发丢包 / 对端瞬时背压
+				//（接收端写盘慢、recvCh 满而暂停发 ACK）都会让个别包多次重传，
+				// 旧实现 5 次即 Close 整条隧道，导致大文件每几 MB 必断。隧道真正死亡
+				// 由 recvLoop 的 peerTimeout（60s 收不到任何包）判定。
 				pkt.retries++
 				pkt.sentAt = now
 				t.sendPacket(pkt.data)
