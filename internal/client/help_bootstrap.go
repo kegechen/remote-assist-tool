@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/remote-assist/tool/internal/mcp"
@@ -207,6 +208,28 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	// reconnect / session management even when tools use P2P).
 	h.client.StartHeartbeatLoop(30 * time.Second)
 
+	// teardown 拆除当前会话，sync.Once 保证只跑一次：关闭 relay 控制连接
+	// （→ 心跳循环经 IsClosed() 退出，并让 relay 端读循环 EOF → DisconnectClient
+	// 立即清 Help 槽）、唤醒在途工具调用、清 bootstrap 状态。任一读循环（P2P / relay）
+	// 检测到断开都调它。修复点：旧实现 P2P 隧道断开后只 bridge.Disconnect + 清 b.help，
+	// 不关 h.client，心跳不停 → relay 端 Help 槽永驻 → 新 connect 永久 already-has-helper。
+	var teardownOnce sync.Once
+	teardown := func(err error) {
+		teardownOnce.Do(func() {
+			bridge.Disconnect(err)
+			h.client.Close()
+			if p2pConn != nil {
+				p2pConn.Close()
+			}
+			b.mu.Lock()
+			if b.bridge == bridge {
+				b.help = nil
+				b.bridge = nil
+			}
+			b.mu.Unlock()
+		})
+	}
+
 	// 后台 ReadMessage 循环，把工具消息投给 bridge。
 	// When P2P is active, tool messages arrive via p2pConn; the relay read
 	// loop still runs to handle relay-level messages (heartbeat echo, errors,
@@ -217,13 +240,7 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 			for {
 				msg, err := p2pConn.ReadMessage()
 				if err != nil {
-					bridge.Disconnect(fmt.Errorf("tunnel_lost: P2P 隧道已断开（%w），请重新 connect", err))
-					b.mu.Lock()
-					if b.bridge == bridge {
-						b.help = nil
-						b.bridge = nil
-					}
-					b.mu.Unlock()
+					teardown(fmt.Errorf("tunnel_lost: P2P 隧道已断开（%w），请重新 connect", err))
 					return
 				}
 				dispatchHelpToolMessage(msg, bridge)
@@ -238,7 +255,10 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 				h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
 				msg, err := h.client.ReadMessage()
 				if err != nil {
+					// relay 信令通道断开：即便 P2P 工具隧道还在，也必须拆除会话，
+					// 否则 relay 端 Help 槽泄漏，新 connect 撞 already-has-helper。
 					log.Printf("MCP relay read loop ended (P2P active): %v", err)
+					teardown(fmt.Errorf("tunnel_lost: relay 信令通道已断开（%w），请重新 connect", err))
 					return
 				}
 				switch msg.Type {
@@ -258,13 +278,7 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 				h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
 				msg, err := h.client.ReadMessage()
 				if err != nil {
-					bridge.Disconnect(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
-					b.mu.Lock()
-					if b.bridge == bridge {
-						b.help = nil
-						b.bridge = nil
-					}
-					b.mu.Unlock()
+					teardown(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
 					return
 				}
 				dispatchHelpToolMessage(msg, bridge)
@@ -332,10 +346,43 @@ func callToolRetry(ctx context.Context, br toolCaller, name string, args json.Ra
 }
 
 // upload_file: 本机 → 远端。复用 share 端 write_file 协议。
-// 全新上传：第一块 Create=true（truncate），后续块 Append=true。
-// 断点续传（offset>0）：seek 本地到 offset，全程 Append（不 truncate）。
-// 每个 chunk 走 callToolRetry 抗瞬时抖动；彻底失败时 error 带已传偏移，
-// 调用方 reconnect 后用 offset=<已传> 续传。
+// uploadConcurrency 流水线上传的滑动窗口大小（同时在途的 write_file 数）。
+// bridge 支持并发 in-flight，多 chunk 同时在隧道里隐藏单 chunk 往返延迟，吞吐不再
+// 受 chunk/RTT 串行限制。8 × 512KiB ≈ 4MiB 在途，内存可控、也不超 relay 4MiB 单帧。
+const uploadConcurrency = 8
+
+// progressLoop 周期性把传输进度打到 stderr，直到 stop 关闭。done 由各 chunk goroutine
+// 原子累加，total 为文件总大小（<=0 时只报已传字节）。
+func progressLoop(op, path string, done *atomic.Int64, total int64, stop <-chan struct{}) {
+	ticker := time.NewTicker(800 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			logTransferProgress(op, path, done.Load(), total)
+		}
+	}
+}
+
+// logTransferProgress 输出一行传输进度到 stderr。
+func logTransferProgress(op, path string, done, total int64) {
+	const mib = 1 << 20
+	if total > 0 {
+		fmt.Fprintf(os.Stderr, "[%s] %s %.1f%% (%.1f/%.1f MiB)\n",
+			op, path, float64(done)/float64(total)*100, float64(done)/float64(mib), float64(total)/float64(mib))
+	} else {
+		fmt.Fprintf(os.Stderr, "[%s] %s %.1f MiB\n", op, path, float64(done)/float64(mib))
+	}
+}
+
+// upload_file: 本机 → 远端。流水线并发上传：串行读本地（保证 offset 顺序分配）+
+// 并发 write_file(绝对 offset，pwrite 幂等可乱序)，滑动窗口限并发。
+//   - 从头传（offset=0）：先同步 truncate 远端为空，再并发填充（offset 写不 truncate）。
+//   - 续传（offset>0）：以远端实际大小（stat）为续传点。
+//   - 失败：建议从头重传（offset=0）——并发 WriteAt 不保证连续，失败可能留洞，
+//     从头 truncate 重传才保证正确（隧道修复后单次成功率高，从头重传成本可接受）。
 func (b *HelpMCPBootstrap) doUploadFile(ctx context.Context, br toolCaller, raw json.RawMessage) (json.RawMessage, error) {
 	var a fileTransferArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -351,60 +398,126 @@ func (b *HelpMCPBootstrap) doUploadFile(ctx context.Context, br toolCaller, raw 
 	defer f.Close()
 
 	if a.Offset > 0 {
+		// 续传以「远端文件实际大小」为准，而非信任调用方 offset：消除"写成功但响应丢致
+		// 重复"的膨胀（详见 TestUploadResumeDedupsByRemoteSize）。
+		statArgs, _ := json.Marshal(struct {
+			Path string `json:"path"`
+		}{Path: a.RemotePath})
+		if res, serr := br.CallTool(ctx, "stat", statArgs); serr == nil {
+			var st struct {
+				Size int64 `json:"size"`
+			}
+			if json.Unmarshal(res, &st) == nil && st.Size >= 0 {
+				a.Offset = st.Size
+			}
+		} else {
+			a.Offset = 0 // 远端文件不存在 / stat 失败：从头传
+		}
 		if _, err := f.Seek(a.Offset, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("seek local %q to offset %d: %w", a.LocalPath, a.Offset, err)
 		}
 	}
 
-	// 中途失败不回滚，远端留半截文件；调用方可 reconnect 后 offset 续传（接 Append）。
+	// 从头传：先同步 truncate 远端为空（offset 写模式不 truncate，需先清空避免旧内容残留）。
+	if a.Offset == 0 {
+		truncArgs, _ := json.Marshal(struct {
+			Path    string `json:"path"`
+			Content []byte `json:"content"`
+			Create  bool   `json:"create"`
+		}{Path: a.RemotePath, Content: []byte{}, Create: true})
+		if _, err := callToolRetry(ctx, br, "write_file", truncArgs); err != nil {
+			return nil, fmt.Errorf("truncate remote %q: %w", a.RemotePath, err)
+		}
+	}
+
+	// 流水线并发上传
+	var totalSize int64
+	if fi, e := f.Stat(); e == nil {
+		totalSize = fi.Size()
+	}
+	var doneBytes atomic.Int64
+	doneBytes.Store(a.Offset)
+	progStop := make(chan struct{})
+	go progressLoop("upload", a.RemotePath, &doneBytes, totalSize, progStop)
+
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sem := make(chan struct{}, uploadConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	setErr := func(e error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = e
+			cancel() // 唤醒在途 goroutine 与派发循环快速收尾
+		}
+		mu.Unlock()
+	}
+	hasErr := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return firstErr != nil
+	}
+
 	total := a.Offset
 	var chunks int
+	offset := a.Offset
 	buf := make([]byte, fileTransferChunk)
 	for {
+		if hasErr() {
+			break
+		}
 		n, rerr := io.ReadFull(f, buf)
 		// ReadFull 在最后一块（短读）返回 ErrUnexpectedEOF + n>0；EOF 表示 n==0。
 		eof := errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF)
 		if !eof && rerr != nil {
-			return nil, fmt.Errorf("read local %q: %w", a.LocalPath, rerr)
-		}
-		if n == 0 && chunks == 0 && a.Offset == 0 {
-			// 空文件：明确建一个空文件
-			wargs, _ := json.Marshal(struct {
-				Path    string `json:"path"`
-				Content []byte `json:"content"`
-				Create  bool   `json:"create"`
-			}{Path: a.RemotePath, Content: []byte{}, Create: true})
-			if _, err := callToolRetry(ctx, br, "write_file", wargs); err != nil {
-				return nil, fmt.Errorf("write empty file to remote %q: %w", a.RemotePath, err)
-			}
-			chunks = 1
+			setErr(fmt.Errorf("read local %q: %w", a.LocalPath, rerr))
 			break
 		}
 		if n == 0 {
+			break // 空文件已由上面的 truncate 建好；续传到末尾亦在此结束
+		}
+		data := make([]byte, n) // 拷贝（buf 下轮复用）
+		copy(data, buf[:n])
+		at := offset
+		offset += int64(n)
+		total += int64(n)
+		chunks++
+
+		select {
+		case sem <- struct{}{}:
+		case <-cctx.Done():
+		}
+		if hasErr() {
 			break
 		}
-		// 首块且非续传时 Create（truncate）；续传或后续块一律 Append。
-		fresh := chunks == 0 && a.Offset == 0
-		wargs, _ := json.Marshal(struct {
-			Path    string `json:"path"`
-			Content []byte `json:"content"`
-			Create  bool   `json:"create"`
-			Append  bool   `json:"append"`
-		}{
-			Path:    a.RemotePath,
-			Content: buf[:n],
-			Create:  fresh,
-			Append:  !fresh,
-		})
-		if _, err := callToolRetry(ctx, br, "write_file", wargs); err != nil {
-			return nil, fmt.Errorf("upload to remote %q failed at offset %d (reconnect and re-call upload_file with offset=%d to resume): %w", a.RemotePath, total, total, err)
-		}
-		chunks++
-		total += int64(n)
+		wg.Add(1)
+		go func(data []byte, at int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			wargs, _ := json.Marshal(struct {
+				Path    string `json:"path"`
+				Content []byte `json:"content"`
+				At      int64  `json:"at"`
+			}{Path: a.RemotePath, Content: data, At: at})
+			if _, err := callToolRetry(cctx, br, "write_file", wargs); err != nil {
+				setErr(fmt.Errorf("upload to remote %q failed near offset %d (reconnect and re-call upload_file with offset=0 to resume from scratch): %w", a.RemotePath, at, err))
+				return
+			}
+			doneBytes.Add(int64(len(data)))
+		}(data, at)
+
 		if eof {
 			break
 		}
 	}
+	wg.Wait()
+	close(progStop)
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	logTransferProgress("upload", a.RemotePath, total, totalSize) // 收尾打印 100%
 	return json.Marshal(fileTransferResult{Bytes: total, Chunks: chunks})
 }
 
@@ -438,6 +551,24 @@ func (b *HelpMCPBootstrap) doDownloadFile(ctx context.Context, br toolCaller, ra
 	// 中途失败不回滚，本地留半截文件；调用方可 reconnect 后 offset 续传。
 	total := a.Offset
 	var chunks int
+	// 进度显示：先 stat 远端拿总大小（拿不到则只报已传字节）
+	var totalSize int64
+	dstatArgs, _ := json.Marshal(struct {
+		Path string `json:"path"`
+	}{Path: a.RemotePath})
+	if res, serr := br.CallTool(ctx, "stat", dstatArgs); serr == nil {
+		var st struct {
+			Size int64 `json:"size"`
+		}
+		if json.Unmarshal(res, &st) == nil {
+			totalSize = st.Size
+		}
+	}
+	var doneBytes atomic.Int64
+	doneBytes.Store(a.Offset)
+	progStop := make(chan struct{})
+	go progressLoop("download", a.LocalPath, &doneBytes, totalSize, progStop)
+	defer close(progStop)
 	for {
 		rargs, _ := json.Marshal(struct {
 			Path   string `json:"path"`
@@ -464,6 +595,7 @@ func (b *HelpMCPBootstrap) doDownloadFile(ctx context.Context, br toolCaller, ra
 				return nil, fmt.Errorf("write chunk %d to local %q: %w", chunks, a.LocalPath, err)
 			}
 			total += int64(len(rres.Bytes))
+			doneBytes.Store(total)
 		}
 		chunks++
 		if rres.EOF {
@@ -474,6 +606,7 @@ func (b *HelpMCPBootstrap) doDownloadFile(ctx context.Context, br toolCaller, ra
 			return nil, fmt.Errorf("empty chunk without EOF from remote %q at offset %d", a.RemotePath, total)
 		}
 	}
+	logTransferProgress("download", a.LocalPath, total, totalSize) // 收尾打印 100%
 	return json.Marshal(fileTransferResult{Bytes: total, Chunks: chunks})
 }
 

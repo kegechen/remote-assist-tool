@@ -71,6 +71,7 @@ type WriteFileArgs struct {
 	Mode    uint32 `json:"mode,omitempty"`
 	Create  bool   `json:"create,omitempty"`
 	Append  bool   `json:"append,omitempty"`
+	At      *int64 `json:"at,omitempty"` // 非 nil：在绝对偏移处 pwrite（幂等、可乱序，供流水线并发上传）
 }
 
 type WriteFileResult struct {
@@ -94,6 +95,20 @@ func (t *WriteFileTool) Run(ctx context.Context, raw json.RawMessage, _ agent.St
 	mode := fs.FileMode(0644)
 	if a.Mode != 0 {
 		mode = fs.FileMode(a.Mode)
+	}
+	// 绝对偏移写（pwrite）：幂等、可乱序，供流水线并发上传。不 truncate、不 append；
+	// 文件按需创建/扩展（offset > 当前大小时中间为稀疏 0，由后续 chunk 填补）。
+	if a.At != nil {
+		f, err := os.OpenFile(resolved, os.O_WRONLY|os.O_CREATE, mode)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		n, err := f.WriteAt(a.Content, *a.At)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(WriteFileResult{BytesWritten: n})
 	}
 	flag := os.O_WRONLY | os.O_TRUNC
 	if a.Append {
