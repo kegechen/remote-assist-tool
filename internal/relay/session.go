@@ -29,7 +29,8 @@ type ClientConn struct {
 	ID       string
 	Type     string // "share" or "help"
 	ClientID string // 持久化客户端ID
-	Version  string // 客户端版本
+	Version  string // 客户端版本（已 sanitizePeerString）
+	Host     string // 客户端身份串 "user@host 系统 架构"（已 sanitizePeerString；旧客户端为空）
 	Conn     Conn
 	Send     chan []byte
 	writeMu  sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧

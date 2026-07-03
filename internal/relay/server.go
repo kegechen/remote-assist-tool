@@ -268,15 +268,22 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) {
 	switch msg.Type {
 	case proto.MsgRegisterRequest:
 		var req proto.RegisterRequest
-		if proto.DecodePayload(msg, &req) == nil {
+		if proto.DecodePayload(msg, &req) == nil && client.Type == "" {
+			// 身份字段只在连接首帧写入（Type 为空 = ClientConn 尚未发布进会话）：
+			// 发布后其他 goroutine 可能并发读这些字段，读循环 goroutine 的无锁
+			// 重写构成数据竞态；正常客户端每个连接也只发一次 register/join。
 			client.ClientID = req.ClientID
-			client.Version = req.Version
+			client.Version = sanitizePeerString(req.Version)
+			client.Host = sanitizePeerString(req.Host)
 		}
 		s.handleRegister(client)
 	case proto.MsgJoinRequest:
 		var req proto.JoinRequest
 		if err := proto.DecodePayload(msg, &req); err == nil {
-			client.Version = req.Version
+			if client.Type == "" { // 同 register：仅首帧写入，防已发布字段被并发改写
+				client.Version = sanitizePeerString(req.Version)
+				client.Host = sanitizePeerString(req.Host)
+			}
 			s.handleJoin(client, req.Code)
 		}
 	case proto.MsgTunnelData:
@@ -320,7 +327,7 @@ func (s *Server) handleRegister(client *ClientConn) {
 			expiresAt = existingSession.ExpiresAt
 			s.sessions.ReuseSession(existingSession, client)
 			reused = true
-			log.Printf("Reusing existing session for client %s, code: %s (version: %s)", client.ClientID, FormatCode(code), client.Version)
+			log.Printf("Reusing existing session for client %s, code: %s (version: %s, host: %s)", client.ClientID, FormatCode(code), client.Version, client.Host)
 		}
 	}
 
@@ -340,7 +347,7 @@ func (s *Server) handleRegister(client *ClientConn) {
 		session := s.sessions.CreateSession(code, client, s.config.CodeTTL, client.ClientID)
 		expiresAt = session.ExpiresAt
 		logger.LogCodeGenerated(code, client.ID, session.ExpiresAt)
-		log.Printf("Share client registered, code: %s (version: %s)", FormatCode(code), client.Version)
+		log.Printf("Share client registered, code: %s (version: %s, host: %s)", FormatCode(code), client.Version, client.Host)
 	}
 
 	resp := &proto.RegisterResponse{
@@ -381,21 +388,22 @@ func (s *Server) handleJoin(client *ClientConn, code string) {
 		return
 	}
 
-	// JoinResponse 附带 share 端版本
+	// JoinResponse 附带 share 端版本与身份串
 	resp := &proto.JoinResponse{
 		Success:     true,
 		SessionID:   session.ID,
 		PeerVersion: share.Version,
+		PeerHost:    share.Host,
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 
-	// SessionReady 附带 help 端版本
-	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: session.ID, PeerVersion: client.Version})
+	// SessionReady 附带 help 端版本与身份串
+	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: session.ID, PeerVersion: client.Version, PeerHost: client.Host})
 	sendMsg(share, readyMsg)
 
 	logger.LogSessionEstablished(session.ID, code, client.ID, share.ID)
-	log.Printf("Session established: %s (share version: %s, help version: %s)", session.ID, share.Version, client.Version)
+	log.Printf("Session established: %s (share: %s %s, help: %s %s)", session.ID, share.Version, share.Host, client.Version, client.Host)
 }
 
 // handlePeerAddrAdvertise 处理对等端地址通告
