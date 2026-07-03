@@ -13,6 +13,7 @@ import (
 
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/sysinfo"
 	"github.com/remote-assist/tool/internal/version"
 )
 
@@ -45,7 +46,7 @@ func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
 // join 向 relay 发 JoinRequest 并等待 JoinResponse；返回 resp 或 error。
 // 不打印 stdout，让调用方决定输出。
 func (h *HelpMode) join() (*proto.JoinResponse, error) {
-	req := &proto.JoinRequest{Code: h.code, Version: version.Info()}
+	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary()}
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/remote-assist/tool/internal/agent/tools"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/sysinfo"
 	"github.com/remote-assist/tool/internal/version"
 )
 
@@ -157,7 +158,7 @@ func rapidReconnectBackoff(sessionDur time.Duration, rapidFails int) (int, time.
 // register 向 relay 注册并获取协助码
 func (s *ShareMode) register() error {
 	clientID, _ := GetOrCreateClientID()
-	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info()}); err != nil {
+	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: sysinfo.Summary()}); err != nil {
 		return err
 	}
 

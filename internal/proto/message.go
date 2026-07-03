@@ -40,6 +40,7 @@ type Message struct {
 type RegisterRequest struct {
 	ClientID string `json:"client_id,omitempty"`
 	Version  string `json:"version,omitempty"`
+	Host     string `json:"host,omitempty"` // 身份串 "user@host 系统 架构"（sysinfo.Summary），看板展示用；旧客户端不发
 }
 
 // RegisterResponse 注册响应
@@ -52,6 +53,7 @@ type RegisterResponse struct {
 type JoinRequest struct {
 	Code    string `json:"code"`
 	Version string `json:"version,omitempty"`
+	Host    string `json:"host,omitempty"` // 同 RegisterRequest.Host
 }
 
 // JoinResponse 加入响应
