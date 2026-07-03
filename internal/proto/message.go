@@ -62,6 +62,7 @@ type JoinResponse struct {
 	SessionID   string `json:"session_id,omitempty"`
 	Error       string `json:"error,omitempty"`
 	PeerVersion string `json:"peer_version,omitempty"`
+	PeerHost    string `json:"peer_host,omitempty"` // share 端身份串（同 RegisterRequest.Host；旧 relay 不发）
 }
 
 // TunnelData 隧道数据
@@ -78,6 +79,7 @@ type Heartbeat struct {
 type SessionReady struct {
 	SessionID   string `json:"session_id"`
 	PeerVersion string `json:"peer_version,omitempty"`
+	PeerHost    string `json:"peer_host,omitempty"` // help 端身份串（同 JoinRequest.Host；旧 relay 不发）
 }
 
 // ErrorMessage 错误消息

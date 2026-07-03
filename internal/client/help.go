@@ -89,8 +89,12 @@ func (h *HelpMode) Run() error {
 		printf := func(f string, args ...any) { fmt.Fprintf(out, f, args...) }
 
 		println("已连接到被协助端！")
+		printf("本机标识: %s\n", sysinfo.Summary())
 		if resp.PeerVersion != "" {
 			printf("对端版本: %s\n", resp.PeerVersion)
+		}
+		if resp.PeerHost != "" {
+			printf("对端标识: %s\n", resp.PeerHost)
 		}
 		printf("会话ID: %s\n", resp.SessionID)
 

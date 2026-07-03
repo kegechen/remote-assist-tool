@@ -158,7 +158,8 @@ func rapidReconnectBackoff(sessionDur time.Duration, rapidFails int) (int, time.
 // register 向 relay 注册并获取协助码
 func (s *ShareMode) register() error {
 	clientID, _ := GetOrCreateClientID()
-	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: sysinfo.Summary()}); err != nil {
+	hostInfo := sysinfo.Summary()
+	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: hostInfo}); err != nil {
 		return err
 	}
 
@@ -178,6 +179,7 @@ func (s *ShareMode) register() error {
 	s.code = resp.Code
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
 	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
+	fmt.Printf("本机标识: %s\n", hostInfo)
 	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
 	// 复制到系统剪贴板，方便直接粘贴给协助端（尽力而为：失败静默，不影响协助流程）。
 	// 首次注册与重连刷新 code 都走到这里，剪贴板始终是最新协助码。
@@ -261,6 +263,9 @@ func (s *ShareMode) waitSessionReady() (string, error) {
 			fmt.Println("协助端已连接！")
 			if ready.PeerVersion != "" {
 				fmt.Printf("对端版本: %s\n", ready.PeerVersion)
+			}
+			if ready.PeerHost != "" {
+				fmt.Printf("对端标识: %s\n", ready.PeerHost)
 			}
 			return ready.SessionID, nil
 		case proto.MsgHeartbeat:

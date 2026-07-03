@@ -123,6 +123,9 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		h.client.Close()
 		return nil, fmt.Errorf("join failed: %w", err)
 	}
+	if resp.PeerHost != "" {
+		fmt.Fprintf(os.Stderr, "MCP: 对端标识 %s\n", resp.PeerHost)
+	}
 	// --- P2P negotiation (phase 1: start BEFORE tool handshake) ---
 	// Both sides negotiate P2P simultaneously:
 	//   - Share starts P2P right after SessionReady (in waitAndHandleTunnel)
