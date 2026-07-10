@@ -33,6 +33,10 @@ type HelpMCPBootstrap struct {
 	mu     sync.Mutex
 	help   *HelpMode   // 装载成功后非 nil
 	bridge *mcp.Bridge // 装载成功后非 nil
+	// 记录最近一次成功 connect 的参数，供传输中隧道断时自动重连+续传（抗抖动）
+	lastCode   string
+	lastServer string
+	lastNoAuth bool
 }
 
 func NewHelpMCPBootstrap(cfg *Config) *HelpMCPBootstrap {
@@ -62,12 +66,111 @@ func (b *HelpMCPBootstrap) CallTool(ctx context.Context, name string, args json.
 		return nil, fmt.Errorf("not_connected: call 'connect' with the assist code first")
 	}
 	switch name {
-	case "upload_file":
-		return b.doUploadFile(ctx, br, args)
-	case "download_file":
-		return b.doDownloadFile(ctx, br, args)
+	case "upload_file", "download_file":
+		return b.transferWithReconnect(ctx, name, args)
 	}
 	return br.CallTool(ctx, name, args)
+}
+
+// maxTransferReconnects 传输中隧道断（tunnel_lost）时自动重连+续传的最大次数。
+const maxTransferReconnects = 5
+
+// transferBackoffUnit 自动重连前的递增退避基数（第 n 次等 n×unit）。变量以便单测调小。
+var transferBackoffUnit = time.Second
+
+// isTunnelDown 判定错误是否为「隧道整体断开 / 未连接」——这类错误单纯重试无用，
+// 需重连后续传（区别于瞬时错，后者由 callToolRetry 就地退避重试）。
+func isTunnelDown(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "tunnel_lost") || strings.Contains(s, "not_connected")
+}
+
+// reconnect 用最近一次成功 connect 的参数重建隧道 + bridge（供传输中自动重连）。
+func (b *HelpMCPBootstrap) reconnect(ctx context.Context) error {
+	b.mu.Lock()
+	a := connectArgs{Code: b.lastCode, Server: b.lastServer, NoAuth: b.lastNoAuth}
+	b.mu.Unlock()
+	if a.Code == "" && !a.NoAuth {
+		return fmt.Errorf("no cached assist code to auto-reconnect")
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	_, err = b.doConnect(ctx, raw)
+	return err
+}
+
+// transferWithReconnect 包裹 upload/download：隧道断时自动重连并从断点续传，不再要求
+// 外部人工重连重调（抗网络抖动）。上传走顺序模式（uploadConcurrency=1）保证无空洞、续传安全。
+// caveat：只在协助码仍有效时管用；码过期/轮换救不了（那是另一层问题）。
+func (b *HelpMCPBootstrap) transferWithReconnect(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	run := func(a json.RawMessage) (json.RawMessage, error) {
+		b.mu.Lock()
+		br := b.bridge
+		b.mu.Unlock()
+		if br == nil {
+			return nil, fmt.Errorf("not_connected: call 'connect' with the assist code first")
+		}
+		if name == "upload_file" {
+			return b.doUploadFile(ctx, br, a)
+		}
+		return b.doDownloadFile(ctx, br, a)
+	}
+	return transferLoop(ctx, name, args, run, func() error { return b.reconnect(ctx) })
+}
+
+// transferLoop 对 run 做自动重连+续传：run 返回 tunnel_lost/not_connected 类错误时，
+// 递增退避后调 reconnect，再以续传参数重跑，直至成功 / 非隧道错 / 次数耗尽 / ctx 取消。
+// 抽成自由函数便于对 run/reconnect 注入 mock 做单测。
+func transferLoop(ctx context.Context, name string, args json.RawMessage,
+	run func(json.RawMessage) (json.RawMessage, error), reconnect func() error) (json.RawMessage, error) {
+	cur := args
+	for attempt := 0; ; attempt++ {
+		res, err := run(cur)
+		if err == nil {
+			return res, nil
+		}
+		if attempt >= maxTransferReconnects || !isTunnelDown(err) || ctx.Err() != nil {
+			return nil, err
+		}
+		select {
+		case <-time.After(time.Duration(attempt+1) * transferBackoffUnit):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if rerr := reconnect(); rerr != nil {
+			return nil, fmt.Errorf("传输中隧道断开，自动重连失败: %w（原传输错误: %v）", rerr, err)
+		}
+		next, aerr := resumeTransferArgs(name, cur)
+		if aerr != nil {
+			return nil, aerr
+		}
+		cur = next
+		fmt.Fprintf(os.Stderr, "[%s] 隧道断开→已自动重连，第 %d 次续传...\n", name, attempt+1)
+	}
+}
+
+// resumeTransferArgs 生成续传参数：download 以本地已存大小为续传点；upload 置 Offset>0
+// 触发 doUploadFile 的「按远端 stat 真实大小续传」（顺序上传 → 远端大小即连续前缀，安全）。
+func resumeTransferArgs(name string, raw json.RawMessage) (json.RawMessage, error) {
+	var a fileTransferArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, err
+	}
+	if name == "download_file" {
+		var size int64
+		if fi, err := os.Stat(a.LocalPath); err == nil {
+			size = fi.Size()
+		}
+		a.Offset = size
+	} else {
+		a.Offset = 1 // 置正即可，doUploadFile 会以远端 stat 真实大小为准
+	}
+	return json.Marshal(a)
 }
 
 type connectArgs struct {
@@ -292,6 +395,10 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	b.mu.Lock()
 	b.help = h
 	b.bridge = bridge
+	// 缓存本次 connect 参数，供传输中隧道断时自动重连（用同一码/同一 relay 续传）
+	b.lastCode = a.Code
+	b.lastServer = a.Server
+	b.lastNoAuth = a.NoAuth
 	b.mu.Unlock()
 
 	result := connectResult{Connected: true, SessionID: resp.SessionID, Server: effectiveCfg.ServerAddr}
@@ -349,10 +456,12 @@ func callToolRetry(ctx context.Context, br toolCaller, name string, args json.Ra
 }
 
 // upload_file: 本机 → 远端。复用 share 端 write_file 协议。
-// uploadConcurrency 流水线上传的滑动窗口大小（同时在途的 write_file 数）。
-// bridge 支持并发 in-flight，多 chunk 同时在隧道里隐藏单 chunk 往返延迟，吞吐不再
-// 受 chunk/RTT 串行限制。8 × 512KiB ≈ 4MiB 在途，内存可控、也不超 relay 4MiB 单帧。
-const uploadConcurrency = 8
+// uploadConcurrency 上传滑动窗口大小（同时在途的 write_file 数）。
+// 取 1（顺序上传）：并发 WriteAt 失败时会在远端留空洞（高 offset 写了、低 offset 没写），
+// 使「按远端 stat 大小续传」不安全（跳过空洞 → 文件损坏）。顺序上传保证远端大小恒等于
+// 连续前缀，配合 transferLoop 的自动重连+续传能安全扛住网络抖动。代价是高 RTT 链路吞吐降，
+// 但对「偶尔推二进制过跨境链路」的场景，正确性 + 带进度续传 >> 吞吐。
+const uploadConcurrency = 1
 
 // progressLoop 周期性把传输进度打到 stderr，直到 stop 关闭。done 由各 chunk goroutine
 // 原子累加，total 为文件总大小（<=0 时只报已传字节）。
