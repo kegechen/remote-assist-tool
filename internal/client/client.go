@@ -14,6 +14,11 @@ import (
 	"github.com/remote-assist/tool/internal/proto"
 )
 
+// writeTimeout 单次写超时兜底：对端慢读 / 半死隧道撑满发送缓冲会让 enc.Encode 无限
+// 阻塞并死占 c.mu，进而冻结心跳、SetReadDeadline 与读循环 → 整个 MCP 拖死。超时按写
+// 失败返回，触发上层断线处理。对齐 relay 侧同名 writeTimeout。
+const writeTimeout = 30 * time.Second
+
 // Config 客户端配置
 type Config struct {
 	ServerAddr   string
@@ -126,6 +131,9 @@ func (c *Client) SendMessage(msgType proto.MessageType, payload interface{}) err
 	if err != nil {
 		return err
 	}
+	// 写超时兜底：避免半死隧道下 Encode 无限阻塞、死占 c.mu 冻结读循环与心跳。
+	c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	defer c.conn.SetWriteDeadline(time.Time{})
 	return c.enc.Encode(msg)
 }
 

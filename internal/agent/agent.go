@@ -75,6 +75,18 @@ func classifyError(err error) (code, msg string) {
 	}
 }
 
+// defaultToolTimeout 给未显式带 DeadlineMs 的工具请求兜底执行上限，按工具分档：
+// 元数据类快工具短兜底；exec / grep / 文件传输等可能合理长跑的给更长上限。与 host 端
+// mcp.fallbackTimeoutFor 呼应，但更紧（share 端先于 host 兜底返回，避免误报 tunnel_lost）。
+func defaultToolTimeout(tool string) time.Duration {
+	switch tool {
+	case "stat", "list_dir", "process_list", "tail_log", "glob":
+		return 30 * time.Second
+	default:
+		return 5 * time.Minute
+	}
+}
+
 // MsgConn agent 与 share Client 之间的最小依赖契约（便于单测注入）
 type MsgConn interface {
 	SendMessage(t proto.MessageType, payload interface{}) error
@@ -136,6 +148,16 @@ func (d *Daemon) Inject(msg *proto.Message) {
 	select {
 	case d.inbound <- msg:
 	default:
+		// 缓冲满不能静默丢 MsgToolReq，否则 host 永远等不到响应、干等兜底超时。
+		// 解出 req.ID 回一条 server_busy 错误，让调用方立即快速失败。
+		// Inject 必须保持非阻塞（见函数头注释）——sendMsg 可能阻塞（受写超时限最多 ~30s），
+		// 故放 goroutine 发，绝不阻塞 share 端主 dispatch 读循环 / 心跳。
+		if msg.Type == proto.MsgToolReq {
+			var req proto.ToolReq
+			if err := proto.DecodePayload(msg, &req); err == nil {
+				go d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "server_busy", ErrorMsg: "daemon inbound full"})
+			}
+		}
 		log.Printf("daemon: inbound full, dropping %s", msg.Type)
 	}
 }
@@ -178,14 +200,15 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		}
 		req.ArgsJSON = plain
 	}
-	var ctx context.Context
-	var cancel context.CancelFunc
-	if req.DeadlineMs > 0 {
-		ctx, cancel = context.WithTimeout(parent, time.Duration(req.DeadlineMs)*time.Millisecond)
-	} else {
-		ctx, cancel = context.WithCancel(parent)
+	// 兜底执行上限：host 通常不发 DeadlineMs；不加 deadline 时，阻塞型 I/O（FIFO /
+	// 特殊文件 / 卡死 syscall）会让工具永不返回、host 干等 2~10min 兜底且 goroutine 泄漏。
+	// 按工具分档给默认 deadline，保证每个请求有界。
+	timeout := time.Duration(req.DeadlineMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = defaultToolTimeout(req.Tool)
 	}
-	defer cancel() // 防止 ctx goroutine 泄漏
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	d.cancels.Store(req.ID, context.CancelFunc(cancel))
 	defer d.cancels.Delete(req.ID)
 	defer func() {
@@ -196,7 +219,29 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	}()
 	sink := &chunkSink{daemon: d, id: req.ID}
 	start := time.Now()
-	resp := d.reg.Dispatch(ctx, &req, sink)
+	// Dispatch 放 goroutine 里 race 计时器：即便工具阻塞在不响应 ctx 的 I/O，也保证 host
+	// 在 deadline 内拿到响应（deadline_exceeded / cancelled），绝不让其永等。被遗弃的
+	// goroutine 若跑 exec/ps 等 ctx-aware 工具会随 cancel 结束；纯阻塞 I/O 可能泄漏，属
+	// 可接受代价（换取“任何请求必有返回”）。
+	respCh := make(chan proto.ToolResp, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				respCh <- proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"}
+			}
+		}()
+		respCh <- d.reg.Dispatch(ctx, &req, sink)
+	}()
+	var resp proto.ToolResp
+	select {
+	case resp = <-respCh:
+	case <-ctx.Done():
+		code := "deadline_exceeded"
+		if ctx.Err() == context.Canceled {
+			code = "cancelled"
+		}
+		resp = proto.ToolResp{ID: req.ID, OK: false, ErrorCode: code, ErrorMsg: fmt.Sprintf("tool %s: %s (limit %s)", req.Tool, code, timeout)}
+	}
 	// 加密 result（密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法）
 	if d.key != [32]byte{} && len(resp.ResultJSON) > 0 {
 		if wrapped, err := proto.AEADSealJSON(&d.key, resp.ResultJSON); err == nil {

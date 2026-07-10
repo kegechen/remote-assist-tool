@@ -68,13 +68,16 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 		return fmt.Errorf("tool handshake: %w", err)
 	}
 	bridge := mcp.NewBridge(h.client, key)
-	// 心跳保活：每 30s 发 Heartbeat，relay 回 echo，避免 ReadMessage 2-min deadline
-	// 因为空闲被触发，导致后台 goroutine 退出 → MCP 工具调用全部失效。
+	// 心跳保活：每 30s 发 Heartbeat，relay 回 echo，避免读 deadline 因空闲被触发，
+	// 导致后台 goroutine 退出 → MCP 工具调用全部失效。
 	h.client.StartHeartbeatLoop(30 * time.Second)
 	// 后台 ReadMessage 循环，把工具消息投给 bridge
 	go func() {
 		for {
-			h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			// 读 deadline 兜底检测隧道死亡：心跳每 30s 且 relay 回 echo，健康隧道每 30s
+			// 必有帧重置本 deadline；取 75s（容 2 个心跳周期）比原 2min 更快发现静默死亡
+			// → 更早 Disconnect 唤醒在途调用。
+			h.client.SetReadDeadline(time.Now().Add(75 * time.Second))
 			msg, err := h.client.ReadMessage()
 			if err != nil {
 				// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
