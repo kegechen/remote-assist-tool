@@ -243,6 +243,7 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		h.client.Close()
 		return nil, fmt.Errorf("join failed: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "MCP: 已连接中转服务 %s\n", relayDesc(&effectiveCfg))
 	if resp.PeerHost != "" {
 		fmt.Fprintf(os.Stderr, "MCP: 对端标识 %s\n", resp.PeerHost)
 	}

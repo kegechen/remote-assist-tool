@@ -30,6 +30,23 @@ type Config struct {
 	BindIP       string // 手动指定绑定 IP，为空则自动检测
 }
 
+// relayDesc 描述实际连上的 relay：地址 + 传输方式。
+//
+// 值得单独打一行：最终连的是哪台，是「编译期默认值 → REMOTE_RELAY_SERVER →
+// --server → NormalizeServerAddr 补默认端口 → --standalone 改写成 loopback」这一串
+// 处理的结果，光看命令行看不出来（尤其编译期默认值随构建而变）。传输方式同理：
+// TLS/明文 配错的现场表现只是一个没头没尾的 join EOF。
+func relayDesc(cfg *Config) string {
+	mode := "明文"
+	if cfg.UseTLS {
+		mode = "TLS"
+		if cfg.InsecureSkip {
+			mode = "TLS，跳过证书校验"
+		}
+	}
+	return fmt.Sprintf("%s (%s)", cfg.ServerAddr, mode)
+}
+
 // Client 基础客户端
 type Client struct {
 	config *Config

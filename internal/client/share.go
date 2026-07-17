@@ -180,6 +180,7 @@ func (s *ShareMode) register() error {
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
 	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
 	fmt.Printf("本机标识: %s\n", hostInfo)
+	fmt.Printf("中转服务: %s\n", relayDesc(s.client.config))
 	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
 	// 复制到系统剪贴板，方便直接粘贴给协助端（尽力而为：失败静默，不影响协助流程）。
 	// 首次注册与重连刷新 code 都走到这里，剪贴板始终是最新协助码。
@@ -193,13 +194,18 @@ func (s *ShareMode) register() error {
 	return nil
 }
 
-// writeCodeFile 把协助码与有效期原子写入 codeFile（先写 .tmp 再 rename），
+// writeCodeFile 把协助码、中转服务地址与有效期原子写入 codeFile（先写 .tmp 再 rename），
 // 供宿主程序读取。失败仅记日志，不影响协助流程。重连刷新 code 时会覆盖写入。
+//
+// server 必须一起给：光有协助码，协助端并不知道该去哪台 relay 找它——而实际连的那台是
+// 「编译期默认值 → REMOTE_RELAY_SERVER → --server → 补默认端口 → --standalone 改写」
+// 一路算出来的，宿主程序无从推断（standalone 下更是跟命令行上写的完全不是一回事）。
 func (s *ShareMode) writeCodeFile() {
 	payload := struct {
 		Code      string `json:"code"`
+		Server    string `json:"server"`
 		ExpiresAt int64  `json:"expiresAt"`
-	}{Code: s.code, ExpiresAt: s.expiresAt.Unix()}
+	}{Code: s.code, Server: s.client.config.ServerAddr, ExpiresAt: s.expiresAt.Unix()}
 
 	data, err := json.Marshal(payload)
 	if err != nil {
