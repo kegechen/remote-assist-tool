@@ -90,11 +90,11 @@ func runShare(args []string) {
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
-	rootDir := fs.String("root", "", "Sandbox root for file operations (required unless --unsafe-full-system)")
+	rootDir := fs.String("root", "", "Optional: limit file tools to this subtree (empty = no limit). Guards against slips, NOT a security boundary — exec is not confined by it.")
 	allowExec := fs.String("allow-exec", "", "Comma-separated exec basename allowlist (empty = no restriction beyond deny)")
 	denyExec := fs.String("deny-exec", "rm,shutdown,reboot,mkfs,dd", "Comma-separated exec basename denylist")
 	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup via ShellExecuteW runas")
-	unsafe := fs.Bool("unsafe-full-system", false, "DANGER: disable sandbox entirely")
+	unsafeExec := fs.Bool("unsafe-exec", false, "DANGER: drop the exec deny/allow lists, letting any command run")
 	standalone := fs.Bool("standalone", false, "Embed relay in-process and listen on --standalone-listen; share connects to loopback. For LAN-only scenarios where no external relay is available.")
 	standaloneListen := fs.String("standalone-listen", ":8443", "Standalone mode: address relay listens on (use :port to listen on all interfaces)")
 	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
@@ -125,8 +125,8 @@ func runShare(args []string) {
 
 	*server = client.NormalizeServerAddr(*server) // 无端口补默认 :8443（standalone 走 loopback 不受影响）
 
-	if *unsafe {
-		fmt.Fprint(os.Stderr, "\033[1;31m!!! DANGER: --unsafe-full-system disables ALL sandboxing.\nFiles, exec commands have NO restriction.\nAborting in 5 seconds — press Ctrl+C to abort.\033[0m\n")
+	if *unsafeExec {
+		fmt.Fprint(os.Stderr, "\033[1;31m!!! DANGER: --unsafe-exec drops the exec deny/allow lists.\nAny command can run, including rm / shutdown / mkfs.\nAborting in 5 seconds — press Ctrl+C to abort.\033[0m\n")
 		for i := 5; i > 0; i-- {
 			fmt.Fprintf(os.Stderr, "%d... ", i)
 			time.Sleep(time.Second)
@@ -134,21 +134,19 @@ func runShare(args []string) {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	root := *rootDir
-	if root == "" && !*unsafe {
-		cwd, err := os.Getwd()
-		if err != nil {
-			log.Fatalf("--root not set and getwd failed: %v", err)
-		}
-		root = cwd
-		fmt.Fprintf(os.Stderr, "warning: --root not set, defaulting to CWD: %s\n", root)
+	// share 由本机用户主动发起、凭协助码授权，信任边界是“协助码交给谁”。--root 是可选的
+	// 防手滑护栏，不是安全边界（exec 不受其约束），故默认不限制。
+	if *rootDir == "" {
+		fmt.Fprintln(os.Stderr, "File access: unrestricted (--root <dir> limits file tools to a subtree)")
+	} else {
+		fmt.Fprintf(os.Stderr, "File access: file tools limited to %s (exec is NOT limited by --root)\n", *rootDir)
 	}
 
 	sbCfg := agent.SandboxConfig{
-		Root:      root,
-		AllowExec: splitCSV(*allowExec),
-		DenyExec:  splitCSV(*denyExec),
-		Unsafe:    *unsafe,
+		Root:       *rootDir,
+		AllowExec:  splitCSV(*allowExec),
+		DenyExec:   splitCSV(*denyExec),
+		UnsafeExec: *unsafeExec,
 	}
 
 	if *elevate && !hasElevatedChild {

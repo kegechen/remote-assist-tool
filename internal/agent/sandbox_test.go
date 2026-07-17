@@ -3,7 +3,6 @@ package agent
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -36,6 +35,23 @@ func TestSandboxRejectsDotDotEscape(t *testing.T) {
 	}
 }
 
+func TestSandboxEmptyRootAllowsAnywhere(t *testing.T) {
+	sb := NewSandbox(SandboxConfig{})
+	outside := filepath.Join(t.TempDir(), "..", "elsewhere.txt")
+	if _, err := sb.ResolvePath(outside); err != nil {
+		t.Fatalf("empty root means no restriction, got %v", err)
+	}
+}
+
+// 传了 --root 但构造时解析不出绝对路径（getwd 失败等罕见情形）时必须拒绝，
+// 不能退化成“无限制”——那会把一个显式的限制请求静默变成放行。
+func TestSandboxUnresolvedRootFailsClosed(t *testing.T) {
+	sb := &Sandbox{cfg: SandboxConfig{Root: "some/root"}, restricted: true}
+	if _, err := sb.ResolvePath(filepath.Join(t.TempDir(), "x.txt")); err == nil {
+		t.Fatal("expected reject when --root was requested but could not be resolved")
+	}
+}
+
 func TestExecPolicyDenyList(t *testing.T) {
 	sb := NewSandbox(SandboxConfig{DenyExec: []string{"rm", "shutdown"}})
 	if err := sb.CheckExec([]string{"rm", "-rf", "/"}); err == nil {
@@ -56,12 +72,22 @@ func TestExecPolicyAllowList(t *testing.T) {
 	}
 }
 
-func TestSandboxUnsafeBypass(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("path semantics differ on windows; covered separately")
+// --unsafe-exec 只放开 exec 名单；显式传入的 --root 仍须生效，否则这个 flag 的名字就是骗人的。
+func TestUnsafeExecDoesNotBypassRoot(t *testing.T) {
+	root := t.TempDir()
+	sb := NewSandbox(SandboxConfig{Root: root, UnsafeExec: true})
+	outside := filepath.Join(filepath.Dir(root), "elsewhere.txt")
+	if _, err := sb.ResolvePath(outside); err == nil {
+		t.Fatal("--unsafe-exec must not widen the --root path guard")
 	}
-	sb := NewSandbox(SandboxConfig{Unsafe: true})
-	if _, err := sb.ResolvePath("/tmp"); err != nil {
-		t.Fatalf("unsafe should allow anywhere, got %v", err)
+}
+
+func TestUnsafeExecDropsExecLists(t *testing.T) {
+	sb := NewSandbox(SandboxConfig{DenyExec: []string{"rm"}, AllowExec: []string{"go"}, UnsafeExec: true})
+	if err := sb.CheckExec([]string{"rm", "-rf", "/"}); err != nil {
+		t.Fatalf("--unsafe-exec should drop the deny list, got %v", err)
+	}
+	if err := sb.CheckExec([]string{"curl"}); err != nil {
+		t.Fatalf("--unsafe-exec should drop the allow list, got %v", err)
 	}
 }

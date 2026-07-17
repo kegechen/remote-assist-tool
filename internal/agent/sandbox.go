@@ -8,22 +8,24 @@ import (
 
 // SandboxConfig share 启动时来自 CLI 的策略
 type SandboxConfig struct {
-	Root      string   // 文件操作必须在此子树内；空 = 拒绝所有文件操作
-	AllowExec []string // 若非空，argv[0] 必须在此列表（basename 比较）
-	DenyExec  []string // argv[0] 命中即拒绝（basename 比较）
-	Unsafe    bool     // 关闭全部沙箱（启动时强制红色横幅 + 倒计时确认）
+	Root       string   // 文件操作限制在此子树内；空 = 不限制（见 ResolvePath 注释）
+	AllowExec  []string // 若非空，argv[0] 必须在此列表（basename 比较）
+	DenyExec   []string // argv[0] 命中即拒绝（basename 比较）
+	UnsafeExec bool     // 关闭 exec 黑/白名单（启动时强制红色横幅 + 倒计时确认）；不影响 Root
 }
 
 // Sandbox 封装路径/exec 决策
 type Sandbox struct {
-	cfg  SandboxConfig
-	root string // EvalSymlinks 后的绝对 root
+	cfg        SandboxConfig
+	root       string // EvalSymlinks 后的绝对 root
+	restricted bool   // 用户显式传了 Root；与 root=="" 区分开以便解析失败时 fail closed
 }
 
 // NewSandbox 注意：root 若指定，构造时已 EvalSymlinks + Abs；运行时短路 stale root 重算无意义
 func NewSandbox(cfg SandboxConfig) *Sandbox {
 	sb := &Sandbox{cfg: cfg}
 	if cfg.Root != "" {
+		sb.restricted = true
 		if abs, err := filepath.Abs(cfg.Root); err == nil {
 			if eval, err := filepath.EvalSymlinks(abs); err == nil {
 				sb.root = eval
@@ -35,14 +37,19 @@ func NewSandbox(cfg SandboxConfig) *Sandbox {
 	return sb
 }
 
-// ResolvePath 校验并返回规范化路径；不存在的目标走父目录解析（write 路径）
+// ResolvePath 校验并返回规范化路径；不存在的目标走父目录解析（write 路径）。
+//
+// 未配置 Root 时不做任何限制：share 是本机用户主动发起、凭协助码授权的，信任边界
+// 是“协助码交给谁”，不是这里。Root 只是可选的防手滑护栏，不是安全边界——exec 不走
+// 本函数（见 CheckExec），一句 `sh -c 'cp /etc/passwd <root>/'` 即可绕过。需要真隔离
+// 请在进程外面套（容器 / 专用低权限账号）。
 func (s *Sandbox) ResolvePath(p string) (string, error) {
-	if s.cfg.Unsafe {
+	if !s.restricted {
 		abs, err := filepath.Abs(p)
 		return abs, err
 	}
 	if s.root == "" {
-		return "", fmt.Errorf("path_outside_root: no --root configured")
+		return "", fmt.Errorf("path_outside_root: --root %q could not be resolved", s.cfg.Root)
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -67,9 +74,10 @@ func (s *Sandbox) ResolvePath(p string) (string, error) {
 	return resolved, nil
 }
 
-// CheckExec argv[0] 的 basename 比较
+// CheckExec argv[0] 的 basename 比较。注意这是防手滑的护栏而非安全边界：basename 过滤
+// 拦不住 `sh -c 'rm ...'` / `python -c ...` 这类等价写法。
 func (s *Sandbox) CheckExec(argv []string) error {
-	if s.cfg.Unsafe {
+	if s.cfg.UnsafeExec {
 		return nil
 	}
 	if len(argv) == 0 {

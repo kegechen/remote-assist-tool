@@ -7,7 +7,7 @@
 - **两种协助通道**：经典 SSH 隧道；Claude Code MCP 工具通道（12 个远程工具，含文件上传/下载）。
 - **三种连接方式**：公网 relay 中转；LAN 内 `--standalone` 进程内 relay 直连；NAT 穿透 P2P 直连（STUN 打洞，失败自动回落中转）。
 - **分层加密**：relay 链路 TLS；MCP 工具通道额外以协助码派生密钥做 XChaCha20-Poly1305 AEAD —— 即使 relay 被攻破，也看不见、无法伪造工具内容。
-- **沙箱**：MCP 工具受 `--root` 文件沙箱与 exec 命令黑/白名单约束。
+- **护栏**：exec 命令黑/白名单；可选 `--root` 把文件工具限制在某子树内（防手滑，非安全边界 —— exec 不受其约束）。
 - **relay 加固**：连接数限流（全局 + 每 IP）、读/写超时、单消息大小上限，抵御资源耗尽型 DoS / slowloris。
 
 ## 快速开始
@@ -34,7 +34,7 @@ build-linux.bat
 被协助端（分享本机 SSH）：
 
 ```bash
-remote share --server relay.example.com:8443 --root /path/to/project
+remote share --server relay.example.com:8443
 ```
 
 程序显示协助码，例如：
@@ -60,7 +60,7 @@ ssh -p 2222 user@127.0.0.1
 被协助端进程内启动一个自签 TLS relay 并监听 LAN，help 端直接连这台机器，全程不依赖任何外部服务器：
 
 ```bash
-remote share --standalone --standalone-listen :8443 --root /path/to/project
+remote share --standalone --standalone-listen :8443
 ```
 
 控制台会打印 help 端连接命令（自动探测 LAN IP）：
@@ -82,7 +82,7 @@ Help side connects exactly like a normal relay (no --plain needed):
 远端启动 share（带沙箱）：
 
 ```bash
-remote share --server relay.example.com:8443 --root /path/to/project
+remote share --server relay.example.com:8443
 ```
 
 本地配置 Claude Code（项目根 `.mcp.json` 或 `~/.claude/mcp.json`）：
@@ -161,11 +161,11 @@ remote share --server relay.example.com:8443 --root /path/to/project
 | `--standalone` | `false` | 进程内启动 relay 并监听 `--standalone-listen`，LAN 直连场景 |
 | `--standalone-listen` | `:8443` | standalone relay 监听地址 |
 | `--code-file` | - | 注册后把协助码+有效期以 JSON 原子写到该文件（供宿主程序读取） |
-| `--root` | - | 文件操作沙箱根（未设默认 CWD；`--unsafe-full-system` 除外） |
+| `--root` | - | 可选：把文件工具限制在该子树（未设 = 不限制）。防手滑，非安全边界 |
 | `--allow-exec` | - | exec 命令白名单（逗号分隔，空=仅受黑名单约束） |
 | `--deny-exec` | `rm,shutdown,reboot,mkfs,dd` | exec 命令黑名单 |
 | `--elevate` | `false` | Windows：启动时经 UAC 请求管理员权限 |
-| `--unsafe-full-system` | `false` | **危险**：完全关闭沙箱（启动有 5 秒红色确认倒计时） |
+| `--unsafe-exec` | `false` | **危险**：关闭 exec 黑/白名单，任意命令可跑（启动有 5 秒红色确认倒计时）。不影响 `--root` |
 | `--plain` | `false` | 非 TLS（仅开发） |
 
 ### remote help — 协助模式
@@ -190,7 +190,7 @@ remote share --server relay.example.com:8443 --root /path/to/project
 |------|------|
 | `connect` | 用协助码与远端配对，必须先调用；可选 `server=` 覆盖 relay 地址（用于 standalone/LAN） |
 | `exec` | 远端按 argv 运行命令（不过 shell） |
-| `read_file` / `write_file` | 读 / 写远端文件（受 `--root` 沙箱；单次最多 1 MiB） |
+| `read_file` / `write_file` | 读 / 写远端文件（设了 `--root` 则限于该子树；单次最多 1 MiB） |
 | `list_dir` / `stat` / `glob` / `grep` | 远端文件系统探索 |
 | `process_list` | 列远端进程 |
 | `tail_log` | 读远端日志末尾 N 行 |
@@ -204,7 +204,7 @@ remote share --server relay.example.com:8443 --root /path/to/project
 - relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。
 - MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 仅转发密文，看不见也无法伪造工具内容。
 - 协助码：安全随机生成（54 字符集 × 10 位，去除易混淆字符），默认 30 分钟过期。
-- 文件沙箱 `--root` + exec 黑/白名单；`--unsafe-full-system` 才解除，且有显式确认。
+- **信任边界是协助码**：share 由本机用户主动发起，码交给谁，就等于把这台机器交给谁。`--root` / exec 名单是防手滑的护栏，不是对抗恶意方的边界 —— exec 可跑任意程序，一句 `sh -c 'cp /etc/passwd <root>/'` 即可绕过 `--root`。需要真隔离请在进程外面套（容器 / 专用低权限账号）。
 - relay 服务端加固：全局 + 每 IP 连接数上限、读/写超时、单消息大小上限。
 - 完整审计日志。
 
