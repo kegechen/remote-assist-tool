@@ -1,6 +1,8 @@
 # Local config
 .claude/
 .omc/
+# 内含本机绝对路径（bin/remote.exe 的位置），提交上去别人拉下来直接是坏的
+.mcp.json
 
 # Binaries
 bin/
