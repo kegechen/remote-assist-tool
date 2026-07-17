@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
@@ -79,7 +81,10 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 		cmd.Stdin = bytes.NewReader(a.StdinBytes)
 	}
 
-	// v1: stream 模式不支持，始终同步收集
+	if a.Stream && sink != nil {
+		return e.runStreaming(runCtx, cmd, sink)
+	}
+
 	out, err := cmd.Output()
 	stderr := capturedStderr(err)
 	exitCode := exitCodeOf(err)
@@ -110,6 +115,61 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 		StderrTruncated: stderrTrunc,
 		Error:           startErr,
 	})
+}
+
+// execStreamChunk 单个流式帧的读缓冲上限。管道有多少读多少，所以它只是上限而非攒够
+// 才发——命令零星吐一行也会立刻成帧送走，终端才有"边跑边出"的手感。
+const execStreamChunk = 32 * 1024
+
+// runStreaming 边跑边把 stdout/stderr 推给 sink，供 GUI 流式终端实时渲染。
+//
+// 与非流式模式的契约差异（调用方以 stream=true 显式选入）：
+//   - 输出不在 share 端累积，也不受 max_output_bytes 截断——实时输出由调用方自己留存
+//     （浏览器的滚动缓冲）。长跑命令若在这里攒全量输出，既失去流式的意义又有 OOM 风险。
+//   - 最终 ExecResult 只带退出状态（exit_code / error），不重复带 stdout/stderr。
+func (e *ExecTool) runStreaming(ctx context.Context, cmd *exec.Cmd, sink agent.StreamSink) (json.RawMessage, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		// 命令没能启动（找不到可执行文件、cwd 不存在等）：与非流式一致，把原因放 error
+		// 字段带出去，否则调用方只看到 exit -1 却不知为什么。
+		return json.Marshal(ExecResult{ExitCode: -1, Error: err.Error()})
+	}
+
+	pump := func(r io.Reader, name string, wg *sync.WaitGroup) {
+		defer wg.Done()
+		buf := make([]byte, execStreamChunk)
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				if sink.Send(name, buf[:n]) != nil {
+					return // 隧道写不动了：再读也发不出去，收工让 Wait 去收尸
+				}
+			}
+			if rerr != nil {
+				return // 含 io.EOF：命令结束或被 ctx kill 后管道关闭
+			}
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go pump(stdout, "stdout", &wg)
+	go pump(stderr, "stderr", &wg)
+	// 必须等两个 pump 读完再 cmd.Wait()：Wait 会关闭管道，先 Wait 会截断尚未读出的输出。
+	// 同样必须等它们发完再返回——Run 一返回 daemon 就发 ToolResp，而 ToolResp 是流的终止
+	// 信号，此后到达的 chunk 会被 bridge 当迟到帧丢弃。
+	wg.Wait()
+	werr := cmd.Wait()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("deadline_exceeded: exec timed out")
+	}
+	return json.Marshal(ExecResult{ExitCode: exitCodeOf(werr)})
 }
 
 func exitCodeOf(err error) int {

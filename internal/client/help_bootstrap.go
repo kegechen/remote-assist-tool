@@ -72,6 +72,23 @@ func (b *HelpMCPBootstrap) CallTool(ctx context.Context, name string, args json.
 	return br.CallTool(ctx, name, args)
 }
 
+// CallToolStream 实现 mcp.StreamToolCaller：把 share 端的流式输出块透传给 onChunk。
+// connect 与 upload_file / download_file 是 host 端本地逻辑、没有流可推（它们的进度走
+// stderr），退回普通调用。
+func (b *HelpMCPBootstrap) CallToolStream(ctx context.Context, name string, args json.RawMessage, onChunk func(stream string, data []byte)) (json.RawMessage, error) {
+	switch name {
+	case "connect", "upload_file", "download_file":
+		return b.CallTool(ctx, name, args)
+	}
+	b.mu.Lock()
+	br := b.bridge
+	b.mu.Unlock()
+	if br == nil {
+		return nil, fmt.Errorf("not_connected: call 'connect' with the assist code first")
+	}
+	return br.CallToolStream(ctx, name, args, onChunk)
+}
+
 // maxTransferReconnects 传输中隧道断（tunnel_lost）时自动重连+续传的最大次数。
 const maxTransferReconnects = 5
 

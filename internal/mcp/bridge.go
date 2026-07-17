@@ -50,12 +50,13 @@ type MsgConn interface {
 
 // Bridge MCP server <-> 隧道工具消息
 type Bridge struct {
-	conn    MsgConn
-	key     [32]byte
-	nextID  uint64
-	pending sync.Map    // id -> chan proto.ToolResp
-	closed  atomic.Bool // 隧道断开后置 true，CallTool 立即快速失败
-	closeMu sync.Mutex  // 串行化 Disconnect，避免重复广播
+	conn      MsgConn
+	key       [32]byte
+	nextID    uint64
+	pending   sync.Map    // id -> chan proto.ToolResp
+	streamCbs sync.Map    // id -> func(stream string, data []byte)，仅流式调用登记
+	closed    atomic.Bool // 隧道断开后置 true，CallTool 立即快速失败
+	closeMu   sync.Mutex  // 串行化 Disconnect，避免重复广播
 }
 
 func NewBridge(c MsgConn, key [32]byte) *Bridge { return &Bridge{conn: c, key: key} }
@@ -89,7 +90,22 @@ func (b *Bridge) Disconnect(err error) {
 
 // CallTool 发 ToolReq，阻塞等 ToolResp 或 ctx 完成。
 // ctx 没设 deadline 时自动加 callToolFallbackTimeout（10 分钟）兜底。
+// CallTool 同步调用一个远端工具，返回最终结果（不接收流式块）。
 func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	return b.callToolInner(ctx, name, args, nil)
+}
+
+// CallToolStream 调用工具并把中途的流式块通过 onChunk 实时回调（exec stream=true）；
+// 最终结果仍由返回值给出。块按 share 端产出的顺序到达（同一条隧道读循环单线程投递）。
+//
+// onChunk 契约：**不可长时间阻塞**。它在 help 端的隧道读循环上被同步调用，堵住它就等于
+// 堵住整条隧道（心跳也读不到，最终被判 tunnel_lost）。需要慢速消费的调用方自己排队——
+// gui.MCPClient 就为此配了每条流一个 pump goroutine。
+func (b *Bridge) CallToolStream(ctx context.Context, name string, args json.RawMessage, onChunk func(stream string, data []byte)) (json.RawMessage, error) {
+	return b.callToolInner(ctx, name, args, onChunk)
+}
+
+func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMessage, onChunk func(string, []byte)) (json.RawMessage, error) {
 	// 隧道已断开：立即快速失败，不再发消息、不再干等兜底 deadline。
 	if b.closed.Load() {
 		return nil, fmt.Errorf("not_connected: 隧道已断开，请让远端重跑 share 后重新 connect")
@@ -99,6 +115,10 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 	ch := make(chan proto.ToolResp, 1)
 	b.pending.Store(id, ch)
 	defer b.pending.Delete(id)
+	if onChunk != nil {
+		b.streamCbs.Store(id, onChunk)
+		defer b.streamCbs.Delete(id)
+	}
 
 	// 再查一次 closed：堵住 Store 与 Disconnect.Range 之间的竞态窗口——若 Disconnect
 	// 在我们 Store 之前已遍历完 pending，本次调用不会被它唤醒，这里兜底快速失败。
@@ -168,6 +188,25 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			}
 		}
 	case proto.MsgToolStream:
-		// v1: 流式工具已从 schema 删除；如仍收到此帧（旧 share 端版本），忽略。
+		var c proto.StreamChunk
+		if err := proto.DecodePayload(msg, &c); err != nil {
+			return
+		}
+		v, ok := b.streamCbs.Load(c.ID)
+		if !ok {
+			// 非流式调用、或调用已结束（ToolResp 先到 / 超时后 share 端仍在吐）：丢弃。
+			return
+		}
+		data := c.Data
+		if b.key != [32]byte{} && len(data) > 0 {
+			plain, err := proto.AEADOpen(&b.key, data)
+			if err != nil {
+				return // 帧损坏/换了 key：丢这一帧，不影响后续帧与最终 ToolResp
+			}
+			data = plain
+		}
+		if len(data) > 0 {
+			v.(func(string, []byte))(c.Stream, data)
+		}
 	}
 }

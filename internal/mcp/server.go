@@ -14,6 +14,43 @@ type ToolCaller interface {
 	CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error)
 }
 
+// StreamToolCaller 可选能力：工具执行途中把输出块实时回调出来（exec stream=true）。
+// *Bridge 与 *client.HelpMCPBootstrap 都实现之；未实现的 ToolCaller 自动退回同步调用。
+type StreamToolCaller interface {
+	CallToolStream(ctx context.Context, name string, args json.RawMessage, onChunk func(stream string, data []byte)) (json.RawMessage, error)
+}
+
+// streamNotifyMethod 流式块的 JSON-RPC 通知方法名。
+//
+// tools/call 是一问一答，没有中途回话的位置，所以块只能另走通知帧。JSON-RPC 规范要求
+// 客户端忽略不认识的通知，因此这个私有方法对 Claude 等标准 MCP client 完全无害——何况
+// 只有调用方显式传 stream=true 才会产生它，而 stream 没有暴露在 exec 的 schema 里。
+const streamNotifyMethod = "notifications/remote-assist/stream"
+
+// streamParams 流式块通知的负载。RequestID 是发起本次调用的 tools/call 的 JSON-RPC id，
+// 调用方据此把块归到自己那次调用。Data 是 []byte（JSON 里是 base64）而非字符串：块边界
+// 可能把一个多字节 UTF-8 字符劈成两半，当字符串编码会就地损坏它，交给调用方按字节流拼。
+type streamParams struct {
+	RequestID json.RawMessage `json:"requestId"`
+	Stream    string          `json:"stream"`
+	Data      []byte          `json:"data"`
+}
+
+type rpcNote struct {
+	JSONRPC string      `json:"jsonrpc"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params"`
+}
+
+// wantsStream 仅在 arguments 显式带 stream=true 时返回 true。
+func wantsStream(args json.RawMessage) bool {
+	var p struct {
+		Stream bool `json:"stream"`
+	}
+	json.Unmarshal(args, &p)
+	return p.Stream
+}
+
 type Server struct {
 	bridge   ToolCaller
 	writeMu  sync.Mutex // 串行化并发 goroutine 对 out 的写，避免 JSON 行交错
@@ -99,7 +136,15 @@ func (s *Server) dispatch(ctx context.Context, req *rpcReq, out io.Writer) {
 			s.inflight.Store(key, cancel)
 			defer s.inflight.Delete(key)
 		}
-		result, err := s.bridge.CallTool(callCtx, p.Name, p.Arguments)
+		var result json.RawMessage
+		var err error
+		if sc, ok := s.bridge.(StreamToolCaller); ok && wantsStream(p.Arguments) {
+			result, err = sc.CallToolStream(callCtx, p.Name, p.Arguments, func(stream string, data []byte) {
+				s.writeNote(out, streamParams{RequestID: req.ID, Stream: stream, Data: data})
+			})
+		} else {
+			result, err = s.bridge.CallTool(callCtx, p.Name, p.Arguments)
+		}
 		if err != nil {
 			s.write(out, rpcResp{JSONRPC: "2.0", ID: req.ID, Error: &rpcErr{Code: -32000, Message: err.Error()}})
 			return
@@ -127,6 +172,19 @@ func (s *Server) dispatch(ctx context.Context, req *rpcReq, out io.Writer) {
 			s.write(out, rpcResp{JSONRPC: "2.0", ID: req.ID, Error: &rpcErr{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)}})
 		}
 	}
+}
+
+// writeNote 发一个流式块通知。与 write 共用 writeMu：块通知与工具响应交错发出，
+// 不串行化会让两条 JSON 行互相插进对方中间，解析直接崩。
+func (s *Server) writeNote(out io.Writer, p streamParams) {
+	b, err := json.Marshal(rpcNote{JSONRPC: "2.0", Method: streamNotifyMethod, Params: p})
+	if err != nil {
+		return
+	}
+	s.writeMu.Lock()
+	out.Write(b)
+	out.Write([]byte("\n"))
+	s.writeMu.Unlock()
 }
 
 func (s *Server) write(out io.Writer, r rpcResp) {
