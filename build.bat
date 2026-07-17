@@ -23,5 +23,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Building GUI...
+go build -ldflags "%LDFLAGS%" -o bin/remote-gui.exe ./cmd/gui
+if errorlevel 1 (
+    echo Failed to build gui
+    exit /b 1
+)
+
 echo Build complete!
 echo Binaries in: %CD%\bin

@@ -23,12 +23,27 @@ if [ $? -ne 0 ]; then
 fi
 
 echo
-echo "[3/3] Checking code formatting..."
+echo "[3/4] Checking code formatting..."
 go fmt ./...
 if [ $? -ne 0 ]; then
     echo
     echo "Code formatting check FAILED!"
     exit 1
+fi
+
+# GUI 前端的 JS 内嵌在 assets.go 的字符串里，go 工具链完全看不到它。
+# 有 node 才跑，没有就跳过（不给纯 Go 项目引入硬依赖）。
+echo
+echo "[4/4] Checking GUI frontend assets..."
+if command -v node >/dev/null 2>&1; then
+    node tests/frontend/check_gui_assets.js
+    if [ $? -ne 0 ]; then
+        echo
+        echo "Frontend checks FAILED!"
+        exit 1
+    fi
+else
+    echo "node not found - skipping frontend checks"
 fi
 
 echo

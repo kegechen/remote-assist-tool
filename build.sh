@@ -23,5 +23,12 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+echo "Building GUI..."
+go build -ldflags "${LDFLAGS}" -o bin/remote-gui ./cmd/gui
+if [ $? -ne 0 ]; then
+    echo "Failed to build gui"
+    exit 1
+fi
+
 echo "Build complete!"
 echo "Binaries in: $(pwd)/bin"
