@@ -23,7 +23,10 @@ type ReadFileResult struct {
 	EOF   bool   `json:"eof"`
 }
 
-const readFileMaxChunk = 1 << 20 // 1 MiB
+const (
+	readFileMaxChunk     = 1 << 20  // 1 MiB：显式传 length 时的硬上限
+	readFileDefaultChunk = 64 << 10 // 64 KiB：未传 length 时的默认块大小
+)
 
 type ReadFileTool struct{ sb *agent.Sandbox }
 
@@ -52,9 +55,16 @@ func (t *ReadFileTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Str
 			return nil, err
 		}
 	}
-	limit := int64(readFileMaxChunk)
-	if a.Length > 0 && a.Length < limit {
+	// 未显式传 length 时用一个对 MCP 友好的默认块大小，在源头限量而不是事后截断
+	// 返回的文本：这样 bytes_len 与 eof 始终与实际返回的内容一致，调用方可以靠
+	// offset += bytes_len 一路续读到 eof=true，完整拿到大文件而不丢内容。
+	// download_file 等批量传输显式传 length（512 KiB），不受这个默认值影响。
+	limit := int64(readFileDefaultChunk)
+	if a.Length > 0 {
 		limit = a.Length
+		if limit > readFileMaxChunk {
+			limit = readFileMaxChunk
+		}
 	}
 	buf := make([]byte, limit)
 	n, err := io.ReadFull(f, buf)

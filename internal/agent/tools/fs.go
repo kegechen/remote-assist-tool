@@ -13,9 +13,10 @@ import (
 )
 
 type ListDirArgs struct {
-	Path      string `json:"path"`
-	Recursive bool   `json:"recursive,omitempty"`
-	Glob      string `json:"glob,omitempty"`
+	Path       string `json:"path"`
+	Recursive  bool   `json:"recursive,omitempty"`
+	Glob       string `json:"glob,omitempty"`
+	MaxEntries int    `json:"max_entries,omitempty"`
 }
 type DirEntry struct {
 	Name  string `json:"name"`
@@ -24,8 +25,12 @@ type DirEntry struct {
 	Mtime int64  `json:"mtime"`
 }
 type ListDirResult struct {
-	Entries []DirEntry `json:"entries"`
+	Entries   []DirEntry `json:"entries"`
+	Total     int        `json:"total,omitempty"`
+	Truncated bool       `json:"truncated,omitempty"`
 }
+
+const defaultListDirMax = 200
 
 type ListDirTool struct{ sb *agent.Sandbox }
 
@@ -40,6 +45,12 @@ func (t *ListDirTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stre
 		return nil, err
 	}
 	var out []DirEntry
+	maxEntries := a.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = defaultListDirMax
+	}
+	total := 0
+	truncated := false
 	walk := func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -55,6 +66,14 @@ func (t *ListDirTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stre
 				}
 				return nil
 			}
+		}
+		total++
+		if len(out) >= maxEntries {
+			truncated = true
+			if a.Recursive {
+				return filepath.SkipAll
+			}
+			return nil
 		}
 		info, _ := d.Info()
 		kind := "other"
@@ -84,7 +103,13 @@ func (t *ListDirTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stre
 			walk(filepath.Join(root, d.Name()), d, nil)
 		}
 	}
-	return json.Marshal(ListDirResult{Entries: out})
+	res := ListDirResult{Entries: out, Truncated: truncated}
+	// 递归模式一旦命中上限就 SkipAll 停止遍历，剩下还有多少无从得知，此时报 total
+	// 只会误导（它恰好等于 maxEntries+1）。非递归模式会走完整个目录，total 是准的。
+	if !(a.Recursive && truncated) {
+		res.Total = total
+	}
+	return json.Marshal(res)
 }
 
 type StatArgs struct{ Path string `json:"path"` }

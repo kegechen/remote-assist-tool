@@ -12,7 +12,8 @@ import (
 )
 
 type ProcessListArgs struct {
-	Filter string `json:"filter,omitempty"`
+	Filter   string `json:"filter,omitempty"`
+	MaxCount int    `json:"max_count,omitempty"`
 }
 
 type ProcInfo struct {
@@ -22,7 +23,13 @@ type ProcInfo struct {
 	User    string `json:"user,omitempty"`
 }
 
-type ProcessListResult struct{ Procs []ProcInfo `json:"procs"` }
+type ProcessListResult struct {
+	Procs     []ProcInfo `json:"procs"`
+	Total     int        `json:"total,omitempty"`
+	Truncated bool       `json:"truncated,omitempty"`
+}
+
+const defaultProcessMaxCount = 50
 
 type ProcessListTool struct{}
 
@@ -71,7 +78,18 @@ func (t *ProcessListTool) Run(ctx context.Context, raw json.RawMessage, _ agent.
 		}
 		procs = filtered
 	}
-	return json.Marshal(ProcessListResult{Procs: procs})
+
+	maxCount := a.MaxCount
+	if maxCount <= 0 {
+		maxCount = defaultProcessMaxCount
+	}
+	total := len(procs)
+	truncated := false
+	if len(procs) > maxCount {
+		procs = procs[:maxCount]
+		truncated = true
+	}
+	return json.Marshal(ProcessListResult{Procs: procs, Total: total, Truncated: truncated})
 }
 
 func splitCSV(s string) []string {

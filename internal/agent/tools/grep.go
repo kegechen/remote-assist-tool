@@ -21,12 +21,18 @@ type GrepArgs struct {
 }
 
 type GrepMatch struct {
-	File string `json:"file"`
-	Line int    `json:"line"`
-	Text string `json:"text"`
+	File          string `json:"file"`
+	Line          int    `json:"line"`
+	Text          string `json:"text"`
+	TextTruncated bool   `json:"text_truncated,omitempty"`
 }
 
-type GrepResult struct{ Matches []GrepMatch `json:"matches"` }
+type GrepResult struct {
+	Matches   []GrepMatch `json:"matches"`
+	Truncated bool        `json:"truncated,omitempty"`
+}
+
+const grepMaxLineLen = 500 // 单行最长字符数（按字节截断，在 UTF-8 边界对齐）
 
 type GrepTool struct{ sb *agent.Sandbox }
 
@@ -56,36 +62,44 @@ func (t *GrepTool) Run(ctx context.Context, raw json.RawMessage, _ agent.StreamS
 	if max == 0 {
 		max = 1000
 	}
-	var out []GrepMatch
-	filepath.WalkDir(resolved, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if a.Glob != "" {
-			matched, _ := filepath.Match(a.Glob, d.Name())
-			if !matched {
+		var out []GrepMatch
+		truncated := false
+		filepath.WalkDir(resolved, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
 				return nil
 			}
-		}
-		f, err := os.Open(p)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-		rel, _ := filepath.Rel(resolved, p)
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64*1024), 1024*1024)
-		lineNo := 0
-		for sc.Scan() {
-			lineNo++
-			if re.MatchString(sc.Text()) {
-				out = append(out, GrepMatch{File: rel, Line: lineNo, Text: sc.Text()})
-				if len(out) >= max {
-					return filepath.SkipAll
+			if a.Glob != "" {
+				matched, _ := filepath.Match(a.Glob, d.Name())
+				if !matched {
+					return nil
 				}
 			}
-		}
-		return nil
-	})
-	return json.Marshal(GrepResult{Matches: out})
+			f, err := os.Open(p)
+			if err != nil {
+				return nil
+			}
+			defer f.Close()
+			rel, _ := filepath.Rel(resolved, p)
+			sc := bufio.NewScanner(f)
+			sc.Buffer(make([]byte, 64*1024), 1024*1024)
+			lineNo := 0
+			for sc.Scan() {
+				lineNo++
+				if re.MatchString(sc.Text()) {
+					text := sc.Text()
+					textTrunc := false
+					if len(text) > grepMaxLineLen {
+						text = TruncateHead(text, grepMaxLineLen)
+						textTrunc = true
+					}
+					out = append(out, GrepMatch{File: rel, Line: lineNo, Text: text, TextTruncated: textTrunc})
+					if len(out) >= max {
+						truncated = true
+						return filepath.SkipAll
+					}
+				}
+			}
+			return nil
+		})
+		return json.Marshal(GrepResult{Matches: out, Truncated: truncated})
 }

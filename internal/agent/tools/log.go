@@ -18,6 +18,14 @@ type TailLogArgs struct {
 	Follow bool `json:"follow,omitempty"`
 }
 
+type TailLogResult struct {
+	Followed       bool   `json:"followed"`
+	Lines          string `json:"lines,omitempty"`
+	LinesTruncated bool   `json:"lines_truncated,omitempty"`
+}
+
+const tailLogMaxOutput = 64 * 1024 // 64 KiB
+
 type TailLogTool struct{ sb *agent.Sandbox }
 
 func NewTailLog(sb *agent.Sandbox) *TailLogTool { return &TailLogTool{sb: sb} }
@@ -40,11 +48,21 @@ func (t *TailLogTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 		}
 		return nil, err
 	}
+	// 同时走 sink（兼容旧 consumer）和把内容放进 result。result 是权威来源：调用方不要
+	// 流式时（Claude、GUI 的非终端调用都不要）没人接 sink，块会被 bridge 丢掉，所以
+	// lines 必须嵌在 result 里。
 	if sink != nil && len(last) > 0 {
 		sink.Send("stdout", last)
 	}
-	// v1: follow 模式不支持，始终返回静态结果
-	return json.RawMessage(`{"followed":false}`), nil
+	// 保留尾部：tail_log 的语义就是看最新的内容，截掉头部才是对的。
+	// 截头会丢掉刚写进日志的那几行——恰恰是排查时唯一要看的东西。
+	lines := string(last)
+	linesTrunc := false
+	if len(lines) > tailLogMaxOutput {
+		lines = TruncateTail(lines, tailLogMaxOutput)
+		linesTrunc = true
+	}
+	return json.Marshal(TailLogResult{Followed: false, Lines: lines, LinesTruncated: linesTrunc})
 }
 
 func readLastLines(path string, n int) ([]byte, error) {

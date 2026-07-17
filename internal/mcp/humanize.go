@@ -15,6 +15,10 @@ import (
 //   - 二进制      → 只标注 binary + 字节数 + 人类可读大小，不再把无意义的 base64 大块
 //                   塞给 Claude（顺带省 token / 带宽）
 //
+// 这一层只做编码转换，不做截断。限量一律在源头（agent 端）完成：read_file 靠默认块
+// 大小限量以保证 bytes_len/eof 自洽可续读，exec 靠 max_output_bytes 限量。在这里二次
+// 截断会让 bytes_len 与 text 对不上、并把 max_output_bytes 这个逃生舱悄悄废掉。
+//
 // 仅对 read_file / exec 生效（只有它们的结果含 []byte 字段）；其余工具及任何无法解析的
 // 结果一律原样返回，保证零数据丢失、不改变既有契约。
 //
@@ -91,9 +95,12 @@ func isTextChunk(data []byte) bool {
 
 func humanizeExec(result json.RawMessage) (string, bool) {
 	var r struct {
-		ExitCode int    `json:"exit_code"`
-		Stdout   []byte `json:"stdout"`
-		Stderr   []byte `json:"stderr"`
+		ExitCode        int    `json:"exit_code"`
+		Stdout          []byte `json:"stdout"`
+		Stderr          []byte `json:"stderr"`
+		StdoutTruncated bool   `json:"stdout_truncated"`
+		StderrTruncated bool   `json:"stderr_truncated"`
+		Error           string `json:"error"`
 	}
 	if err := json.Unmarshal(result, &r); err != nil {
 		return "", false
@@ -101,6 +108,17 @@ func humanizeExec(result json.RawMessage) (string, bool) {
 	out := map[string]any{"exit_code": r.ExitCode}
 	addStream(out, "stdout", r.Stdout)
 	addStream(out, "stderr", r.Stderr)
+	// 透传 agent 端的截断标记（agent 截断后 humanize 不会二次截断，但标记必须保留）
+	if r.StdoutTruncated {
+		out["stdout_truncated"] = true
+	}
+	if r.StderrTruncated {
+		out["stderr_truncated"] = true
+	}
+	// 命令没能启动的原因：不透传的话调用方只看到 exit -1，无从判断
+	if r.Error != "" {
+		out["error"] = r.Error
+	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", false
@@ -110,6 +128,8 @@ func humanizeExec(result json.RawMessage) (string, bool) {
 
 // addStream 把 exec 的某条流写进 out：空流跳过；合法 UTF-8 给文本；二进制只标注
 // <key>_binary + <key>_size + <key>_size_human，不回传原始字节。
+// 不在这里截断：限量已由 agent 端的 max_output_bytes 完成，这里再截会让调用方调高
+// max_output_bytes 也拿不到完整输出。
 func addStream(out map[string]any, key string, data []byte) {
 	if len(data) == 0 {
 		return
