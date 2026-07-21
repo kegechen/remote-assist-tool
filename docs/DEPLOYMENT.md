@@ -20,12 +20,12 @@ cd C:\Users\mike\src\remote-assist-tool\bin
 
 #### 被协助端 (Share)
 ```cmd
-remote.exe share --server 192.168.1.101:8443 --insecure
+remote-assist-cli-windows-amd64.exe share --server 192.168.1.101:8443 --insecure
 ```
 
 #### 协助端 (Help)
 ```cmd
-remote.exe help --server 192.168.1.101:8443 --insecure --code <协助码>
+remote-assist-cli-windows-amd64.exe help --server 192.168.1.101:8443 --insecure --code <协助码>
 ```
 
 ---
@@ -37,10 +37,10 @@ ssh root@192.168.1.101
 cd /root/remote-assist
 
 # Share 模式
-./remote-linux share --server 127.0.0.1:8443 --plain
+./remote-assist-cli-linux-amd64 share --server 127.0.0.1:8443 --plain
 
 # Help 模式
-./remote-linux help --server 127.0.0.1:8443 --plain --code <协助码>
+./remote-assist-cli-linux-amd64 help --server 127.0.0.1:8443 --plain --code <协助码>
 ```
 
 ---
@@ -53,7 +53,7 @@ ssh root@192.168.1.101
 cd /root/remote-assist
 
 # 查看进程
-ps aux | grep relay-linux
+ps aux | grep remote-assist-relay-linux-amd64
 
 # 查看日志
 cat relay.log
@@ -71,7 +71,7 @@ cd /root/remote-assist
 kill $(cat relay.pid)
 
 # 启动
-nohup ./relay-linux --listen :8443 --cert ./certs/server.crt --key ./certs/server.key > relay.log 2>&1 &
+nohup ./remote-assist-relay-linux-amd64 --listen :8443 --cert ./certs/server.crt --key ./certs/server.key > relay.log 2>&1 &
 echo $! > relay.pid
 ```
 
@@ -83,17 +83,17 @@ echo $! > relay.pid
 ```
 C:\Users\mike\src\remote-assist-tool\
 ├── bin\
-│   ├── relay.exe       # Windows 服务器
-│   ├── remote.exe      # Windows 客户端
-│   ├── relay-linux     # Linux 服务器
-│   └── remote-linux    # Linux 客户端
+│   ├── remote-assist-relay-windows-amd64.exe       # Windows 服务器
+│   ├── remote-assist-cli-windows-amd64.exe      # Windows 客户端
+│   ├── remote-assist-relay-linux-amd64     # Linux 服务器
+│   └── remote-assist-cli-linux-amd64    # Linux 客户端
 ```
 
 ### 远程服务器
 ```
 /root/remote-assist/
-├── relay-linux         # 服务器程序
-├── remote-linux        # 客户端程序
+├── remote-assist-relay-linux-amd64         # 服务器程序
+├── remote-assist-cli-linux-amd64        # 客户端程序
 ├── relay.pid           # 进程PID
 ├── relay.log           # 运行日志
 ├── audit.log           # 审计日志
@@ -107,9 +107,9 @@ C:\Users\mike\src\remote-assist-tool\
 ## 测试流程建议
 
 ### 测试 1: 基本连接
-1. 终端 A: `remote.exe share --server 192.168.1.101:8443 --insecure`
+1. 终端 A: `remote-assist-cli-windows-amd64.exe share --server 192.168.1.101:8443 --insecure`
 2. 记录协助码，例如 `ABCD-EFGHIJ`
-3. 终端 B: `remote.exe help --server 192.168.1.101:8443 --insecure --code ABCD-EFGHIJ`
+3. 终端 B: `remote-assist-cli-windows-amd64.exe help --server 192.168.1.101:8443 --insecure --code ABCD-EFGHIJ`
 4. 验证连接成功
 
 ### 测试 2: 协助码过期
@@ -142,6 +142,6 @@ C:\Users\mike\src\remote-assist-tool\
 ssh root@192.168.1.101
 cd /root/remote-assist
 kill $(cat relay.pid) 2>/dev/null
-nohup ./relay-linux --listen :8443 --cert ./certs/server.crt --key ./certs/server.key > relay.log 2>&1 &
+nohup ./remote-assist-relay-linux-amd64 --listen :8443 --cert ./certs/server.crt --key ./certs/server.key > relay.log 2>&1 &
 echo $! > relay.pid
 ```

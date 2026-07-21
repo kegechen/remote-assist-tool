@@ -19,8 +19,8 @@ build.bat
 
 # 方式2: 手动构建
 mkdir bin
-go build -o bin/relay.exe ./cmd/relay
-go build -o bin/remote.exe ./cmd/remote
+go build -o bin/remote-assist-relay-windows-amd64.exe ./cmd/relay
+go build -o bin/remote-assist-cli-windows-amd64.exe ./cmd/remote
 ```
 
 ### Linux / macOS

@@ -25,9 +25,41 @@ build.bat
 build-linux.bat
 ```
 
-生成 `bin/remote`（客户端，share/help 两种角色）和 `bin/relay`（中转服务器）。
+产物都带平台后缀（`<组件>-<os>-<arch>`），一眼看得出这个二进制给谁跑，也不会跟 PATH 里
+别的东西撞名：
+
+| 产物 | 说明 |
+|---|---|
+| `bin/remote-assist-cli-windows-amd64.exe` | 客户端，share / help 两种角色，也是 MCP 入口 |
+| `bin/remote-assist-webui-windows-amd64.exe` | 浏览器控制台（会去同目录/`bin/` 找上面那个 cli） |
+| `bin/remote-assist-relay-windows-amd64.exe` | 中转服务器 |
+| `bin/remote-assist-{cli,relay}-linux-{amd64,arm64}` | `build-linux.bat` 交叉编译产出 |
+
+Windows 产物内嵌产品信息（右键属性可见产品名/描述/版本），由 `goversioninfo` 按
+`git describe` 生成。该工具已用 `tools.go` 钉进 `go.mod`：`go mod download` 一次之后
+**离线也能构建**，不必每次联网。
 
 > 提示：纯编译检查用 `go build ./...`（不产出文件）；要产物务必 `-o bin/` 或用上面的脚本，别让可执行文件散落到仓库根。
+
+### Web UI 内升级 share
+
+Web UI 连接后会比较 help 与 share 的版本；确认 share 较旧时，顶部显示升级提示。选择与
+远端系统和架构匹配的 CLI 二进制后，后端按“先建后断”完成交接：
+
+1. 经 old 通道探测 PID、原可执行文件路径、系统与架构；上传前检查候选文件的 ELF/PE
+   machine，确认 Linux/Windows 与 amd64/arm64 均匹配后才分块上传，再在远端执行
+   `--version` 验证。
+2. 复用 old 的 share 参数，以隔离 `HOME`（独立 ClientID）和固定 `--code-file` 启动 new。
+3. 仍经 old 通道读取 new code，主动连接 new 并核对版本。
+4. Linux 在 new 验证成功后原子替换原文件，再按 PID 终止 old。Windows 先把运行中的 old
+   改成备份名、让候选文件占回原路径，再启动 new；new 验证成功后按 PID 终止 old 并删除
+   备份，切换失败则经 old 通道恢复原文件。
+
+切换前任一步失败都不会终止 old；连接 new 失败会尝试自动回连 old。当前仅支持使用外部
+relay 的 Linux/Windows amd64/arm64 share，`--standalone` / `--no-auth` 会被拒绝。
+如果配置了 `--allow-exec`，升级所需的 `sh`/`powershell.exe`、`mkdir`、`chmod`、`kill` 及候选二进制也必须
+获准执行。原路径替换后，已有 systemd/开机启动配置无需改文件名；当前临时接管进程继续
+使用隔离 ClientID，下一次由原路径正常启动时恢复标准 HOME/ClientID。
 
 ### 用法一：经典 SSH 远程协助（经 relay）
 

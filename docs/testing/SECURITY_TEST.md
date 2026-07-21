@@ -6,11 +6,11 @@
 
 ```bash
 # 构建项目
-go build -o bin/relay.exe ./cmd/relay
-go build -o bin/remote.exe ./cmd/remote
+go build -o bin/remote-assist-relay-windows-amd64.exe ./cmd/relay
+go build -o bin/remote-assist-cli-windows-amd64.exe ./cmd/remote
 
 # 生成测试证书
-bin/relay.exe --gen-certs --certs-dir ./test-certs
+bin/remote-assist-relay-windows-amd64.exe --gen-certs --certs-dir ./test-certs
 ```
 
 ### 2. 功能安全测试
@@ -73,7 +73,7 @@ nmap --script ssl-enum-ciphers -p 8443 localhost
 **测试步骤**:
 1. 启动服务器并指定审计日志
    ```bash
-   bin/relay.exe --listen :8443 --audit ./test-audit.log
+   bin/remote-assist-relay-windows-amd64.exe --listen :8443 --audit ./test-audit.log
    ```
 
 2. 执行完整流程
@@ -148,7 +148,7 @@ nmap --script ssl-enum-ciphers -p 8443 localhost
 
 **命令**:
 ```bash
-bin/remote.exe share --server localhost:9999 --insecure
+bin/remote-assist-cli-windows-amd64.exe share --server localhost:9999 --insecure
 ```
 
 **预期**: 友好的错误提示，不崩溃
@@ -173,7 +173,7 @@ bin/remote.exe share --server localhost:9999 --insecure
 
 **命令**:
 ```bash
-bin/remote.exe share --server localhost:8443 --ssh 127.0.0.1:9999 --insecure
+bin/remote-assist-cli-windows-amd64.exe share --server localhost:8443 --ssh 127.0.0.1:9999 --insecure
 ```
 
 **预期**:
