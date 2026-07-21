@@ -34,8 +34,10 @@ jobs:
             ext=".exe"
           fi
           ldflags="-X github.com/remote-assist/tool/internal/version.Version=${{ github.event.release.tag_name }}"
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/remote-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/remote
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/relay-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd/relay
+          suf="${{ matrix.goos }}-${{ matrix.goarch }}${ext}"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/remote-assist-cli-${suf}" ./cmd/remote
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/remote-assist-relay-${suf}" ./cmd/relay
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags "$ldflags" -o "dist/remote-assist-webui-${suf}" ./cmd/gui
         shell: bash
 
       - name: Upload Release Assets
