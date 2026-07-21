@@ -35,6 +35,10 @@ type Server struct {
 	mu         sync.Mutex
 	client     *MCPClient
 	connected  bool
+	// connGen 每次用户主动改变连接意图（connect/disconnect）时自增。守护线程发起自动
+	// 重连时捕获它，安装前若发现已变，说明用户在退避/连接期间自己接管了连接，这次过期
+	// 重连必须放弃、绝不覆盖用户当前的 client。
+	connGen    uint64
 	serverArgs []string
 
 	// 守护：缓存最近一次成功的连接参数，子进程意外退出时自动重连
@@ -595,13 +599,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 关掉旧的子进程（如果有的话），再起新的
+	// 关掉旧的子进程（如果有的话），再起新的。同时自增 connGen：用户发起了新的连接意图，
+	// 任何正在退避/连接中的过期自动重连都应就此作废，不得回头覆盖这次连接。
 	s.mu.Lock()
 	if s.client != nil {
 		s.client.Close()
 		s.client = nil
 		s.connected = false
 	}
+	s.connGen++
 	s.mu.Unlock()
 
 	// bootstrap 模式：子进程进入等待 connect 工具的状态，不预先传 --code / --no-auth，
@@ -670,6 +676,9 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	// 无条件自增：即便守护线程已把 client 清成 nil，用户"保持断开"的意图也必须让正在
+	// 途中的自动重连作废，否则重连会把连接凭空恢复。
+	s.connGen++
 	if s.client != nil {
 		s.client.Close()
 		s.client = nil
@@ -710,6 +719,7 @@ func (s *Server) guardLoop() {
 		}
 		wasConnected := s.connected
 		code, server, noAuth := s.lastCode, s.lastServer, s.lastNoAuth
+		gen := s.connGen
 		s.connected = false
 		s.client = nil
 		s.mu.Unlock()
@@ -724,28 +734,47 @@ func (s *Server) guardLoop() {
 
 		// 自动重连，轻量退避，最多 6 次（约 1+2+3+4+5+5 = 20s）
 		s.broadcast("event: reconnecting\n")
-		reconnected := false
+		outcome := reconnectFailed
 		backoff := []time.Duration{1, 2, 3, 4, 5, 5}
 		for attempt, d := range backoff {
 			time.Sleep(d * time.Second)
-			if s.tryReconnect(code, server, noAuth) {
-				reconnected = true
+			outcome = s.tryReconnect(gen, code, server, noAuth)
+			if outcome != reconnectFailed {
 				break
 			}
 			s.broadcast(fmt.Sprintf("event: reconnect-fail\nretry %d/%d\n", attempt+1, len(backoff)))
 		}
-		if !reconnected {
+		// reconnectSuperseded：用户在退避/连接期间自己接管了连接（主动断开或改连别的
+		// share）。别再广播 lost 盖掉用户当前看到的状态；仅在重连确实彻底失败时才报 lost。
+		if outcome == reconnectFailed {
 			s.broadcast("event: lost\n")
 		}
 	}
 }
 
-// tryReconnect 用缓存参数重建子进程并完成 connect，成功返回 true。
-func (s *Server) tryReconnect(code, server string, noAuth bool) bool {
+// reconnectOutcome 表示一次自动重连尝试的结果。
+type reconnectOutcome int
+
+const (
+	reconnectFailed     reconnectOutcome = iota // 瞬时失败，可继续退避重试
+	reconnectOK                                 // 已重连并安装为当前 client
+	reconnectSuperseded                         // 用户已接管连接意图，放弃这次过期重连
+)
+
+// tryReconnect 用缓存参数重建子进程并完成 connect。gen 是守护线程发起重连时捕获的连接
+// 代次：建好连接后若 s.connGen 已变，说明用户在此期间主动断开或改连了别的 share，这条
+// 过期连接必须丢弃、绝不覆盖用户当前的 s.client（否则后续命令会发错机器、还会泄漏用户
+// 刚建的连接）。
+func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool) reconnectOutcome {
 	s.mu.Lock()
 	binPath := s.binPath
 	defSrv := s.defaultServer
+	superseded := s.connGen != gen
 	s.mu.Unlock()
+	// 用户已接管：连子进程都不必建。
+	if superseded {
+		return reconnectSuperseded
+	}
 
 	spawnArgs := []string{}
 	if server != "" {
@@ -755,35 +784,33 @@ func (s *Server) tryReconnect(code, server string, noAuth bool) bool {
 	}
 	client, err := NewMCPClient(binPath, spawnArgs)
 	if err != nil {
-		return false
+		return reconnectFailed
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := client.Initialize(ctx); err != nil {
 		client.Close()
-		return false
+		return reconnectFailed
 	}
-	connectArgs := map[string]any{}
-	if noAuth {
-		connectArgs["no_auth"] = true
-	} else {
-		connectArgs["code"] = code
-	}
-	if server != "" {
-		connectArgs["server"] = server
-	}
-	res, err := client.CallTool(ctx, "connect", connectArgs)
+	res, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth))
 	if err != nil {
 		client.Close()
-		return false
+		return reconnectFailed
 	}
 	s.mu.Lock()
+	// connect 可能耗时数秒，其间用户可能已接管——代次变了就丢弃这条连接、关掉子进程，
+	// 绝不覆盖 s.client。
+	if s.connGen != gen {
+		s.mu.Unlock()
+		client.Close()
+		return reconnectSuperseded
+	}
 	s.client = client
 	s.connected = true
 	s.recordConnectMetadata(res, code, server, noAuth)
 	s.mu.Unlock()
 	s.broadcast("event: connected\n")
-	return true
+	return reconnectOK
 }
 
 // handleCall 转发一次工具调用。body: {tool, args}

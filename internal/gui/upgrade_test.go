@@ -240,6 +240,19 @@ func TestParseUpgradePID(t *testing.T) {
 	}
 }
 
+func TestTryReconnectAbandonsStaleGeneration(t *testing.T) {
+	s := NewServer("remote", "relay:8443")
+	// 守护线程带着代次 3 发起重连，但用户已在期间接管连接把 connGen 推到了 5。
+	s.connGen = 5
+	if got := s.tryReconnect(3, "code", "", false); got != reconnectSuperseded {
+		t.Fatalf("tryReconnect(过期代次)=%v, want reconnectSuperseded", got)
+	}
+	// 过期重连必须原地放弃：既没建子进程，也没覆盖用户当前的连接状态。
+	if s.client != nil || s.connected {
+		t.Fatalf("过期重连改动了连接状态: client=%v connected=%v", s.client, s.connected)
+	}
+}
+
 func TestMarkConnectionLostOnlyClearsCurrentClient(t *testing.T) {
 	current := &MCPClient{}
 	stale := &MCPClient{}
