@@ -21,7 +21,7 @@ func testServer(t *testing.T) (*Server, http.Handler) {
 // 拿不到令牌（它只出现在启动 URL 里），所以发不出合法请求。
 func TestGuardRejectsRequestWithoutToken(t *testing.T) {
 	_, h := testServer(t)
-	for _, path := range []string{"/api/call", "/api/connect", "/api/exec/stream", "/api/disconnect", "/api/events", "/api/download?path=x"} {
+	for _, path := range []string{"/api/call", "/api/connect", "/api/exec/stream", "/api/disconnect", "/api/events", "/api/download?path=x", "/api/preview?path=x", "/api/status", "/api/upgrade"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		req.Host = "127.0.0.1:8731"
 		w := httptest.NewRecorder()
@@ -60,6 +60,18 @@ func TestGuardRejectsForeignOrigin(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("外部 Origin 应 403，实际 %d", w.Code)
+	}
+}
+
+func TestStatusReportsDisconnectedWithoutRemoteCall(t *testing.T) {
+	s, h := testServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/status", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1:8731"
+	req.Header.Set("X-Auth-Token", s.Token())
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"connected":false`) {
+		t.Fatalf("unexpected status response: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -103,12 +115,14 @@ func TestGuardAllowsLegitimateRequest(t *testing.T) {
 // 带令牌，这条路必须通。
 func TestGuardAcceptsQueryToken(t *testing.T) {
 	s, h := testServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/download?path=/tmp/x&token="+s.Token(), nil)
-	req.Host = "127.0.0.1:8731"
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code == http.StatusForbidden {
-		t.Fatalf("query 令牌应放行，实际 403: %s", w.Body.String())
+	for _, path := range []string{"/api/download", "/api/preview"} {
+		req := httptest.NewRequest(http.MethodGet, path+"?path=/tmp/x&token="+s.Token(), nil)
+		req.Host = "127.0.0.1:8731"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code == http.StatusForbidden {
+			t.Fatalf("%s 的 query 令牌应放行，实际 403: %s", path, w.Body.String())
+		}
 	}
 }
 
@@ -140,5 +154,18 @@ func TestTokensAreUnique(t *testing.T) {
 			t.Fatal("令牌重复——不是随机生成的")
 		}
 		seen[tok] = true
+	}
+}
+
+func TestUpgradeBlocksConcurrentToolCalls(t *testing.T) {
+	s, h := testServer(t)
+	s.upgrading.Store(true)
+	req := httptest.NewRequest(http.MethodPost, "/api/call", strings.NewReader(`{"tool":"stat","args":{}}`))
+	req.Host = "127.0.0.1:8731"
+	req.Header.Set("X-Auth-Token", s.Token())
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("升级中的工具调用应返回 409，实际 %d: %s", w.Code, w.Body.String())
 	}
 }

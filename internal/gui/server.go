@@ -2,19 +2,25 @@ package gui
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/remote-assist/tool/internal/gui/assets"
@@ -22,24 +28,41 @@ import (
 
 // Server 是 GUI 的后端：托管前端静态页 + 通过 JSON 把请求转发给 MCP 子进程。
 type Server struct {
-	binPath string
+	binPath       string
 	defaultServer string
-	token   string // 启动时随机生成，见 guard
+	token         string // 启动时随机生成，见 guard
 
-	mu     sync.Mutex
-	client *MCPClient
-	connected bool
+	mu         sync.Mutex
+	client     *MCPClient
+	connected  bool
 	serverArgs []string
 
 	// 守护：缓存最近一次成功的连接参数，子进程意外退出时自动重连
 	lastCode     string
 	lastServer   string
 	lastNoAuth   bool
+	peerVersion  string
+	helpVersion  string
+	peerHost     string
+	effectiveSrv string
+	sessionID    string
+	p2p          bool
+	connectedAt  time.Time
 	guardStarted bool
+	upgradeMu    sync.Mutex
+	upgrading    atomic.Bool
+	previewCache string
+	previewMu    sync.Mutex
+	previewLoads map[string]*previewLoad
 
 	// SSE 广播
 	sseMu   sync.Mutex
 	sseSubs map[chan string]struct{}
+}
+
+type previewLoad struct {
+	done chan struct{}
+	err  error
 }
 
 // NewServer 创建一个 GUI 后端。binPath 为 remote 可执行文件路径。
@@ -49,6 +72,8 @@ func NewServer(binPath, defaultServer string) *Server {
 		defaultServer: defaultServer,
 		token:         randomToken(),
 		sseSubs:       make(map[chan string]struct{}),
+		previewCache:  defaultPreviewCacheDir(),
+		previewLoads:  make(map[string]*previewLoad),
 	}
 }
 
@@ -75,6 +100,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/download", s.handleDownload)
+	mux.HandleFunc("/api/preview", s.handlePreview)
+	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/upgrade", s.handleUpgrade)
 	return s.guard(mux)
 }
 
@@ -160,17 +188,174 @@ func baseName(p string) string {
 	return p
 }
 
-// handleDownload 把远端文件下载给浏览器。
-//
-// 不能用 read_file：它的结果经 humanize 后只剩 text 字段，二进制文件只会得到一个
-// binary=true 标记，拿不到原始字节。download_file 是 host 端复合工具，走裸 bridge
-// 分块拉取（自带重试/续传），落到本地临时文件后再流回浏览器——二进制与大文件都正确，
-// 且下载进度由浏览器原生呈现。
-func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	remotePath := r.URL.Query().Get("path")
-	if remotePath == "" {
-		http.Error(w, "path required", http.StatusBadRequest)
-		return
+func defaultPreviewCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "remote-assist-tool", "image-previews-v1")
+}
+
+var md5TextRE = regexp.MustCompile(`(?i)^[0-9a-f]{32}$`)
+var md5InTextRE = regexp.MustCompile(`(?i)[0-9a-f]{32}`)
+
+func normalizeMD5(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if md5TextRE.MatchString(value) {
+		return value
+	}
+	return ""
+}
+
+func parseMD5Output(stdout string) string {
+	for _, line := range strings.Split(strings.ReplaceAll(stdout, " ", ""), "\n") {
+		if digest := normalizeMD5(strings.TrimSpace(line)); digest != "" {
+			return digest
+		}
+		if digest := md5InTextRE.FindString(line); digest != "" {
+			return strings.ToLower(digest)
+		}
+	}
+	fields := strings.Fields(stdout)
+	if len(fields) > 0 {
+		return normalizeMD5(fields[0])
+	}
+	return ""
+}
+
+func remoteFileMD5(ctx context.Context, client *MCPClient, remotePath string) (string, error) {
+	var result struct {
+		MD5 string `json:"md5"`
+	}
+	toolErr := callRemoteJSON(ctx, client, "file_md5", map[string]any{"path": remotePath}, &result)
+	if digest := normalizeMD5(result.MD5); toolErr == nil && digest != "" {
+		return digest, nil
+	}
+	var lastErr = toolErr
+	encodedPath := base64.StdEncoding.EncodeToString([]byte(remotePath))
+	powerShellHash := fmt.Sprintf("$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s'));(Get-FileHash -LiteralPath $p -Algorithm MD5).Hash", encodedPath)
+	commands := [][]string{
+		{"md5sum", "--", remotePath},
+		{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", powerShellHash},
+		{"md5", "-q", remotePath},
+		{"certutil.exe", "-hashfile", remotePath, "MD5"},
+	}
+	for _, argv := range commands {
+		var execResult remoteExecResult
+		err := callRemoteJSON(ctx, client, "exec", map[string]any{
+			"argv": argv, "timeout_ms": 5 * 60 * 1000, "max_output_bytes": 65536,
+		}, &execResult)
+		if err == nil && execResult.ExitCode == 0 {
+			if digest := parseMD5Output(execResult.Stdout); digest != "" {
+				return digest, nil
+			}
+			err = errors.New("MD5 command returned no digest")
+		}
+		if err == nil {
+			err = errors.New(strings.TrimSpace(execResult.Error + " " + execResult.Stderr))
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("remote MD5 is unavailable")
+	}
+	return "", lastErr
+}
+
+func fileMD5(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hash := md5.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func cachePreviewDownload(cacheDir, digest string, download func(string) error) (string, error) {
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		return "", err
+	}
+	finalPath := filepath.Join(cacheDir, digest)
+	if stat, err := os.Stat(finalPath); err == nil && stat.Mode().IsRegular() {
+		return finalPath, nil
+	}
+	tmp, err := os.CreateTemp(cacheDir, ".preview-*.part")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+	if err := download(tmpPath); err != nil {
+		return "", fmt.Errorf("download preview: %w", err)
+	}
+	localDigest, err := fileMD5(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	if localDigest != digest {
+		return "", fmt.Errorf("preview MD5 mismatch: remote %s, downloaded %s", digest, localDigest)
+	}
+	_ = os.Chmod(tmpPath, 0600)
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		if stat, statErr := os.Stat(finalPath); statErr == nil && stat.Mode().IsRegular() {
+			return finalPath, nil
+		}
+		return "", fmt.Errorf("commit preview cache: %w", err)
+	}
+	return finalPath, nil
+}
+
+func downloadAndCachePreview(ctx context.Context, client *MCPClient, cacheDir, remotePath, digest string) (string, error) {
+	return cachePreviewDownload(cacheDir, digest, func(tmpPath string) error {
+		_, err := client.CallTool(ctx, "download_file", map[string]any{"remote_path": remotePath, "local_path": tmpPath})
+		return err
+	})
+}
+
+func (s *Server) cachedPreview(ctx context.Context, client *MCPClient, remotePath, digest string) (string, bool, error) {
+	cachePath := filepath.Join(s.previewCache, digest)
+	if stat, err := os.Stat(cachePath); err == nil && stat.Mode().IsRegular() {
+		return cachePath, true, nil
+	}
+	s.previewMu.Lock()
+	if load := s.previewLoads[digest]; load != nil {
+		s.previewMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", false, ctx.Err()
+		case <-load.done:
+			if load.err != nil {
+				return "", false, load.err
+			}
+			return cachePath, true, nil
+		}
+	}
+	load := &previewLoad{done: make(chan struct{})}
+	s.previewLoads[digest] = load
+	s.previewMu.Unlock()
+
+	path, err := downloadAndCachePreview(ctx, client, s.previewCache, remotePath, digest)
+	s.previewMu.Lock()
+	load.err = err
+	close(load.done)
+	delete(s.previewLoads, digest)
+	s.previewMu.Unlock()
+	return path, false, err
+}
+
+// stageRemoteFile 通过裸 bridge 把远端文件分块拉到本地临时文件。下载和图片预览共用
+// 这条路径，二进制、大文件以及传输重试/续传的行为保持一致。
+func (s *Server) stageRemoteFile(w http.ResponseWriter, r *http.Request, remotePath string) (string, bool) {
+	if s.rejectWhileUpgrading(w) {
+		return "", false
 	}
 	s.mu.Lock()
 	client := s.client
@@ -178,17 +363,16 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if !connected || client == nil {
 		http.Error(w, "not connected", http.StatusBadRequest)
-		return
+		return "", false
 	}
 
 	tmp, err := os.CreateTemp("", "ra-download-*")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return "", false
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
-	defer os.Remove(tmpPath)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
@@ -196,9 +380,25 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		"remote_path": remotePath,
 		"local_path":  tmpPath,
 	}); err != nil {
+		os.Remove(tmpPath)
 		http.Error(w, "download failed: "+err.Error(), http.StatusBadGateway)
+		return "", false
+	}
+	return tmpPath, true
+}
+
+// handleDownload 把远端文件作为附件下载给浏览器。
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	remotePath := r.URL.Query().Get("path")
+	if remotePath == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
+	tmpPath, ok := s.stageRemoteFile(w, r, remotePath)
+	if !ok {
+		return
+	}
+	defer os.Remove(tmpPath)
 
 	f, err := os.Open(tmpPath)
 	if err != nil {
@@ -215,6 +415,145 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
 	}
 	io.Copy(w, f)
+}
+
+// previewImageContentType 只放行浏览器普遍支持的光栅图片。尤其不能把 SVG 当作同源内容
+// 返回：SVG 可以包含脚本，若直接挂在本地 GUI 的 origin 下会扩大攻击面。
+func previewImageContentType(header []byte) (string, bool) {
+	contentType := http.DetectContentType(header)
+	switch contentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp":
+		return contentType, true
+	default:
+		return "", false
+	}
+}
+
+// handlePreview 校验文件的实际内容类型后以内联图片返回。扩展名只供前端决定是否发起
+// 预览，后端不信任扩展名，避免把改名后的 HTML/SVG 作为同源可执行内容送给浏览器。
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	remotePath := r.URL.Query().Get("path")
+	if remotePath == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	if s.rejectWhileUpgrading(w) {
+		return
+	}
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected
+	s.mu.Unlock()
+	if !connected || client == nil {
+		http.Error(w, "not connected", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	digest, hashErr := remoteFileMD5(ctx, client, remotePath)
+	cacheStatus := "bypass"
+	previewPath := ""
+	removeAfter := false
+	if hashErr == nil {
+		etag := `"` + digest + `"`
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "private, no-cache")
+		if r.URL.Query().Get("download") == "" && r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		var cacheHit bool
+		var err error
+		previewPath, cacheHit, err = s.cachedPreview(ctx, client, remotePath, digest)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if cacheHit {
+			cacheStatus = "hit"
+		} else {
+			cacheStatus = "miss"
+		}
+	} else {
+		var ok bool
+		previewPath, ok = s.stageRemoteFile(w, r, remotePath)
+		if !ok {
+			return
+		}
+		removeAfter = true
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	if removeAfter {
+		defer os.Remove(previewPath)
+	}
+
+	f, err := os.Open(previewPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	header := make([]byte, 512)
+	n, err := f.Read(header)
+	if err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	contentType, ok := previewImageContentType(header[:n])
+	if !ok {
+		http.Error(w, "unsupported image format", http.StatusUnsupportedMediaType)
+		return
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	name := baseName(remotePath)
+	w.Header().Set("Content-Type", contentType)
+	disposition := "inline"
+	if r.URL.Query().Get("download") != "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", disposition+"; filename*=UTF-8''"+url.PathEscape(name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Preview-Cache", cacheStatus)
+	http.ServeContent(w, r, name, time.Time{}, f)
+}
+
+// handleStatus 返回当前连接的稳定元数据，并通过一次小型远端调用测量当前通道 RTT。
+// process_list 在旧 share 上也存在，因此连接 0.0.5 时仍能显示延迟。
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	client := s.client
+	connected := s.connected
+	result := map[string]any{
+		"ok": connected, "connected": connected, "server": s.effectiveSrv, "session_id": s.sessionID,
+		"peer_host": s.peerHost, "peer_version": s.peerVersion, "help_version": s.helpVersion, "p2p": s.p2p,
+	}
+	if !s.connectedAt.IsZero() {
+		result["connected_seconds"] = int64(time.Since(s.connectedAt).Seconds())
+	}
+	s.mu.Unlock()
+	if !connected || client == nil {
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	started := time.Now()
+	_, err := client.CallTool(ctx, "process_list", map[string]any{"max_count": 1})
+	if err == nil {
+		latency := time.Since(started).Milliseconds()
+		if latency < 1 {
+			latency = 1
+		}
+		result["latency_ms"] = latency
+	} else {
+		result["latency_error"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) broadcast(msg string) {
@@ -239,6 +578,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 // handleConnect 建立到远端 share 的 MCP 隧道。
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if s.rejectWhileUpgrading(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -312,9 +654,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.client = client
 	s.connected = true
 	// 缓存连接参数，供子进程意外退出时自动重连
-	s.lastCode = req.Code
-	s.lastServer = req.Server
-	s.lastNoAuth = req.NoAuth
+	s.recordConnectMetadata(res, req.Code, req.Server, req.NoAuth)
 	if !s.guardStarted {
 		s.guardStarted = true
 		go s.guardLoop()
@@ -326,11 +666,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	if s.rejectWhileUpgrading(w) {
+		return
+	}
 	s.mu.Lock()
 	if s.client != nil {
 		s.client.Close()
 		s.client = nil
 		s.connected = false
+		s.peerVersion = ""
+		s.helpVersion = ""
+		s.peerHost = ""
+		s.effectiveSrv = ""
+		s.sessionID = ""
+		s.p2p = false
+		s.connectedAt = time.Time{}
 	}
 	s.mu.Unlock()
 	s.broadcast("event: disconnected\n")
@@ -422,13 +772,15 @@ func (s *Server) tryReconnect(code, server string, noAuth bool) bool {
 	if server != "" {
 		connectArgs["server"] = server
 	}
-	if _, err := client.CallTool(ctx, "connect", connectArgs); err != nil {
+	res, err := client.CallTool(ctx, "connect", connectArgs)
+	if err != nil {
 		client.Close()
 		return false
 	}
 	s.mu.Lock()
 	s.client = client
 	s.connected = true
+	s.recordConnectMetadata(res, code, server, noAuth)
 	s.mu.Unlock()
 	s.broadcast("event: connected\n")
 	return true
@@ -436,6 +788,9 @@ func (s *Server) tryReconnect(code, server string, noAuth bool) bool {
 
 // handleCall 转发一次工具调用。body: {tool, args}
 func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
+	if s.rejectWhileUpgrading(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -478,6 +833,9 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 //	{"type":"result","result":{...}}   // 收尾，带 exit_code
 //	{"type":"error","error":"..."}
 func (s *Server) handleExecStream(w http.ResponseWriter, r *http.Request) {
+	if s.rejectWhileUpgrading(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

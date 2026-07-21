@@ -29,9 +29,19 @@ button{background:#89b4fa;color:#11111b;border:none;padding:3px 10px;border-radi
 button:hover{background:#74a0f0}
 button.sec{background:#f38ba8}
 button.sm{padding:1px 6px;font-weight:normal;font-size:11px}
-#status{margin-left:auto;padding:2px 8px;border-radius:8px;background:#45475a;font-size:11px}
+#status{margin-left:auto;padding:2px 9px;border-radius:8px;background:#45475a;color:#cdd6f4;font-size:11px;font-weight:normal}
 #status.ok{background:#a6e3a1;color:#11111b}
 #status.bad{background:#f38ba8;color:#11111b}
+#status:disabled{cursor:default;opacity:1}
+#conn-info{display:none;position:fixed;right:12px;top:39px;width:min(340px,calc(100vw - 24px));z-index:1000;background:#181825;border:1px solid #45475a;border-radius:4px;box-shadow:0 8px 24px rgba(0,0,0,.55);padding:7px 10px}
+#conn-info .conn-title{display:flex;align-items:center;justify-content:space-between;padding-bottom:5px;margin-bottom:3px;border-bottom:1px solid #313244;font-weight:bold}
+#conn-info .conn-row{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px;padding:3px 0;font-size:11px}
+#conn-info .conn-label{color:#9399b2}
+#conn-info .conn-value{color:#cdd6f4;overflow-wrap:anywhere;text-align:right}
+#conn-info .transport-p2p{color:#a6e3a1}
+#upgrade-notice{display:none;min-height:32px;padding:5px 12px;background:#332d1f;border-bottom:1px solid #665c3a;color:#f9e2af;align-items:center;gap:8px}
+#upgrade-notice .msg{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#upgrade-notice.success{background:#203326;border-color:#3f684a;color:#a6e3a1}
 main{flex:1;display:flex;min-height:0}
 #tree-panel{width:260px;min-width:120px;display:flex;flex-direction:column;flex-shrink:0}
 #resizer{width:5px;background:#313244;cursor:col-resize;flex-shrink:0;transition:background .1s;user-select:none;touch-action:none}
@@ -75,7 +85,12 @@ main{flex:1;display:flex;min-height:0}
 #file-hdr{padding:3px 10px;background:#181825;border-bottom:1px solid #313244;display:flex;align-items:center;gap:6px;font-size:11px}
 #file-hdr .path{color:#89b4fa;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #file-hdr .info{color:#6c7086}
+#file-hdr .image-tool{display:none;width:25px;height:23px;padding:0;align-items:center;justify-content:center;font-size:12px}
+#file-hdr #fZoomFit{width:36px}
 #file-content{flex:1;min-height:0;overflow:auto;padding:6px 10px;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5}
+#file-content.image-preview{padding:0;display:block;position:relative;white-space:normal;background:#11111b;overscroll-behavior:contain}
+#file-content.image-preview .image-stage{position:relative;min-width:100%;min-height:100%}
+#file-content.image-preview img{display:block;position:absolute;max-width:none;max-height:none;object-fit:contain;user-select:none;-webkit-user-drag:none}
 #file-editor{display:none;flex:1;min-height:0}
 #file-editor textarea{width:100%;height:100%;background:#1e1e2e;border:none;color:#cdd6f4;font-family:inherit;font-size:12px;padding:6px 10px;resize:none;outline:none;line-height:1.5}
 #proc-box{display:none;flex-direction:column;flex:1;min-height:0}
@@ -97,10 +112,10 @@ main{flex:1;display:flex;min-height:0}
     <input class="server" id="server" placeholder="host:port">
     <label class="meta"><input type="checkbox" id="noauth"> NoAuth</label>
     <button id="connect">连接</button>
-    <button class="sm" id="btnSearch">搜索</button>
     <button class="sm" id="btnProc">进程</button>
-    <span id="status">未连接</span>
+    <button id="status" title="连接详情" disabled>未连接</button>
   </header>
+  <div id="upgrade-notice"><span class="msg" id="upgrade-msg"></span><button class="sm" id="upgrade-select">选择升级包</button><input type="file" id="upgrade-file" style="display:none"></div>
   <main>
     <div id="tree-panel">
       <div id="tree-hdr"><span>远端</span><input id="treePath" placeholder="路径回车跳转"></div>
@@ -113,11 +128,12 @@ main{flex:1;display:flex;min-height:0}
         <div id="term-box"><div class="input-row"><span class="prompt">$</span><input id="termInput" placeholder="输入命令" autocomplete="off"></div><div id="term-output"></div></div>
         <div id="search-box"><div class="sp"><label>正则:</label><input id="grepPattern" placeholder="TODO"><label>目录:</label><input id="grepRoot" placeholder="C:\\"><button class="sm" id="grepRun">搜索</button></div><div id="search-output"></div></div>
         <div id="proc-box"><div id="proc-output"></div></div>
-        <div id="file-box"><div id="file-hdr"><span class="path" id="fpath"></span><span class="info" id="finfo"></span><button class="sm" id="fEdit" style="display:none">编辑</button><button class="sm" id="fSave" style="display:none;background:#a6e3a1">保存</button><button class="sm" id="fCancel" style="display:none">取消</button></div><div id="file-content"></div><div id="file-editor"><textarea id="fEditor"></textarea></div></div>
+        <div id="file-box"><div id="file-hdr"><span class="path" id="fpath"></span><span class="info" id="finfo"></span><button class="sm image-tool" id="fZoomOut" title="缩小" aria-label="缩小">−</button><button class="sm image-tool" id="fZoomFit" title="适合窗口">适配</button><button class="sm image-tool" id="fZoomIn" title="放大" aria-label="放大">+</button><button class="sm image-tool" id="fDownload" title="另存为" aria-label="另存为">⇩</button><button class="sm" id="fEdit" style="display:none">编辑</button><button class="sm" id="fSave" style="display:none;background:#a6e3a1">保存</button><button class="sm" id="fCancel" style="display:none">取消</button></div><div id="file-content"></div><div id="file-editor"><textarea id="fEditor"></textarea></div></div>
       </div>
     </div>
   </main>
 </div>
+<div id="conn-info"></div>
 <div id="ctxmenu"></div>
 <script>
 const $=s=>document.querySelector(s),status=$('#status');
@@ -127,10 +143,10 @@ const $=s=>document.querySelector(s),status=$('#status');
 // 设不了头，只能退回 query 参数（令牌本身即凭据，跨站方拿不到，同样安全）。
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 function withToken(path){return path+(path.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN)}
-let connected=false,cmdHistory=[],histIdx=-1,currentFilePath='';
+let connected=false,cmdHistory=[],histIdx=-1,currentFilePath='',peerVersion='',helpVersion='';
 let tabs=[],activeTab=null;
 
-function setStatus(ok,text){connected=ok;status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');renderConnBtn()}
+function setStatus(ok,text){connected=ok;status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');status.disabled=!ok;if(!ok)$('#conn-info').style.display='none';renderConnBtn()}
 // 连接与断开共用一个按钮：连上了它就是「断开」，没连就是「连接」。
 function renderConnBtn(){const b=$('#connect');if(!b)return;b.textContent=connected?'断开':'连接';b.className=connected?'sec':''}
 
@@ -142,16 +158,34 @@ es.addEventListener('connected',()=>{setStatus(true,'已连接');loadDrives()});
 es.addEventListener('disconnected',()=>{setStatus(false,'已断开')});
 es.addEventListener('reconnecting',()=>{setStatus(false,'重连中...');termLog('<span class="meta">连接断开，正在自动重连...</span>')});
 es.addEventListener('lost',()=>{setStatus(false,'丢失');termLog('<span class="err">自动重连失败，请重新点击连接</span>')});
+es.addEventListener('upgrade-progress',e=>{const n=$('#upgrade-notice');n.style.display='flex';n.className='';$('#upgrade-msg').textContent=e.data});
 es.onerror=()=>{};
 
 async function api(path,body){const ctrl=new AbortController();const t=setTimeout(()=>ctrl.abort(),30000);try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},body:JSON.stringify(body||{}),signal:ctrl.signal});return await r.json()}catch(e){return{ok:false,error:String(e)}}finally{clearTimeout(t)}}
+
+function formatConnectedTime(seconds){
+  seconds=Math.max(0,Number(seconds)||0);if(seconds<60)return seconds+' 秒';if(seconds<3600)return Math.floor(seconds/60)+' 分钟';return Math.floor(seconds/3600)+' 小时 '+Math.floor(seconds%3600/60)+' 分钟';
+}
+function connectionRow(label,value,cls){return'<div class="conn-row"><span class="conn-label">'+esc(label)+'</span><span class="conn-value '+(cls||'')+'">'+esc(value||'—')+'</span></div>'}
+async function showConnectionInfo(){
+  if(!connected)return;const panel=$('#conn-info');panel.style.display='block';panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="meta">测量中...</span></div>';
+  const r=await api('/api/status',{});if(!r.connected){panel.innerHTML='<div class="conn-title"><span>连接状态</span></div>'+connectionRow('状态','已断开');return}
+  const mode=r.p2p?'P2P 直连':'Relay 中转',latency=r.latency_ms!==undefined?r.latency_ms+' ms':'不可用';
+  panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="ok">'+esc(mode)+'</span></div>'+
+    connectionRow('服务器',r.server)+connectionRow('传输',mode,r.p2p?'transport-p2p':'')+connectionRow('往返延迟',latency)+
+    connectionRow('远端主机',r.peer_host)+connectionRow('远端版本',r.peer_version)+connectionRow('Help 版本',r.help_version)+
+    connectionRow('会话 ID',r.session_id)+connectionRow('已连接',formatConnectedTime(r.connected_seconds));
+}
+status.onclick=e=>{e.stopPropagation();const panel=$('#conn-info');if(panel.style.display==='block')panel.style.display='none';else showConnectionInfo()};
+$('#conn-info').onclick=e=>e.stopPropagation();
+document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
 
 async function doConnect(){
   const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked;
   resetRemoteState(); // 可能换了一台远端，旧缓存一律作废
   setStatus(false,'连接中...');
   const r=await api('/api/connect',{code,server,no_auth:noauth});
-  if(r.ok){setStatus(true,'已连接');loadDrives();openTerm()}
+  if(r.ok){const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();openTerm()}
   else{setStatus(false,'失败');termLog('<span class="err">'+esc(r.error)+'</span>')}
 }
 async function doDisconnect(){
@@ -164,12 +198,51 @@ async function doDisconnect(){
 // 显示成 A 的目录；而 remoteOS 更要命——它决定 joinRemote 用 '\' 还是 '/'，残留下来会
 // 让新远端的路径全拼错。
 function resetRemoteState(){
+  driveLoadGeneration++;
   for(const k in treeCache)delete treeCache[k];
   remoteOS='';
+  $('#treePath').value='';
+  peerVersion='';helpVersion='';$('#upgrade-notice').style.display='none';$('#upgrade-notice').className='';
 }
 $('#connect').onclick=async()=>{
   const b=$('#connect');b.disabled=true;
   try{connected?await doDisconnect():await doConnect()}finally{b.disabled=false;renderConnBtn()}
+};
+
+function versionParts(s){
+  const m=String(s||'').match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?/i);
+  return m?[Number(m[1]),Number(m[2]),Number(m[3]),Number(m[4]||0)]:null;
+}
+function isVersionOlder(current,latest){
+  const a=versionParts(current),b=versionParts(latest);if(!a||!b)return false;
+  for(let i=0;i<a.length;i++){if(a[i]!==b[i])return a[i]<b[i]}
+  return false;
+}
+function setUpgradeInfo(meta){
+  peerVersion=meta.peer_version||'';helpVersion=meta.help_version||'';
+  const n=$('#upgrade-notice');n.className='';
+  if(!isVersionOlder(peerVersion,helpVersion)){n.style.display='none';return}
+  $('#upgrade-msg').textContent='远端 share '+peerVersion+'，当前 help '+helpVersion;
+  n.style.display='flex';$('#upgrade-select').disabled=false;$('#upgrade-select').style.display='inline-block';
+}
+$('#upgrade-select').onclick=()=>$('#upgrade-file').click();
+$('#upgrade-file').onchange=async()=>{
+  const input=$('#upgrade-file'),file=input.files&&input.files[0];if(!file)return;
+  input.value='';
+  if(!confirm('将 '+file.name+' 传到远端，验证后以先建后断方式升级 share。继续吗？'))return;
+  const btn=$('#upgrade-select'),connBtn=$('#connect');btn.disabled=true;connBtn.disabled=true;
+  $('#upgrade-notice').className='';$('#upgrade-notice').style.display='flex';
+  $('#upgrade-msg').textContent='正在准备升级...';
+  const form=new FormData();form.append('binary',file,file.name);
+  try{
+    const resp=await fetch('/api/upgrade',{method:'POST',headers:{'X-Auth-Token':TOKEN},body:form});
+    const r=await resp.json();
+    if(!r.ok){$('#upgrade-msg').textContent=r.error||('升级失败: HTTP '+resp.status);btn.disabled=false;return}
+    const newVersion=r.peer_version||r.new_version||peerVersion;
+    btn.style.display='none';resetRemoteState();$('#upgrade-notice').style.display='flex';$('#upgrade-notice').className='success';
+    peerVersion=newVersion;$('#upgrade-msg').textContent='share 已升级到 '+newVersion+(r.warning?'；'+r.warning:'');loadDrives();
+  }catch(e){$('#upgrade-msg').textContent='升级请求失败: '+String(e);btn.disabled=false}
+  finally{connBtn.disabled=false;renderConnBtn()}
 };
 
 // ========== Tabs ==========
@@ -196,11 +269,13 @@ function activateTab(id){
 function closeTab(id){
   const t=tabs.find(x=>x.id===id);
   if(t&&t.fixed)return; // 常驻页（终端）关不掉
+  if(t&&t.imageObjectURL)URL.revokeObjectURL(t.imageObjectURL);
+  if(t&&t.imageRequest)t.imageRequest.abort();
   tabs=tabs.filter(x=>x.id!==id);
   if(activeTab===id){activeTab=tabs.length?tabs[tabs.length-1].id:null;if(activeTab)activateTab(activeTab);else openTerm()}
   renderTabs();
 }
-function closeAllTabs(){tabs=[];activeTab=null;$('#tabbar').innerHTML='';BOXES.forEach(x=>$('#'+x).style.display='none')}
+function closeAllTabs(){for(const t of tabs){if(t.imageObjectURL)URL.revokeObjectURL(t.imageObjectURL);if(t.imageRequest)t.imageRequest.abort()}tabs=[];activeTab=null;$('#tabbar').innerHTML='';BOXES.forEach(x=>$('#'+x).style.display='none')}
 function renderTabs(){
   const bar=$('#tabbar');bar.innerHTML='';
   for(const t of tabs){
@@ -259,18 +334,32 @@ function scanUTF8(b){
 function makeDecoder(){
   const utf8=new TextDecoder('utf-8'),gbk=new TextDecoder('gbk');
   let gbkMode=false,pending=new Uint8Array(0);
-  return bytes=>{
+  return (bytes,final=false)=>{
     let buf;
     if(pending.length){buf=new Uint8Array(pending.length+bytes.length);buf.set(pending);buf.set(bytes,pending.length)}
     else buf=bytes;
     if(!gbkMode&&!scanUTF8(buf).ok)gbkMode=true;
     if(gbkMode){
       pending=new Uint8Array(0); // 交给 gbk 解码器自己处理跨块的半个字符
-      return gbk.decode(buf,{stream:true});
+      return gbk.decode(buf,{stream:!final});
     }
     const {complete}=scanUTF8(buf);
     pending=buf.slice(complete);
-    return utf8.decode(buf.subarray(0,complete));
+    const text=utf8.decode(buf.subarray(0,complete));
+    if(!final)return text;
+    const tail=utf8.decode(pending);pending=new Uint8Array(0);
+    return text+tail;
+  };
+}
+// 文件试读与终端输出共用 UTF-8/GBK 回退；文件额外识别 UTF-16 BOM。这只在用户主动点击
+// "按文本查看" 后使用，默认预览仍拒绝非 UTF-8 内容，避免误编辑二进制文件。
+function makeFileDecoder(){
+  const fallback=makeDecoder();let decoder=null;
+  return (bytes,final=false)=>{
+    if(decoder)return decoder.decode(bytes,{stream:!final});
+    if(bytes.length>=2&&bytes[0]===0xFF&&bytes[1]===0xFE){decoder=new TextDecoder('utf-16le');return decoder.decode(bytes.subarray(2),{stream:!final})}
+    if(bytes.length>=2&&bytes[0]===0xFE&&bytes[1]===0xFF){decoder=new TextDecoder('utf-16be');return decoder.decode(bytes.subarray(2),{stream:!final})}
+    return fallback(bytes,final);
   };
 }
 function openTerm(){openTab('term','终端','term-box',()=>{$('#termInput').focus()},true)}
@@ -345,15 +434,21 @@ function execEvent(ev,decs){
   }
   if(ev.type==='error'){termLog('<span class="err">'+esc(ev.error)+'</span>');return}
   if(ev.type==='result'){
-    // 流式模式下输出已经逐块渲染过，result 只带退出状态，不会重复回传 stdout/stderr。
+    // 0.0.5 不会发流式块，而是把输出放在最终响应里；新版流式结果不带这两项，故兼容
+    // 渲染不会重复输出。
     const d=parseMCP(ev.result);
+    if(d.stdout)termAppend(d.stdout);
+    if(d.stderr)termAppend(d.stderr,'err');
     if(d.error)termLog('<span class="err">无法执行: '+esc(d.error)+'</span>'); // 命令没能启动的原因
     if(d.exit_code)termLog('<span class="meta">exit: '+esc(d.exit_code)+'</span>');
   }
 }
 
 // ========== grep 搜索 ==========
-function openSearch(){openTab('search','搜索','search-box',()=>{$('#grepPattern').focus()})}
+function openSearch(root){
+  if(root!==undefined)$('#grepRoot').value=root;
+  openTab('search','搜索','search-box',()=>{$('#grepPattern').focus()});
+}
 $('#grepRun').onclick=async()=>{
   if(!connected)return;const pattern=$('#grepPattern').value.trim(),root=$('#grepRoot').value.trim();
   if(!pattern)return;
@@ -369,7 +464,6 @@ $('#grepRun').onclick=async()=>{
 
 // ========== 进程 ==========
 function openProc(){openTab('proc','进程','proc-box',async()=>{$('#proc-output').innerHTML='<span class="meta">加载中...</span>';await loadProc()})}
-$('#btnSearch').onclick=()=>openSearch();
 $('#btnProc').onclick=()=>openProc();
 async function loadProc(){
   if(!connected)return;const out=$('#proc-output');
@@ -401,11 +495,14 @@ async function loadMoreFile(t){
   if(t.loadingMore||t.eof)return false;
   t.loadingMore=true;
   try{
-    const r=await api('/api/call',{tool:'read_file',args:{path:t.path,offset:t.offset,length:FILE_CHUNK}});
+    const r=await api('/api/call',{tool:'read_file',args:{path:t.path,offset:t.offset,length:FILE_CHUNK,as_text:!!t.asText}});
     if(!r.ok){$('#file-content').innerHTML='<span class="err">'+esc(r.error)+'</span>';return false}
     const d=parseMCP(r.result);
     if(d.binary){t.binary=true;t.eof=true;renderFileTab(t);return true}
-    t.content+=(d.text||'');
+    if(d.bytes_b64!==undefined){
+      if(!t.decoder)t.decoder=makeFileDecoder();
+      t.content+=t.decoder(b64bytes(d.bytes_b64),!!d.eof);
+    }else t.content+=(d.text||'');
     const n=d.bytes_len!==undefined?d.bytes_len:new TextEncoder().encode(d.text||'').length;
     t.offset+=n;
     if(d.eof||n===0)t.eof=true;
@@ -417,25 +514,77 @@ async function showFile(path,entry){
   const id='file:'+path;
   openTab(id,path.split(/[\\/]/).pop()||path,'file-box',async t=>{
     currentFilePath=path;
-    if(t.loaded){renderFileTab(t);return} // 切回已打开的文件：用缓存，不重读、不丢未保存的编辑
-    t.loaded=true;t.path=path;t.offset=0;t.content='';t.eof=false;t.binary=false;t.editing=false;
+    if(t.loaded){t.image?renderImagePreview(t):renderFileTab(t);return} // 切回已打开的文件：用缓存，不重读、不丢未保存的编辑
+    t.loaded=true;t.path=path;t.image=isPreviewableImage(path);t.offset=0;t.content='';t.eof=false;t.binary=false;t.asText=false;t.decoder=null;t.editing=false;
     $('#fpath').textContent=path;
     resetFileView();
+    if(t.image){renderImagePreview(t);return}
     $('#file-content').textContent='读取中...';
     await loadMoreFile(t);
   });
 }
+function isPreviewableImage(path){return /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(path))}
+function imageFitScale(t){
+  const c=t.imageContainer,img=t.imageElement;if(!c||!img||!img.naturalWidth)return 1;
+  return Math.min(1,Math.max(.05,Math.min((c.clientWidth-24)/img.naturalWidth,(c.clientHeight-24)/img.naturalHeight)));
+}
+function applyImageScale(t,next,anchor){
+  const c=t.imageContainer,stage=t.imageStage,img=t.imageElement;if(!c||!stage||!img||!img.naturalWidth)return;
+  const oldScale=t.imageScale||1,viewX=anchor?anchor.clientX-c.getBoundingClientRect().left:c.clientWidth/2,viewY=anchor?anchor.clientY-c.getBoundingClientRect().top:c.clientHeight/2;
+  const oldW=img.naturalWidth*oldScale,oldH=img.naturalHeight*oldScale,oldStageW=Math.max(c.clientWidth,oldW+24),oldStageH=Math.max(c.clientHeight,oldH+24);
+  const imageX=(c.scrollLeft+viewX-(oldStageW-oldW)/2)/oldScale,imageY=(c.scrollTop+viewY-(oldStageH-oldH)/2)/oldScale;
+  const scale=Math.max(.05,Math.min(8,next)),width=img.naturalWidth*scale,height=img.naturalHeight*scale,stageW=Math.max(c.clientWidth,width+24),stageH=Math.max(c.clientHeight,height+24);
+  t.imageScale=scale;stage.style.width=stageW+'px';stage.style.height=stageH+'px';img.style.width=width+'px';img.style.height=height+'px';img.style.left=(stageW-width)/2+'px';img.style.top=(stageH-height)/2+'px';
+  c.scrollLeft=(stageW-width)/2+imageX*scale-viewX;c.scrollTop=(stageH-height)/2+imageY*scale-viewY;
+  if(activeTab===t.id)$('#finfo').textContent='图片 '+img.naturalWidth+' x '+img.naturalHeight+' · '+Math.round(scale*100)+'%';
+}
+function downloadPreview(path,objectURL){
+  const a=document.createElement('a');a.href=objectURL||withToken('/api/preview?download=1&path='+encodeURIComponent(path));a.download=path.split(/[\\/]/).pop()||'image';document.body.appendChild(a);a.click();a.remove();
+}
+async function renderImagePreview(t){
+  resetFileView();
+  $('#fpath').textContent=t.path;$('#finfo').textContent='图片';
+  const c=$('#file-content');c.innerHTML='';c.classList.add('image-preview');
+  const stage=document.createElement('div');stage.className='image-stage';c.appendChild(stage);
+  const img=document.createElement('img');img.alt=t.path.split(/[\\/]/).pop()||'图片预览';
+  t.imageContainer=c;t.imageStage=stage;t.imageElement=img;
+  for(const id of ['fZoomOut','fZoomFit','fZoomIn','fDownload'])$('#'+id).style.display='inline-flex';
+  $('#fDownload').disabled=true;
+  $('#fZoomOut').onclick=()=>applyImageScale(t,(t.imageScale||1)/1.2);
+  $('#fZoomIn').onclick=()=>applyImageScale(t,(t.imageScale||1)*1.2);
+  $('#fZoomFit').onclick=()=>applyImageScale(t,imageFitScale(t));
+  $('#fDownload').onclick=()=>downloadPreview(t.path,t.imageObjectURL);
+  c.onwheel=e=>{if(!img.naturalWidth)return;e.preventDefault();applyImageScale(t,(t.imageScale||1)*(e.deltaY<0?1.15:1/1.15),e)};
+  img.onload=()=>{if(!img.naturalWidth||activeTab!==t.id)return;if(!t.imageScale)t.imageScale=imageFitScale(t);applyImageScale(t,t.imageScale)};
+  img.onerror=()=>{
+    if(activeTab!==t.id)return;
+    c.classList.remove('image-preview');c.textContent='图片预览失败。';
+    const b=document.createElement('button');b.className='sm';b.textContent='另存为';b.onclick=()=>downloadPreview(t.path,t.imageObjectURL);c.appendChild(b);
+  };
+  stage.appendChild(img);
+  if(t.imageRequest)t.imageRequest.abort();const request=new AbortController();t.imageRequest=request;
+  try{
+    const response=await fetch(withToken('/api/preview?path='+encodeURIComponent(t.path)),{signal:request.signal});
+    if(!response.ok)throw new Error((await response.text())||('HTTP '+response.status));
+    const blob=await response.blob();if(request.signal.aborted)return;
+    if(t.imageObjectURL)URL.revokeObjectURL(t.imageObjectURL);t.imageObjectURL=URL.createObjectURL(blob);img.src=t.imageObjectURL;$('#fDownload').disabled=false;
+  }catch(e){if(request.signal.aborted)return;img.onerror();if(activeTab===t.id)c.insertAdjacentHTML('afterbegin','<span class="err">'+esc(String(e))+'</span>')}
+}
 function resetFileView(){
-  $('#file-content').style.display='block';$('#file-editor').style.display='none';
+  $('#file-content').style.display='';$('#file-content').classList.remove('image-preview');$('#file-content').onwheel=null;$('#file-editor').style.display='none';
+  for(const id of ['fZoomOut','fZoomFit','fZoomIn','fDownload'])$('#'+id).style.display='none';
   $('#fEdit').style.display='none';$('#fSave').style.display='none';$('#fCancel').style.display='none';
 }
 function updateFileInfo(t){
-  $('#finfo').textContent=t.binary?'二进制':(formatSize(t.offset)+(t.eof?'':' / 未完'));
+  $('#finfo').textContent=t.binary?'二进制':((t.asText?'文本试读 ': '')+formatSize(t.offset)+(t.eof?'':' / 未完'));
 }
 function renderFileTab(t){
   resetFileView();
   updateFileInfo(t);
-  if(t.binary){$('#file-content').innerHTML='<span class="meta">二进制文件，不支持在线查看/编辑。右键树节点可下载到本地。</span>';return}
+  if(t.binary){
+    const c=$('#file-content');c.innerHTML='<span class="meta">二进制文件，不支持在线查看/编辑。右键树节点可下载到本地。</span> ';
+    const b=document.createElement('button');b.className='sm';b.textContent='按文本查看';b.onclick=()=>viewFileAsText(t);c.appendChild(b);return;
+  }
   if(t.editing){startEdit(t);return}
   const c=$('#file-content');
   c.textContent=t.content;
@@ -451,9 +600,15 @@ function renderFileTab(t){
     // 只看 eof 会变成不停重试的请求洪水（断开连接时必现）。
     all.onclick=async()=>{all.disabled=true;more.disabled=true;while(!t.eof){if(!await loadMoreFile(t))break}};bar.appendChild(all);
     c.appendChild(bar);
-  }else{
+  }else if(!t.asText){
     $('#fEdit').style.display='inline-block';$('#fEdit').onclick=()=>{t.editing=true;startEdit(t)};
   }
+}
+async function viewFileAsText(t){
+  if(t.loadingMore)return;
+  t.asText=true;t.binary=false;t.offset=0;t.content='';t.eof=false;t.decoder=makeFileDecoder();
+  $('#file-content').textContent='按文本读取中...';
+  await loadMoreFile(t);
 }
 function startEdit(t){
   $('#file-content').style.display='none';$('#file-editor').style.display='flex';
@@ -473,6 +628,7 @@ $('#fSave').onclick=async()=>{
 
 // ========== 目录树 + 右键菜单 ==========
 const treeCache={};
+let driveLoadGeneration=0;
 // joinRemote 按**远端**的分隔符拼路径。不能写死反斜杠：Linux 上 '\' 是合法文件名字符，
 // 远端不会报错也不会纠正——/etc + '\' + hosts 得到 "/etc\hosts"（一个不存在的文件），
 // 上传更阴，/tmp + '\' + a.txt 会在根目录建出一个名为 "tmp\a.txt" 的文件，静默传错地方。
@@ -480,33 +636,59 @@ function joinRemote(dir,name){
   const base=dir.replace(/[\\\/]$/,'');
   return base+(remoteOS==='windows'?'\\':'/')+name;
 }
-async function fetchDir(path){const k=path.replace(/[\\\/]$/,'');if(treeCache[k])return treeCache[k];const r=await api('/api/call',{tool:'list_dir',args:{path,max_entries:200}});if(!r.ok)return[];let e=[];try{const d=parseMCP(r.result);if(d&&Array.isArray(d.entries))e=d.entries}catch{}treeCache[k]=e;return e}
+async function fetchDirResult(path){
+  const k=path.replace(/[\\\/]$/,'')||path;if(Object.prototype.hasOwnProperty.call(treeCache,k))return{ok:true,entries:treeCache[k]};
+  const r=await api('/api/call',{tool:'list_dir',args:{path,max_entries:200}});if(!r.ok)return{ok:false,entries:[],error:r.error||'list_dir failed'};
+  try{const d=parseMCP(r.result);if(d&&Array.isArray(d.entries)){treeCache[k]=d.entries;return{ok:true,entries:d.entries}}}catch{}
+  return{ok:false,entries:[],error:'invalid list_dir response'};
+}
+async function fetchDir(path){return(await fetchDirResult(path)).entries}
+function unixStartPathFromProbe(stdout){
+  const lines=String(stdout||'').replace(/\r/g,'').split('\n'),cwd=lines[0]&&lines[0][0]==='/'?lines[0]:'/';
+  if(lines[1])try{
+    const raw=Uint8Array.from(atob(lines[1].trim()),c=>c.charCodeAt(0));
+    const argv=new TextDecoder('utf-8').decode(raw).replace(/\0+$/,'').split('\0');let root='';
+    for(let i=1;i<argv.length;i++){const a=argv[i];if(a==='--root'&&i+1<argv.length)root=argv[++i];else if(a.startsWith('--root='))root=a.slice(7)}
+    if(root)return root[0]==='/'?root:cwd.replace(/\/$/,'')+'/'+root;
+  }catch{}
+  return '/';
+}
+async function probeUnixStartPath(){
+  const script="pwd; if command -v base64 >/dev/null 2>&1 && [ -r \"/proc/$PPID/cmdline\" ]; then base64 \"/proc/$PPID/cmdline\" | tr -d '\\n'; fi; printf '\\n'";
+  const r=await api('/api/call',{tool:'exec',args:{argv:['sh','-c',script],timeout_ms:8000}});
+  if(!r.ok)return'/';const d=parseMCP(r.result);return unixStartPathFromProbe(d.stdout||'');
+}
 async function loadDrives(){
-  if(!connected)return;const tree=$('#tree');tree.innerHTML='<div class="tloading">加载中...</div>';
+  if(!connected)return;const generation=++driveLoadGeneration,tree=$('#tree');tree.innerHTML='<div class="tloading">加载中...</div>';
   const r=await api('/api/call',{tool:'exec',args:{argv:['powershell','-c','Get-PSDrive -PSProvider FileSystem | Select -ExpandProperty Name']}});
-  tree.innerHTML='';
+  if(generation!==driveLoadGeneration)return;tree.innerHTML='';
   if(r.ok){const d=parseMCP(r.result);const lines=(d.stdout||'').split(/\r?\n/).map(s=>s.trim()).filter(s=>s&&/^[A-Z]$/i.test(s));
     if(lines.length>0){remoteOS='windows';for(const l of lines)addDirNode(tree,l.toUpperCase()+':\\',null,false);return}}
   remoteOS='unix';
-  const r2=await api('/api/call',{tool:'list_dir',args:{path:'/',max_entries:50}});
-  if(r2.ok){const d=parseMCP(r2.result);if(d&&Array.isArray(d.entries)){for(const e of d.entries){const full='/'+e.name;if(e.kind==='dir')addDirNode(tree,full,null,false);else addFileNode(tree,full,e)}}}
+  const preferred=await probeUnixStartPath(),candidates=[preferred,'/','.'].filter((p,i,a)=>p&&a.indexOf(p)===i);
+  let startPath='',lastError='';
+  for(const candidate of candidates){const result=await fetchDirResult(candidate);if(result.ok){startPath=candidate;break}lastError=result.error||lastError}
+  if(generation!==driveLoadGeneration)return;tree.innerHTML='';
+  if(!startPath){tree.innerHTML='<div class="tloading">默认目录不可访问'+(lastError?'：'+esc(lastError):'')+'</div>';return}
+  $('#treePath').value=startPath;addDirNode(tree,startPath,true,true);
 }
 function addDirNode(parent,path,isRoot,isExpanded){
   const name=path.replace(/[\\\/]$/,'');
   const nd=document.createElement('div');nd.className='tdir';nd.dataset.path=path;nd.dataset.kind='dir';
-  const arrow=document.createElement('span');arrow.className='arr '+(isExpanded?'open':'closed');nd.appendChild(arrow);
-  nd.appendChild(document.createTextNode((isRoot?' 💾':' 📁')+' '+name.split(/[\\/]/).pop()||name));
+  const arrow=document.createElement('span');arrow.className='arr closed';nd.appendChild(arrow);
+  const label=name.split(/[\\/]/).pop()||path;nd.appendChild(document.createTextNode((isRoot?' 💾':' 📁')+' '+label));
   parent.appendChild(nd);
-  const ch=document.createElement('div');ch.className='tchildren';ch.style.display=isExpanded?'':'none';parent.appendChild(ch);
+  const ch=document.createElement('div');ch.className='tchildren';ch.style.display='none';parent.appendChild(ch);
   let loaded=false;
-  nd.onclick=async(ev)=>{ev.stopPropagation();
+  const toggle=async()=>{
     if(ch.style.display==='none'){
-      if(!loaded){ch.innerHTML='<div class="tloading">加载...</div>';ch.style.display='';arrow.className='arr open';const entries=await fetchDir(path);ch.innerHTML='';entries.sort((a,b)=>(b.kind==='dir'?1:0)-(a.kind==='dir'?1:0));for(const e of entries){const full=joinRemote(name,e.name);if(e.kind==='dir')addDirNode(ch,full,false,false);else addFileNode(ch,full,e)}loaded=true}
+      if(!loaded){ch.innerHTML='<div class="tloading">加载...</div>';ch.style.display='';arrow.className='arr open';const entries=await fetchDir(path);ch.innerHTML='';entries.sort((a,b)=>(b.kind==='dir'?1:0)-(a.kind==='dir'?1:0));for(const e of entries){const full=joinRemote(path,e.name);if(e.kind==='dir')addDirNode(ch,full,false,false);else addFileNode(ch,full,e)}loaded=true}
       else{ch.style.display='';arrow.className='arr open'}
     }else{ch.style.display='none';arrow.className='arr closed'}
   };
+  nd.onclick=async(ev)=>{ev.stopPropagation();await toggle()};
   nd.oncontextmenu=ev=>{ev.preventDefault();showCtxMenu(ev,path,'dir')};
-  if(isExpanded)nd.onclick(new Event('click'));
+  if(isExpanded)void toggle();
 }
 function addFileNode(parent,path,entry){
   const nd=document.createElement('div');nd.className='tfile';nd.dataset.path=path;nd.dataset.kind='file';
@@ -524,7 +706,7 @@ const ctx=$('#ctxmenu');
 function showCtxMenu(ev,path,kind){
   const items=kind==='file'
     ?[['📖 读取',()=>showFile(path,null)],['⬇ 下载到本地',()=>ctxDownload(path)],['📜 Tail 日志',()=>ctxTail(path)]]
-    :[['📂 列出内容',()=>ctxListDir(path)],['⬆ 上传到此目录',()=>ctxUpload(path)]];
+    :[['📂 列出内容',()=>ctxListDir(path)],['🔎 在当前目录搜索',()=>openSearch(path)],['⬆ 上传到此目录',()=>ctxUpload(path)]];
   ctx.innerHTML='';
   for(const [label,fn] of items){
     const d=document.createElement('div');d.className='ci';d.textContent=label;

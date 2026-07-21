@@ -83,6 +83,7 @@ const document = {
     return els.get(ident) || null;
   },
   createElement: () => mkEl('created'),
+  createTextNode: (value) => { const el = mkEl('text'); el.textContent = value; return el; },
   addEventListener() {},
   body: mkEl('body'),
 };
@@ -222,10 +223,77 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   check('未连接时按钮显示「连接」', btn.textContent === '连接', `得到 ${btn.textContent}`);
   check('已移除独立的断开按钮', !realIds.has('disconnect'));
   check('已移除终端按钮', !realIds.has('btnTerm'));
+  check('已移除顶部搜索按钮', !realIds.has('btnSearch'));
   check('已移除底部日志框', !realIds.has('log'));
 }
 
-// ---------- 9. 终端页常驻 ----------
+// ---------- 9. 目录菜单搜索与二进制文本试读 ----------
+{
+  ctx.openSearch('/var/log');
+  check('目录菜单搜索预填当前目录', els.get('grepRoot').value === '/var/log', `得到 ${els.get('grepRoot').value}`);
+  check('二进制文件提供文本试读入口', /按文本查看/.test(html));
+  for (const path of ['photo.png', 'PHOTO.JPG', 'a.jpeg', 'a.gif', 'a.webp', 'a.bmp']) {
+    check(`${path} 识别为可预览图片`, ctx.isPreviewableImage(path));
+  }
+  for (const path of ['a.svg', 'a.txt', 'png.txt', 'a.png.exe']) {
+    check(`${path} 不作为图片预览`, !ctx.isPreviewableImage(path));
+  }
+  check('图片预览使用受鉴权接口', /\/api\/preview\?path=/.test(js));
+  check('图片另存为复用预览缓存', /\/api\/preview\?download=1&path=/.test(js));
+  check('图片支持滚轮缩放', /\.onwheel=/.test(js) && /applyImageScale/.test(js));
+  for (const id of ['fZoomOut', 'fZoomFit', 'fZoomIn', 'fDownload']) {
+    check(`图片工具 ${id} 已提供`, realIds.has(id));
+  }
+  const c=mkEl('zoom-container'),stage=mkEl('zoom-stage'),img=mkEl('zoom-image');
+  c.clientWidth=800;c.clientHeight=600;c.getBoundingClientRect=()=>({left:0,top:0,width:800,height:600});img.naturalWidth=1000;img.naturalHeight=500;
+  const imageTab={id:'zoom-test',imageContainer:c,imageStage:stage,imageElement:img,imageScale:1};ctx.applyImageScale(imageTab,2);
+  check('图片缩放更新实际尺寸', img.style.width==='2000px' && img.style.height==='1000px');
+  ctx.downloadPreview('/tmp/photo.png');
+  const download=ctx.document.body.children[ctx.document.body.children.length-1];
+  check('图片另存为携带 token', /download=1/.test(download.href||'') && /token=test-token-123/.test(download.href||''));
+}
+
+// ---------- 10. 旧 share 兼容与升级提示 ----------
+{
+  check('0.0.5 比 0.0.6 旧', ctx.isVersionOlder('0.0.5', '0.0.6'));
+  check('同版本不提示升级', !ctx.isVersionOlder('0.0.6', '0.0.6'));
+  check('git distance 可比较', ctx.isVersionOlder('0.0.6', '0.0.6-7-gabcdef'));
+  ctx.setUpgradeInfo({ peer_version: '0.0.5', help_version: '0.0.6' });
+  check('旧 share 显示升级条', els.get('upgrade-notice').style.display === 'flex');
+  check('升级条显示两端版本', /0\.0\.5/.test(els.get('upgrade-msg').textContent) && /0\.0\.6/.test(els.get('upgrade-msg').textContent));
+  ctx.setUpgradeInfo({ peer_version: '0.0.6', help_version: '0.0.6' });
+  check('同版本隐藏升级条', els.get('upgrade-notice').style.display === 'none');
+
+  const term = els.get('term-output');term.innerHTML='';
+  ctx.execEvent({type:'result',result:{stdout:'old stdout',stderr:'old stderr',exit_code:0}},{});
+  check('0.0.5 最终响应 stdout 可见', term.children.some((n)=>n.textContent==='old stdout'));
+  check('0.0.5 最终响应 stderr 可见', term.children.some((n)=>n.textContent==='old stderr'));
+}
+
+// ---------- 11. Linux 默认目录 ----------
+{
+  const probe = (cwd, argv) => cwd + '\n' + Buffer.from(argv.join('\0') + '\0', 'utf8').toString('base64') + '\n';
+  check('Linux 未限制 root 时默认打开 /', ctx.unixStartPathFromProbe(probe('/srv/app', ['/opt/remote', 'share'])) === '/');
+  check('Linux 识别绝对 --root', ctx.unixStartPathFromProbe(probe('/srv/app', ['/opt/remote', 'share', '--root', '/data'])) === '/data');
+  check('Linux 识别相对 --root', ctx.unixStartPathFromProbe(probe('/srv/app', ['/opt/remote', 'share', '--root=files'])) === '/srv/app/files');
+  ctx.fetchDir = async () => [];
+  const tree = els.get('tree');tree.innerHTML='';ctx.addDirNode(tree, '/', true, true);
+  check('Linux 默认根节点立即展开', tree.children.length === 2 && tree.children[1].style.display === '');
+  check('Linux 根节点显示 /', tree.children[0] && tree.children[0].children.some((n) => /\//.test(n.textContent)));
+}
+
+// ---------- 12. 连接状态 ----------
+{
+  ctx.setStatus(true, '已连接');
+  check('已连接状态可点击', els.get('status').disabled === false && typeof els.get('status').onclick === 'function');
+  els.get('status').onclick({stopPropagation(){}});
+  check('点击状态显示详情面板', els.get('conn-info').style.display === 'block');
+  check('状态面板请求即时延迟', /\/api\/status/.test(js) && /latency_ms/.test(js));
+  check('状态面板显示 P2P 或 Relay', /P2P 直连/.test(js) && /Relay 中转/.test(js));
+  els.get('conn-info').style.display='none';
+}
+
+// ---------- 13. 终端页常驻 ----------
 // 顶部「终端」按钮已移除，终端页若还能关掉就再也开不出来了。
 {
   ctx.openTab('file:/tmp/a.txt', 'a.txt', 'file-box', () => {});
