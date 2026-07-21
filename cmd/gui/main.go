@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/remote-assist/tool/internal/gui"
@@ -88,29 +90,41 @@ func portOf(addr string) string {
 	return addr
 }
 
-// findRemoteBin 在多个常见位置查找 remote 可执行文件。
+// cliNames 返回 CLI 二进制的候选文件名，按优先级排列。
+//
+// 首选与本进程同平台同架构的那个（webui 是 windows-amd64，就该配 windows-amd64 的 cli）；
+// 再退到不带平台后缀的名字，方便有人自己改名或从别处拷一个过来。
+func cliNames() []string {
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	return []string{
+		"remote-assist-cli-" + runtime.GOOS + "-" + runtime.GOARCH + ext,
+		"remote-assist-cli" + ext,
+	}
+}
+
+// findRemoteBin 在多个常见位置查找 CLI 可执行文件（webui 靠拉起它来干活）。
 func findRemoteBin() (string, error) {
-	candidates := []string{}
+	var dirs []string
 	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates, filepath.Join(dir, "remote.exe"), filepath.Join(dir, "remote"))
+		dirs = append(dirs, filepath.Dir(exe)) // 与 webui 同目录：发布包的常态
 	}
-	wd, _ := os.Getwd()
-	candidates = append(candidates,
-		filepath.Join(wd, "bin", "remote.exe"),
-		filepath.Join(wd, "bin", "remote"),
-		filepath.Join(wd, "remote.exe"),
-		filepath.Join(wd, "remote"),
-	)
-	for _, c := range candidates {
-		if c == "" {
-			continue
-		}
-		if _, err := os.Stat(c); err == nil {
-			return c, nil
+	if wd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, filepath.Join(wd, "bin"), wd) // 源码树里直接跑
+	}
+	var tried []string
+	for _, d := range dirs {
+		for _, n := range cliNames() {
+			p := filepath.Join(d, n)
+			tried = append(tried, p)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
 		}
 	}
-	return "", fmt.Errorf("未在以下位置找到 remote(.exe): %v", candidates)
+	return "", fmt.Errorf("未找到 %s；已找过: %v", strings.Join(cliNames(), " / "), tried)
 }
 
 func openBrowser(url string) error {

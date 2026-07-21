@@ -43,3 +43,6 @@ coverage.html
 # OS
 .DS_Store
 Thumbs.db
+
+# goversioninfo 生成的 Windows 资源（构建产物，每次构建按 git describe 重新生成）
+*.syso

@@ -1,6 +1,8 @@
 @echo off
 setlocal
-rem 用法: build-linux.bat [amd64|arm64]  (不传参默认 amd64)
+rem Usage: build-linux.bat [amd64|arm64]  (defaults to amd64)
+rem NOTE: keep comments ASCII-only here - cmd.exe reads .bat in the OEM codepage,
+rem so UTF-8 Chinese misaligns and can split a comment into commands. See build.bat.
 set GOARCH=%1
 if "%GOARCH%"=="" set GOARCH=amd64
 if /i not "%GOARCH%"=="amd64" if /i not "%GOARCH%"=="arm64" (
@@ -12,7 +14,11 @@ for /f "delims=" %%v in ('git describe --tags --always --dirty 2^>nul') do set V
 if "%VERSION%"=="" set VERSION=dev
 set LDFLAGS=-X github.com/remote-assist/tool/internal/version.Version=%VERSION%
 echo Building for Linux/%GOARCH%... (Version: %VERSION%)
-"C:\Program Files\Go\bin\go.exe" build -ldflags "%LDFLAGS%" -o bin/relay-linux-%GOARCH% ./cmd/relay
-"C:\Program Files\Go\bin\go.exe" build -ldflags "%LDFLAGS%" -o bin/remote-linux-%GOARCH% ./cmd/remote
+rem No VERSIONINFO here: that resource is a Windows PE concept. The .syso files in
+rem cmd/* carry a _windows_amd64 suffix, so Go's build constraints skip them for linux.
+"C:\Program Files\Go\bin\go.exe" build -ldflags "%LDFLAGS%" -o bin/remote-assist-relay-linux-%GOARCH% ./cmd/relay
+if errorlevel 1 exit /b 1
+"C:\Program Files\Go\bin\go.exe" build -ldflags "%LDFLAGS%" -o bin/remote-assist-cli-linux-%GOARCH% ./cmd/remote
+if errorlevel 1 exit /b 1
 echo Done.
 dir bin\
