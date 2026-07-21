@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"unicode/utf8"
@@ -40,8 +41,9 @@ func humanizeToolResult(name string, result json.RawMessage) string {
 
 func humanizeReadFile(result json.RawMessage) (string, bool) {
 	var r struct {
-		Bytes []byte `json:"bytes"`
-		EOF   bool   `json:"eof"`
+		Bytes  []byte `json:"bytes"`
+		EOF    bool   `json:"eof"`
+		AsText bool   `json:"as_text"`
 	}
 	if err := json.Unmarshal(result, &r); err != nil {
 		return "", false
@@ -50,7 +52,11 @@ func humanizeReadFile(result json.RawMessage) (string, bool) {
 	// 把 base64 的 bytes 换成 text 后调用方就无法再从结果推算本块字节数来定下一个
 	// offset，必须显式给出，否则大文件分块读会错位。
 	out := map[string]any{"eof": r.EOF, "bytes_len": len(r.Bytes)}
-	if isTextChunk(r.Bytes) {
+	if r.AsText {
+		// The GUI requests this only after a user explicitly opts into a text
+		// preview. Keep the bytes so its browser decoder can handle GBK/UTF-16.
+		out["bytes_b64"] = base64.StdEncoding.EncodeToString(r.Bytes)
+	} else if isTextChunk(r.Bytes) {
 		out["text"] = string(r.Bytes)
 	} else {
 		out["binary"] = true

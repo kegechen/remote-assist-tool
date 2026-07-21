@@ -16,11 +16,13 @@ type ReadFileArgs struct {
 	Path   string `json:"path"`
 	Offset int64  `json:"offset,omitempty"`
 	Length int64  `json:"length,omitempty"`
+	AsText bool   `json:"as_text,omitempty"`
 }
 
 type ReadFileResult struct {
-	Bytes []byte `json:"bytes"`
-	EOF   bool   `json:"eof"`
+	Bytes  []byte `json:"bytes"`
+	EOF    bool   `json:"eof"`
+	AsText bool   `json:"as_text,omitempty"`
 }
 
 const (
@@ -72,7 +74,7 @@ func (t *ReadFileTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Str
 	if !eof && err != nil {
 		return nil, err
 	}
-	return json.Marshal(ReadFileResult{Bytes: buf[:n], EOF: eof})
+	return json.Marshal(ReadFileResult{Bytes: buf[:n], EOF: eof, AsText: a.AsText})
 }
 
 type WriteFileArgs struct {

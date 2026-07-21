@@ -71,6 +71,22 @@ func TestHumanizeReadFileBinary(t *testing.T) {
 	}
 }
 
+func TestHumanizeReadFileAsTextKeepsBytes(t *testing.T) {
+	raw := mustJSON(t, struct {
+		Bytes  []byte `json:"bytes"`
+		EOF    bool   `json:"eof"`
+		AsText bool   `json:"as_text"`
+	}{Bytes: []byte{0xff, 0xfe, 0x41, 0x00}, EOF: true, AsText: true})
+
+	got := humanizeToolResult("read_file", raw)
+	if !strings.Contains(got, `"bytes_b64":"//5BAA=="`) {
+		t.Fatalf("as_text should preserve base64 bytes: %s", got)
+	}
+	if strings.Contains(got, `"binary":true`) || strings.Contains(got, `"text":`) {
+		t.Fatalf("as_text should defer decoding to the caller: %s", got)
+	}
+}
+
 // TestIsTextChunkBoundary 验证多字节字符被 chunk 边界切断时仍判为文本（HIGH 修复）。
 func TestIsTextChunkBoundary(t *testing.T) {
 	full := []byte("你好世界") // 每字 3 字节，共 12 字节

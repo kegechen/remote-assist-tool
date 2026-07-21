@@ -16,14 +16,14 @@ func TestReadFile(t *testing.T) {
 	os.WriteFile(p, []byte("hello world"), 0644)
 	sb := agent.NewSandbox(agent.SandboxConfig{Root: root})
 	tool := NewReadFile(sb)
-	args, _ := json.Marshal(map[string]any{"path": p})
+	args, _ := json.Marshal(map[string]any{"path": p, "as_text": true})
 	out, err := tool.Run(context.Background(), args, nil)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	var r ReadFileResult
 	json.Unmarshal(out, &r)
-	if string(r.Bytes) != "hello world" || !r.EOF {
+	if string(r.Bytes) != "hello world" || !r.EOF || !r.AsText {
 		t.Fatalf("got %+v", r)
 	}
 }
