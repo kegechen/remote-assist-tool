@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -30,6 +31,59 @@ const (
 	helperPause    = 600 * time.Millisecond
 	helperExitCode = 7
 )
+
+// execHangHelperEnv 置位时，TestExecHangHelper 才真正执行。
+const execHangHelperEnv = "REMOTE_ASSIST_EXEC_HANG_HELPER"
+
+// hangHelperSleep 是"没人取消就会睡满"的时长：远超取消测试的判定阈值，
+// 这样"取消生效=秒回" 与 "取消失效=卡住" 能被清楚区分开。
+const hangHelperSleep = 5 * time.Second
+
+// TestExecHangHelper 不是真正的测试：取消测试把测试二进制当成一条"先吐一行、再长睡"的
+// 命令拉起。若 Send 失败后没取消命令，这个子进程会睡满 hangHelperSleep；取消生效则它被
+// 立刻杀掉。用自身当命令，两平台行为一致、也不赌 shell 缓冲。
+func TestExecHangHelper(t *testing.T) {
+	if os.Getenv(execHangHelperEnv) == "" {
+		t.Skip("helper process: 仅在取消测试拉起时执行")
+	}
+	os.Stdout.WriteString("burst\n")
+	time.Sleep(hangHelperSleep)
+	os.Exit(0)
+}
+
+// failingSink 的 Send 恒失败，模拟物理隧道断开后写不动。
+type failingSink struct{}
+
+func (failingSink) Send(stream string, data []byte) error { return errors.New("tunnel gone") }
+
+// TestExecStreamCancelsOnSendFailure 钉住：流式 pump 的 sink.Send 一失败，就必须取消命令，
+// 而不是任子进程卡在写满且无人读的管道上、拖到外层 deadline 才收尾。helper 会长睡
+// hangHelperSleep，取消生效则 Run 秒回；若哪天有人把 cancel() 删了，这条会卡到超时失败。
+func TestExecStreamCancelsOnSendFailure(t *testing.T) {
+	args, err := json.Marshal(map[string]any{
+		"argv":   []string{os.Args[0], "-test.run=TestExecHangHelper"},
+		"env":    map[string]string{execHangHelperEnv: "1"},
+		"stream": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		NewExec(nil).Run(context.Background(), args, failingSink{})
+		close(done)
+	}()
+	guard := hangHelperSleep - 2*time.Second
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed >= guard {
+			t.Fatalf("Run 耗时 %v：Send 失败后没有立刻取消命令", elapsed)
+		}
+	case <-time.After(guard):
+		t.Fatalf("Send 失败后未取消命令：Run 卡了 >= %v", guard)
+	}
+}
 
 // helperArgv 重新执行测试二进制、只跑 helper 那条用例。
 func helperArgv() []string {

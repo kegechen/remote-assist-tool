@@ -82,7 +82,7 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 	}
 
 	if a.Stream && sink != nil {
-		return e.runStreaming(runCtx, cmd, sink)
+		return e.runStreaming(runCtx, cancel, cmd, sink)
 	}
 
 	out, err := cmd.Output()
@@ -127,7 +127,7 @@ const execStreamChunk = 32 * 1024
 //   - 输出不在 share 端累积，也不受 max_output_bytes 截断——实时输出由调用方自己留存
 //     （浏览器的滚动缓冲）。长跑命令若在这里攒全量输出，既失去流式的意义又有 OOM 风险。
 //   - 最终 ExecResult 只带退出状态（exit_code / error），不重复带 stdout/stderr。
-func (e *ExecTool) runStreaming(ctx context.Context, cmd *exec.Cmd, sink agent.StreamSink) (json.RawMessage, error) {
+func (e *ExecTool) runStreaming(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, sink agent.StreamSink) (json.RawMessage, error) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -149,7 +149,11 @@ func (e *ExecTool) runStreaming(ctx context.Context, cmd *exec.Cmd, sink agent.S
 			n, rerr := r.Read(buf)
 			if n > 0 {
 				if sink.Send(name, buf[:n]) != nil {
-					return // 隧道写不动了：再读也发不出去，收工让 Wait 去收尸
+					// 隧道写不动了：光自己收工还不够——本 pump 一停读，输出密集的子进程
+					// 很快把这条管道写满并阻塞，另一个 pump 和 cmd.Wait 就都卡到外层
+					// deadline（默认 5min）才醒。取消命令杀掉子进程，让两个 pump 一起收尾。
+					cancel()
+					return
 				}
 			}
 			if rerr != nil {
