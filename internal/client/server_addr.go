@@ -1,6 +1,10 @@
 package client
 
-import "net"
+import (
+	"fmt"
+	"net"
+	"strings"
+)
 
 // defaultRelayPort 是 --server 省略端口时补全的默认 relay 端口。
 const defaultRelayPort = "8443"
@@ -17,6 +21,22 @@ func NormalizeServerAddr(addr string) string {
 	}
 	// 无端口（SplitHostPort 报 "missing port"）→ 补默认；JoinHostPort 会给 IPv6 加括号
 	return net.JoinHostPort(addr, defaultRelayPort)
+}
+
+// ValidateServerAddr 挡住带 URL scheme / 路径的 relay 地址。
+//
+// 必须显式挡：NormalizeServerAddr 不会拒绝这类输入，只会把它揉成更离谱的东西——
+// "http://1.2.3.4:8443" 会变成 "[http://1.2.3.4:8443]:8443"（含冒号的 host 被当成 IPv6
+// 加了方括号），"https://host" 则被解析成 host="https"、port="//host"。两者都要等到拨号
+// 才失败，报错完全指不到根因。relay 是裸 TCP/TLS，本来也没有 URL 一说。
+func ValidateServerAddr(addr string) error {
+	if i := strings.Index(addr, "://"); i >= 0 {
+		return fmt.Errorf("server 只接受 host:port，不能带 %q 这样的 URL scheme（relay 是裸 TCP/TLS，不是 HTTP）；例：server=\"113.44.139.100:8443\"", addr[:i+3])
+	}
+	if strings.ContainsAny(addr, "/?#") {
+		return fmt.Errorf("server 只接受 host:port，不能带路径或查询串: %q", addr)
+	}
+	return nil
 }
 
 // IsLANServer 判断 relay 地址是否为 loopback / 私网（standalone 或同 LAN 场景）。

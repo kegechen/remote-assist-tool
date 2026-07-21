@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/remote-assist/tool/internal/mcp"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/version"
 )
 
 // fileTransferChunk 单次 read_file/write_file 走的块大小。
@@ -192,21 +194,36 @@ func resumeTransferArgs(name string, raw json.RawMessage) (json.RawMessage, erro
 
 type connectArgs struct {
 	Code   string `json:"code"`
-	Server string `json:"server,omitempty"` // 可选：覆盖 cfg.ServerAddr，用于 share --standalone LAN 直连
+	Server string `json:"server,omitempty"`  // 可选：覆盖 cfg.ServerAddr，用于 share --standalone LAN 直连
 	NoAuth bool   `json:"no_auth,omitempty"` // true: 使用固定 NoAuthCode，无需用户提供 code
 }
 
 type connectResult struct {
-	Connected bool   `json:"connected"`
-	SessionID string `json:"session_id,omitempty"`
-	Server    string `json:"server,omitempty"` // 实际连接的 relay 地址（debug 用）
-	P2P       bool   `json:"p2p,omitempty"`    // true when tool channel uses P2P direct connection
+	Connected   bool   `json:"connected"`
+	SessionID   string `json:"session_id,omitempty"`
+	Server      string `json:"server,omitempty"`       // 实际连接的 relay 地址（debug 用）
+	P2P         bool   `json:"p2p,omitempty"`          // true when tool channel uses P2P direct connection
+	PeerVersion string `json:"peer_version,omitempty"` // share 版本，来自 relay join 响应
+	PeerHost    string `json:"peer_host,omitempty"`
+	HelpVersion string `json:"help_version,omitempty"` // 当前 help CLI 版本，供 GUI 做升级提示
 }
 
 func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 	var a connectArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return nil, fmt.Errorf("bad args: %w", err)
+	// 拒绝未知字段：静默忽略会让写错名字的参数悄悄失效，connect 转而连上内置默认
+	// relay，报出的超时错误完全指不到根因（调用方臆造 relay_url 时就这么栽过）。
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&a); err != nil {
+		return nil, fmt.Errorf("bad args: %w (connect accepts only: code, server, no_auth; for the relay address use server=\"host:port\", no http:// prefix)", err)
+	}
+	// schema 里明说了 "http://host:port is rejected"——那就真得拒绝。不挡的话
+	// NormalizeServerAddr 会把它揉成 "[http://1.2.3.4:8443]:8443" 再去拨号，报错指不到
+	// 根因，正好重蹈上面 DisallowUnknownFields 想根治的覆辙（承诺与实现不符比没承诺更坏）。
+	if a.Server != "" {
+		if err := ValidateServerAddr(a.Server); err != nil {
+			return nil, fmt.Errorf("bad args: %w", err)
+		}
 	}
 	if a.NoAuth {
 		if a.Code == "" {
@@ -419,7 +436,14 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	b.lastNoAuth = a.NoAuth
 	b.mu.Unlock()
 
-	result := connectResult{Connected: true, SessionID: resp.SessionID, Server: effectiveCfg.ServerAddr}
+	result := connectResult{
+		Connected:   true,
+		SessionID:   resp.SessionID,
+		Server:      effectiveCfg.ServerAddr,
+		PeerVersion: resp.PeerVersion,
+		PeerHost:    resp.PeerHost,
+		HelpVersion: version.Info(),
+	}
 	if p2pConn != nil {
 		result.P2P = true
 	}
