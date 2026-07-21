@@ -24,24 +24,28 @@ var ErrPeerDisconnected = errors.New("peer disconnected")
 
 // ShareMode 被协助模式
 type ShareMode struct {
-	client     *Client
-	sshAddr    string
-	codeFile   string
-	code       string
-	expiresAt  time.Time
-	sbCfg      agent.SandboxConfig
-	daemon     *agent.Daemon
-	daemonOnce sync.Once
+	client         *Client
+	sshAddr        string
+	codeFile       string
+	mirrorCodeFile string
+	code           string
+	expiresAt      time.Time
+	sbCfg          agent.SandboxConfig
+	daemon         *agent.Daemon
+	daemonOnce     sync.Once
 }
 
 // NewShareMode 创建被协助模式。codeFile 非空时，注册成功后把协助码与有效期
 // 以 JSON 原子写入该文件，供宿主程序（如管家）稳定读取，无需解析 stdout。
-func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig, codeFile string) *ShareMode {
+// mirrorCodeFile 非空时再额外写一份到该路径：通道内热升级会用它，让 old share
+// 原来的 --code-file 路径在升级后仍由 new share 继续刷新（见 upgradeflags.HostCodeFile）。
+func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig, codeFile, mirrorCodeFile string) *ShareMode {
 	return &ShareMode{
-		client:   NewClient(cfg),
-		sshAddr:  sshAddr,
-		codeFile: codeFile,
-		sbCfg:    sbCfg,
+		client:         NewClient(cfg),
+		sshAddr:        sshAddr,
+		codeFile:       codeFile,
+		mirrorCodeFile: mirrorCodeFile,
+		sbCfg:          sbCfg,
 	}
 }
 
@@ -188,14 +192,13 @@ func (s *ShareMode) register() error {
 		fmt.Println("（协助码已复制到剪贴板）")
 	}
 	fmt.Println("等待协助端连接...")
-	if s.codeFile != "" {
-		s.writeCodeFile()
-	}
+	s.writeCodeFile()
 	return nil
 }
 
 // writeCodeFile 把协助码、中转服务地址与有效期原子写入 codeFile（先写 .tmp 再 rename），
 // 供宿主程序读取。失败仅记日志，不影响协助流程。重连刷新 code 时会覆盖写入。
+// mirrorCodeFile 非空时再写一份（升级后保持 old 原路径继续刷新）。
 //
 // server 必须一起给：光有协助码，协助端并不知道该去哪台 relay 找它——而实际连的那台是
 // 「编译期默认值 → REMOTE_RELAY_SERVER → --server → 补默认端口 → --standalone 改写」
@@ -213,13 +216,22 @@ func (s *ShareMode) writeCodeFile() {
 		return
 	}
 
-	tmp := s.codeFile + ".tmp"
+	for _, path := range []string{s.codeFile, s.mirrorCodeFile} {
+		if path != "" {
+			writeCodeFileTo(path, data)
+		}
+	}
+}
+
+// writeCodeFileTo 原子写单个协助码文件（.tmp + rename，0600）。失败仅记日志。
+func writeCodeFileTo(path string, data []byte) {
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		log.Printf("写协助码文件失败(write): %v", err)
+		log.Printf("写协助码文件失败(write %s): %v", path, err)
 		return
 	}
-	if err := os.Rename(tmp, s.codeFile); err != nil {
-		log.Printf("写协助码文件失败(rename): %v", err)
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("写协助码文件失败(rename %s): %v", path, err)
 		os.Remove(tmp)
 	}
 }
@@ -703,6 +715,7 @@ func (s *ShareMode) ensureDaemon(key [32]byte) {
 		reg.Register(tools.NewExec(sb))
 		reg.Register(tools.NewReadFile(sb))
 		reg.Register(tools.NewWriteFile(sb))
+		reg.Register(tools.NewFileMD5(sb))
 		reg.Register(tools.NewListDir(sb))
 		reg.Register(tools.NewStat(sb))
 		reg.Register(tools.NewGlob(sb))

@@ -73,6 +73,12 @@ func main() {
 	case "--version", "-version", "version":
 		fmt.Printf("remote-assist %s\n", version.Info())
 		return
+	case "upgrade-stage", "upgrade-finalize":
+		if err := runUpgradeCommand(os.Args[1], os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "upgrade helper:", err)
+			os.Exit(1)
+		}
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
 		printUsage()
@@ -99,6 +105,7 @@ func runShare(args []string) {
 	standaloneListen := fs.String("standalone-listen", ":8443", "Standalone mode: address relay listens on (use :port to listen on all interfaces)")
 	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
 	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
+	codeFileMirror := fs.String("code-file-mirror", "", "Internal (make-before-break upgrade): additionally mirror the assist code JSON here, so a prior --code-file path keeps refreshing after an in-channel upgrade")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Share mode - allow others to assist you\n\n")
@@ -261,7 +268,7 @@ func runShare(args []string) {
 		BindIP:       *bindIP,
 	}
 
-	share := client.NewShareMode(cfg, *sshAddr, sbCfg, *codeFile)
+	share := client.NewShareMode(cfg, *sshAddr, sbCfg, *codeFile, *codeFileMirror)
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)
