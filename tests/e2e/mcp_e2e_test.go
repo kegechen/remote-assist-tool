@@ -25,8 +25,8 @@ func TestMCPEndToEnd(t *testing.T) {
 	// 计算工作目录绝对路径与二进制路径
 	wd, _ := os.Getwd()
 	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
-	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
-	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
+	relayBin := relayBinPath(repo)
+	remoteBin := cliBin(repo)
 	for _, p := range []string{relayBin, remoteBin} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("binary not built: %s (run `go build` first)", p)
@@ -150,8 +150,8 @@ func TestMCPConcurrentNotHeadOfLineBlocked(t *testing.T) {
 	}
 	wd, _ := os.Getwd()
 	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
-	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
-	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
+	relayBin := relayBinPath(repo)
+	remoteBin := cliBin(repo)
 	for _, p := range []string{relayBin, remoteBin} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("binary not built: %s", p)
@@ -270,6 +270,16 @@ func binDir(repo string) string {
 	return filepath.Join(repo, "bin")
 }
 
+// 产物名带 os-arch 后缀（见 build.sh / build.bat），这里照着拼——写死 "remote.exe"
+// 会让 e2e 在找不到文件时**静默 skip**，看起来像全绿，其实一条都没跑。
+func cliBin(repo string) string {
+	return filepath.Join(binDir(repo), "remote-assist-cli-"+runtime.GOOS+"-"+runtime.GOARCH+exeExt())
+}
+
+func relayBinPath(repo string) string {
+	return filepath.Join(binDir(repo), "remote-assist-relay-"+runtime.GOOS+"-"+runtime.GOARCH+exeExt())
+}
+
 func send(t *testing.T, w io.Writer, line string) {
 	t.Helper()
 	if _, err := w.Write([]byte(line + "\n")); err != nil {
@@ -320,8 +330,8 @@ func TestMCPBootstrapEndToEnd(t *testing.T) {
 
 	wd, _ := os.Getwd()
 	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
-	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
-	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
+	relayBin := relayBinPath(repo)
+	remoteBin := cliBin(repo)
 	for _, p := range []string{relayBin, remoteBin} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("binary not built: %s", p)

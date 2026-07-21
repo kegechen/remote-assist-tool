@@ -26,8 +26,8 @@ func TestGUIExecStreamEndToEnd(t *testing.T) {
 	}
 	wd, _ := os.Getwd()
 	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
-	relayBin := filepath.Join(binDir(repo), "relay"+exeExt())
-	remoteBin := filepath.Join(binDir(repo), "remote"+exeExt())
+	relayBin := relayBinPath(repo)
+	remoteBin := cliBin(repo)
 	for _, p := range []string{relayBin, remoteBin} {
 		if _, err := os.Stat(p); err != nil {
 			t.Skipf("binary not built: %s", p)
