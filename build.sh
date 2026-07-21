@@ -37,8 +37,13 @@ EXT=""
 genversioninfo() {
     [ "${GOOS_V}" = "windows" ] || return 0
     local dir=$1 name=$2
+    # .syso 的 COFF 机器类型由架构旗标决定：-64 生成 AMD64（0x8664）。ARM64 必须 -arm -64，
+    # 否则仍产出 AMD64 目标文件、却存成 resource_windows_arm64.syso，链接 arm64 时机器类型
+    # 不匹配而失败。archflags 不加引号，好让 arm64 分支词分成两个参数。
+    local archflags="-64"
+    [ "${GOARCH_V}" = "arm64" ] && archflags="-arm -64"
     go run github.com/josephspurrier/goversioninfo/cmd/goversioninfo \
-        -64 \
+        ${archflags} \
         -ver-major "${VMAJ}" -ver-minor "${VMIN}" -ver-patch "${VPAT}" -ver-build "${VBUILD}" \
         -product-version "${VERSION}" \
         -file-version "${VMAJ}.${VMIN}.${VPAT}.${VBUILD}" \
