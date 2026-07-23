@@ -36,7 +36,10 @@ func TestSessionCreate(t *testing.T) {
 		Conn: &MockConn{},
 	}
 
-	session := sm.CreateSession("TESTCODE", share, 30*time.Minute, "")
+	session, _ := sm.CreateSession("TESTCODE", share, 30*time.Minute, "", "127.0.0.1", 100, 1000)
+	if session == nil {
+		t.Fatal("CreateSession should succeed")
+	}
 
 	if session.ID == "" {
 		t.Error("Session ID should not be empty")
@@ -53,7 +56,7 @@ func TestSessionGetByCode(t *testing.T) {
 	sm := NewSessionManager()
 
 	share := &ClientConn{ID: "test", Conn: &MockConn{}}
-	session := sm.CreateSession("TESTCODE123", share, 30*time.Minute, "")
+	session, _ := sm.CreateSession("TESTCODE123", share, 30*time.Minute, "", "127.0.0.1", 100, 1000)
 
 	found, err := sm.GetSessionByCode("TESTCODE123")
 	if err != nil {
@@ -70,13 +73,13 @@ func TestSessionJoin(t *testing.T) {
 	share := &ClientConn{ID: "share1", Conn: &MockConn{}}
 	help := &ClientConn{ID: "help1", Conn: &MockConn{}}
 
-	sm.CreateSession("TESTJOIN", share, 30*time.Minute, "")
+	sm.CreateSession("TESTJOIN", share, 30*time.Minute, "", "127.0.0.1", 100, 1000)
 
-	session, err := sm.JoinSession("TESTJOIN", help)
+	result, err := sm.JoinSession("TESTJOIN", help)
 	if err != nil {
 		t.Fatalf("JoinSession failed: %v", err)
 	}
-	if session.Help != help {
+	if result.SessionID == "" || sm.FindPeer(help.ID) != share {
 		t.Error("Help client not joined")
 	}
 }
@@ -98,7 +101,7 @@ func TestSessionDoubleJoin(t *testing.T) {
 	help1 := &ClientConn{ID: "help1", Conn: &MockConn{}}
 	help2 := &ClientConn{ID: "help2", Conn: &MockConn{}}
 
-	sm.CreateSession("TESTDOUBLE", share, 30*time.Minute, "")
+	sm.CreateSession("TESTDOUBLE", share, 30*time.Minute, "", "127.0.0.1", 100, 1000)
 	_, _ = sm.JoinSession("TESTDOUBLE", help1)
 	_, err := sm.JoinSession("TESTDOUBLE", help2)
 	if err == nil {
@@ -113,7 +116,7 @@ func TestSessionClose(t *testing.T) {
 	sm := NewSessionManager()
 
 	share := &ClientConn{ID: "share1", Conn: &MockConn{}}
-	session := sm.CreateSession("TESTCLOSE", share, 30*time.Minute, "")
+	session, _ := sm.CreateSession("TESTCLOSE", share, 30*time.Minute, "", "127.0.0.1", 100, 1000)
 
 	if sm.GetActiveSessions() != 1 {
 		t.Error("Session count should be 1")
@@ -131,11 +134,11 @@ func TestSessionCleanupExpired(t *testing.T) {
 
 	// 创建一个即将过期的会话
 	share := &ClientConn{ID: "share1", Conn: &MockConn{}}
-	sm.CreateSession("EXPIRE1", share, 1*time.Millisecond, "")
+	sm.CreateSession("EXPIRE1", share, 1*time.Millisecond, "", "127.0.0.1", 100, 1000)
 
 	// 创建一个长期会话
 	share2 := &ClientConn{ID: "share2", Conn: &MockConn{}}
-	sm.CreateSession("LONG1", share2, 1*time.Hour, "")
+	sm.CreateSession("LONG1", share2, 1*time.Hour, "", "127.0.0.2", 100, 1000)
 
 	if sm.GetActiveSessions() != 2 {
 		t.Error("Should have 2 sessions")
@@ -168,7 +171,7 @@ func TestSessionGetByExpiredCode(t *testing.T) {
 	sm := NewSessionManager()
 
 	share := &ClientConn{ID: "share1", Conn: &MockConn{}}
-	sm.CreateSession("EXPIRETEST", share, 1*time.Millisecond, "")
+	sm.CreateSession("EXPIRETEST", share, 1*time.Millisecond, "", "127.0.0.1", 100, 1000)
 
 	time.Sleep(50 * time.Millisecond)
 

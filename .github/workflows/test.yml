@@ -26,3 +26,11 @@ jobs:
       - name: Run all tests
         shell: bash
         run: go test ./... -timeout 120s
+      - name: Race detector (internal packages)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: go test -race ./internal/... -timeout 180s
+      - name: Benchmarks (ratelimit, observation only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: go test -run=^$ -bench=. -benchmem ./internal/ratelimit

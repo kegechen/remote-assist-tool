@@ -173,11 +173,17 @@ remote share --server relay.example.com:8443
 | `--ttl` | `30m` | 协助码有效期 |
 | `--length` | `10` | 协助码长度 |
 | `--audit` | `audit.log` | 审计日志文件 |
-| `--stun` | `:3478` | STUN 服务监听地址（空则禁用） |
+| `--stun` | 空 | STUN/UDP relay 监听地址；例如 `:3478`，空则禁用 |
+| `--trust-source-ip` | `true` | Relay 是否能从 TCP 连接看到真实来源 IP；SNAT 后端设为 `false` |
+| `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON 限流配置文件；未设置则使用安全默认值 |
+| `--print-default-limits` | `false` | 输出完整默认限流 JSON 后退出 |
+| `--no-auth` | `false` | 固定码无鉴权模式，仅限完全可信私网 |
 | `--plain` | `false` | 非 TLS 模式（仅开发测试） |
 | `--gen-certs` | `false` | 生成自签证书后退出 |
 | `--certs-dir` | `./certs` | 证书目录（未指定 cert/key 时自动在此生成自签证书） |
 | `--version` | `false` | 显示版本 |
+
+Relay 的来源 IP 判断、完整限流参数、默认值依据、公共 STUN 行为和部署监控方法见 [Relay 来源 IP、限流与监控指南](docs/RELAY_LIMITS.md)。
 
 ### remote share — 被协助模式
 

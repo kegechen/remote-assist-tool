@@ -1,12 +1,53 @@
 package logger
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 )
+
+var (
+	auditKey     [32]byte
+	auditKeyOnce sync.Once
+)
+
+// ensureAuditKey 首次调用时用 crypto/rand 填充审计密钥。
+// 密钥仅存于内存、随进程重启轮换，不暴露可变 setter。
+func ensureAuditKey() {
+	auditKeyOnce.Do(func() {
+		if _, err := rand.Read(auditKey[:]); err != nil {
+			panic("crypto/rand failed: " + err.Error())
+		}
+	})
+}
+
+// hmacSum 计算 key 对 s 的 HMAC-SHA256 原始摘要。
+func hmacSum(key [32]byte, s string) [32]byte {
+	mac := hmac.New(sha256.New, key[:])
+	mac.Write([]byte(s))
+	var sum [32]byte
+	copy(sum[:], mac.Sum(nil))
+	return sum
+}
+
+// CodeFingerprint 返回协助码的不可逆指纹，用于跨事件关联同一会话。
+// 取 HMAC-SHA256 原始摘要前 12 字节再 hex 编码，恒为 24 个十六进制字符。
+func CodeFingerprint(s string) string {
+	ensureAuditKey()
+	sum := hmacSum(auditKey, s)
+	return hex.EncodeToString(sum[:12])
+}
+
+// MaskCode 返回用于排障日志的固定长度掩码，不泄露任何码字符。
+func MaskCode(s string) string {
+	return "********"
+}
 
 // AuditLevel 审计级别
 type AuditLevel string
@@ -117,7 +158,7 @@ func LogConnection(clientIP, clientID string, success bool, message string) {
 // LogCodeGenerated 记录协助码生成
 func LogCodeGenerated(code string, clientID string, expiresAt time.Time) {
 	Log(AuditLevelInfo, "code_generated", "协助码已生成", map[string]interface{}{
-		"code":       code,
+		"code_fp":    CodeFingerprint(code),
 		"client_id":  clientID,
 		"expires_at": expiresAt,
 	})
@@ -127,7 +168,7 @@ func LogCodeGenerated(code string, clientID string, expiresAt time.Time) {
 func LogSessionEstablished(sessionID, code, helperID, targetID string) {
 	Log(AuditLevelInfo, "session_established", "会话已建立", map[string]interface{}{
 		"session_id": sessionID,
-		"code":       code,
+		"code_fp":    CodeFingerprint(code),
 		"helper_id":  helperID,
 		"target_id":  targetID,
 	})

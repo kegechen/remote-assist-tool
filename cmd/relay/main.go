@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,18 +18,21 @@ import (
 )
 
 var (
-	listenAddr   = flag.String("listen", ":8443", "Listen address")
-	certFile     = flag.String("cert", "", "TLS certificate file")
-	keyFile      = flag.String("key", "", "TLS key file")
-	codeTTL      = flag.Duration("ttl", 30*time.Minute, "Assist code TTL")
-	codeLength   = flag.Int("length", 10, "Assist code length")
-	auditLog     = flag.String("audit", "audit.log", "Audit log file")
-	plain        = flag.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
-	genCerts     = flag.Bool("gen-certs", false, "Generate self-signed certs and exit")
-	certsDir     = flag.String("certs-dir", "./certs", "Directory for generated certs")
-	stunAddr     = flag.String("stun", ":3478", "STUN server listen address (empty to disable)")
-	noAuth       = flag.Bool("no-auth", false, "Use fixed code (no assist code exchange needed). DANGER: any device that can reach this relay can connect and control the share side. Use ONLY on fully trusted private LANs.")
-	showVersion  = flag.Bool("version", false, "Show version information")
+	listenAddr    = flag.String("listen", ":8443", "Listen address")
+	certFile      = flag.String("cert", "", "TLS certificate file")
+	keyFile       = flag.String("key", "", "TLS key file")
+	codeTTL       = flag.Duration("ttl", 30*time.Minute, "Assist code TTL")
+	codeLength    = flag.Int("length", 10, "Assist code length")
+	auditLog      = flag.String("audit", "audit.log", "Audit log file")
+	plain         = flag.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
+	genCerts      = flag.Bool("gen-certs", false, "Generate self-signed certs and exit")
+	certsDir      = flag.String("certs-dir", "./certs", "Directory for generated certs")
+	stunAddr      = flag.String("stun", "", "STUN server listen address (empty to disable, e.g. ':3478' to enable)")
+	trustSourceIP = flag.Bool("trust-source-ip", true, "Trust direct peer IP for per-IP limits; set false behind an SNAT load balancer")
+	limitsFile    = flag.String("limits-file", strings.TrimSpace(os.Getenv("REMOTE_RELAY_LIMITS_FILE")), "JSON rate-limit config file (or REMOTE_RELAY_LIMITS_FILE)")
+	printLimits   = flag.Bool("print-default-limits", false, "Print default rate-limit JSON and exit")
+	noAuth        = flag.Bool("no-auth", false, "Use fixed code (no assist code exchange needed). DANGER: any device that can reach this relay can connect and control the share side. Use ONLY on fully trusted private LANs.")
+	showVersion   = flag.Bool("version", false, "Show version information")
 )
 
 func main() {
@@ -46,22 +50,37 @@ func main() {
 		fmt.Printf("relay-server %s\n", version.Info())
 		return
 	}
+	if *printLimits {
+		fmt.Println(relay.DefaultLimits().JSON())
+		return
+	}
 
 	if *genCerts {
 		generateCerts()
 		return
 	}
 
+	limits := relay.DefaultLimits()
+	if *limitsFile != "" {
+		var err error
+		limits, err = relay.LoadLimitsFile(*limitsFile)
+		if err != nil {
+			log.Fatalf("Invalid limits file %s: %v", *limitsFile, err)
+		}
+	}
+
 	cfg := &relay.Config{
-		ListenAddr:     *listenAddr,
-		TLSCertFile:    *certFile,
-		TLSKeyFile:     *keyFile,
-		CodeTTL:        *codeTTL,
-		CodeLength:     *codeLength,
-		AuditLogFile:   *auditLog,
-		UseTLS:         !*plain,
-		STUNListenAddr: *stunAddr,
-		NoAuth:         *noAuth,
+		ListenAddr:            *listenAddr,
+		TLSCertFile:           *certFile,
+		TLSKeyFile:            *keyFile,
+		CodeTTL:               *codeTTL,
+		CodeLength:            *codeLength,
+		AuditLogFile:          *auditLog,
+		UseTLS:                !*plain,
+		STUNListenAddr:        *stunAddr,
+		NoAuth:                *noAuth,
+		DisableSourceIPLimits: !*trustSourceIP,
+		Limits:                limits,
 	}
 
 	if *noAuth {
