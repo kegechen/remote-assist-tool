@@ -361,6 +361,7 @@ func runHelp(args []string) {
 				os.Exit(1)
 			}
 		}
+		return
 	} else {
 		help := client.NewHelpMode(cfg, *code, *listenAddr)
 		if err := help.Run(); err != nil {
