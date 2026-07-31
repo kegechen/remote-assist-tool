@@ -26,6 +26,8 @@ var ErrPeerDisconnected = errors.New("peer disconnected")
 type ShareMode struct {
 	client         *Client
 	sshAddr        string
+	newInstance    bool
+	clientID       string
 	codeFile       string
 	mirrorCodeFile string
 	code           string
@@ -39,14 +41,20 @@ type ShareMode struct {
 // 以 JSON 原子写入该文件，供宿主程序（如管家）稳定读取，无需解析 stdout。
 // mirrorCodeFile 非空时再额外写一份到该路径：通道内热升级会用它，让 old share
 // 原来的 --code-file 路径在升级后仍由 new share 继续刷新（见 upgradeflags.HostCodeFile）。
-func NewShareMode(cfg *Config, sshAddr string, sbCfg agent.SandboxConfig, codeFile, mirrorCodeFile string) *ShareMode {
-	return &ShareMode{
+// newInstance 为 true 时使用进程内 ClientID，允许 CLI 额外启动独立 share。
+func NewShareMode(cfg *Config, sshAddr string, newInstance bool, sbCfg agent.SandboxConfig, codeFile, mirrorCodeFile string) *ShareMode {
+	share := &ShareMode{
 		client:         NewClient(cfg),
 		sshAddr:        sshAddr,
+		newInstance:    newInstance,
 		codeFile:       codeFile,
 		mirrorCodeFile: mirrorCodeFile,
 		sbCfg:          sbCfg,
 	}
+	if newInstance {
+		share.clientID, _ = generateClientID()
+	}
+	return share
 }
 
 // Run 运行被协助模式，协助端断开时自动等待新连接
@@ -161,7 +169,10 @@ func rapidReconnectBackoff(sessionDur time.Duration, rapidFails int) (int, time.
 
 // register 向 relay 注册并获取协助码
 func (s *ShareMode) register() error {
-	clientID, _ := GetOrCreateClientID()
+	clientID, err := s.registrationClientID()
+	if err != nil {
+		return err
+	}
 	hostInfo := sysinfo.Summary()
 	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: hostInfo}); err != nil {
 		return err
@@ -194,6 +205,13 @@ func (s *ShareMode) register() error {
 	fmt.Println("等待协助端连接...")
 	s.writeCodeFile()
 	return nil
+}
+
+func (s *ShareMode) registrationClientID() (string, error) {
+	if s.newInstance {
+		return s.clientID, nil
+	}
+	return GetOrCreateClientID()
 }
 
 // writeCodeFile 把协助码、中转服务地址与有效期原子写入 codeFile（先写 .tmp 再 rename），

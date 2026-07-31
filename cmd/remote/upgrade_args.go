@@ -6,6 +6,8 @@ import (
 	"github.com/remote-assist/tool/internal/upgradeflags"
 )
 
+const upgradeSuccessorFlag = "--upgrade-successor"
+
 // upgradedShareArgs 复用 old share 的全部显式参数，只替换 server/code-file。这样 root、
 // allow/deny-exec、TLS、P2P 等策略不会在升级过程中被悄悄改变。
 //
@@ -32,6 +34,9 @@ func upgradedShareArgs(oldArgv []string, server, codeFile string) ([]string, err
 	out := []string{"share"}
 	for i := 1; i < len(args); i++ {
 		a := args[i]
+		if a == upgradeSuccessorFlag {
+			continue
+		}
 		if a == "--unsafe-full-system" || a == "--unsafe-full-system=true" {
 			// 0.0.5 旧名：当时同时放开文件与 exec；新版空 root 已默认不限制文件，
 			// 因此把显式危险授权等价迁移为只剩的 exec 开关。
@@ -65,5 +70,7 @@ func upgradedShareArgs(oldArgv []string, server, codeFile string) ([]string, err
 	if hostCodeFile != "" {
 		out = append(out, "--code-file-mirror", hostCodeFile)
 	}
+	// new share 在 make-before-break 阶段先上线，并排队接管 old 持有的标准实例锁。
+	out = append(out, upgradeSuccessorFlag)
 	return out, nil
 }

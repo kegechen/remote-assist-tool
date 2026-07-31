@@ -20,7 +20,7 @@ func TestWriteCodeFileMirrorsToBothPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewShareMode(&Config{ServerAddr: "relay:8443"}, "127.0.0.1:22", agent.SandboxConfig{}, primary, mirror)
+	s := NewShareMode(&Config{ServerAddr: "relay:8443"}, "127.0.0.1:22", false, agent.SandboxConfig{}, primary, mirror)
 	s.code = "ABCDEFGHIJ"
 	s.expiresAt = time.Unix(1_800_000_000, 0)
 	s.writeCodeFile()
@@ -46,7 +46,7 @@ func TestWriteCodeFileWithoutMirror(t *testing.T) {
 	dir := t.TempDir()
 	primary := filepath.Join(dir, "code.json")
 
-	s := NewShareMode(&Config{ServerAddr: "relay:8443"}, "127.0.0.1:22", agent.SandboxConfig{}, primary, "")
+	s := NewShareMode(&Config{ServerAddr: "relay:8443"}, "127.0.0.1:22", false, agent.SandboxConfig{}, primary, "")
 	s.code = "ABCDEFGHIJ"
 	s.expiresAt = time.Unix(1_800_000_000, 0)
 	s.writeCodeFile()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -90,6 +91,7 @@ func runShare(args []string) {
 	fs := flag.NewFlagSet("share", flag.ExitOnError)
 	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)")
 	sshAddr := fs.String("ssh", "127.0.0.1:22", "Local SSH address")
+	newInstance := fs.Bool("new-instance", false, "Start an additional independent share with a new assist code")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
@@ -115,14 +117,18 @@ func runShare(args []string) {
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n")
 	}
-	// --elevated-child 是内部旗标，不注册为 flag，必须在 fs.Parse 之前预先剥离，
-	// 否则 flag.ExitOnError 会因"flag provided but not defined"直接 os.Exit(2)。
+	// 以下是内部旗标，不注册为 flag，必须在 fs.Parse 之前预先剥离，否则
+	// flag.ExitOnError 会因"flag provided but not defined"直接 os.Exit(2)。
 	hasElevatedChild := false
+	isUpgradeSuccessor := false
 	clean := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == "--elevated-child" {
+		switch a {
+		case "--elevated-child":
 			hasElevatedChild = true
-		} else {
+		case upgradeSuccessorFlag:
+			isUpgradeSuccessor = true
+		default:
 			clean = append(clean, a)
 		}
 	}
@@ -168,6 +174,37 @@ func runShare(args []string) {
 		fmt.Printf("Running as: %s (non-elevated)\n", u.Username)
 	} else {
 		fmt.Println("Running as: unknown (non-elevated)")
+	}
+	if !*newInstance {
+		if isUpgradeSuccessor {
+			// make-before-break：new 必须先上线，但 old 此时仍持有标准锁。交接门锁
+			// 会挡住第三个默认 share，直到 new 在 old 退出后取得标准锁。
+			handover, err := client.BeginShareInstanceLockHandover()
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			acquired := make(chan io.Closer, 1)
+			defer func() {
+				select {
+				case instanceLock := <-acquired:
+					_ = instanceLock.Close()
+				default:
+				}
+			}()
+			go func() {
+				result := <-handover
+				if result.Err != nil {
+					log.Fatalf("Error: 接管 share 单实例锁失败: %v", result.Err)
+				}
+				acquired <- result.Lock
+			}()
+		} else {
+			instanceLock, err := client.AcquireShareInstanceLock()
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			defer instanceLock.Close()
+		}
 	}
 
 	// Standalone (LAN) 模式：进程内启动 relay，share 连 loopback；
@@ -268,7 +305,7 @@ func runShare(args []string) {
 		BindIP:       *bindIP,
 	}
 
-	share := client.NewShareMode(cfg, *sshAddr, sbCfg, *codeFile, *codeFileMirror)
+	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)

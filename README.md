@@ -50,6 +50,8 @@ Web UI 连接后会比较 help 与 share 的版本；确认 share 较旧时，�
    machine，确认 Linux/Windows 与 amd64/arm64 均匹配后才分块上传，再在远端执行
    `--version` 验证。
 2. 复用 old 的 share 参数，以隔离 `HOME`（独立 ClientID）和固定 `--code-file` 启动 new。
+   升级默认实例时，隔离 `HOME` 不改变其单实例锁：old 持锁期间 new 排队等待接管，因此
+   升级交接过程中再次启动默认 share 仍会直接报错。
 3. 仍经 old 通道读取 new code，主动连接 new 并核对版本。
 4. Linux 在 new 验证成功后原子替换原文件，再按 PID 终止 old。Windows 先把运行中的 old
    改成备份名、让候选文件占回原路径，再启动 new；new 验证成功后按 PID 终止 old 并删除
@@ -76,6 +78,20 @@ remote share --server relay.example.com:8443
 有效期至: 2026-02-28 18:30:00
 等待协助端连接...
 ```
+
+同一用户下默认只允许一个 share。需要额外分享不同 SSH 服务或不同工具策略时，显式创建
+独立实例：
+
+```bash
+remote share --ssh 127.0.0.1:22 --server relay.example.com:8443
+remote share --new-instance --ssh 127.0.0.1:2222 --server relay.example.com:8443
+```
+
+默认实例重复启动会直接报错，不会断开已运行的实例。每次使用 `--new-instance` 都会创建
+独立协助码；在协助码有效期内，该进程网络断线重连时保持原码，但进程退出后再次启动会
+生成新码。连接外部 relay 时 share 只建立出站连接，无需为每个实例分配本地监听端口；
+`--ssh` 端口只是其代理的本地 SSH 服务。standalone 模式下每个实例内嵌一个 relay，因此
+还必须分别设置不同的 `--standalone-listen` 端口。
 
 协助端（用协助码连接，默认走 MCP 模式；要传统 SSH 隧道加 `--legacy-ssh`）：
 
@@ -193,6 +209,7 @@ Relay 的来源 IP 判断、完整限流参数、默认值依据、公共 STUN �
 | `--insecure` | `true` | 跳过 TLS 校验（自签 relay 用；对接受信 CA relay 改 `false`） |
 | `--ca` | - | CA 证书文件 |
 | `--ssh` | `127.0.0.1:22` | 本地 SSH 地址（SSH 隧道模式） |
+| `--new-instance` | `false` | 额外启动独立 share；生成新协助码且不影响默认实例 |
 | `--p2p` | `auto` | P2P 模式：`disabled` / `auto` / `required` |
 | `--stun` | - | STUN 服务地址（默认同 relay 的 :3478） |
 | `--bind-ip` | - | 指定 UDP 绑定 IP（绕过 TUN 代理自动探测） |
