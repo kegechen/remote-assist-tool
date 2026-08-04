@@ -305,10 +305,14 @@ func (s *ShareMode) waitSessionReady() (string, error) {
 			}
 			return ready.SessionID, nil
 		case proto.MsgHeartbeat:
-		case proto.MsgToolHello, proto.MsgToolReq, proto.MsgToolCancel:
+		case proto.MsgToolHello:
 			// 会话重同步窗口（协助端重连 / session 切换）可能收到工具通道消息。
-			// 旧实现把它们当 "Unexpected message" 丢弃，导致对应 tool_req 永远收不到
-			// ToolResp、help 端 CallTool 干等兜底超时。这里投递给 daemon（若在运行）。
+			// ToolHello 必须在 relay 上就地应答，并把 daemon 从可能残留的旧 P2P
+			// 连接切回 relay。
+			if err := s.handleRelayToolHello(msg); err != nil {
+				return "", err
+			}
+		case proto.MsgToolReq, proto.MsgToolCancel:
 			if s.daemon != nil {
 				s.daemon.Inject(msg)
 			}
@@ -371,13 +375,10 @@ func (s *ShareMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTu
 			peerReady = true
 		case proto.MsgHeartbeat:
 		case proto.MsgToolHello:
-			// 工具通道握手可能在 P2P 协商窗口期到达，必须就地处理否则消息会被丢
-			var hello proto.Hello
-			proto.DecodePayload(msg, &hello)
-			ack, key := buildHelloAck(hello, s.code)
-			s.client.SendMessage(proto.MsgToolHelloAck, &ack)
-			if ack.Accept {
-				s.ensureDaemon(key)
+			// 工具通道握手可能在 P2P 协商窗口期到达，必须就地处理否则消息会被丢。
+			if err := s.handleRelayToolHello(msg); err != nil {
+				mgr.Close()
+				return nil, err
 			}
 		case proto.MsgToolReq, proto.MsgToolCancel:
 			if s.daemon != nil {
@@ -625,12 +626,8 @@ func (s *ShareMode) handleTunnel() error {
 
 		switch msg.Type {
 		case proto.MsgToolHello:
-			var hello proto.Hello
-			proto.DecodePayload(msg, &hello)
-			ack, key := buildHelloAck(hello, s.code)
-			s.client.SendMessage(proto.MsgToolHelloAck, &ack)
-			if ack.Accept {
-				s.ensureDaemon(key)
+			if err := s.handleRelayToolHello(msg); err != nil {
+				return err
 			}
 		case proto.MsgToolReq, proto.MsgToolCancel:
 			if s.daemon != nil {
@@ -722,6 +719,25 @@ func buildHelloAck(hello proto.Hello, code string) (proto.HelloAck, [32]byte) {
 	}
 	key := proto.DeriveSessionKey(code, ack.NonceB64, hello.NonceB64)
 	return ack, key
+}
+
+// handleRelayToolHello 在 relay 通道完成工具握手，并明确把 daemon 的响应出口切回
+// relay。daemon 可能曾被 P2P 握手 SwapConn 到 P2PConn；若后续重连回退 relay，仅轮换
+// key 会让请求从 relay 进入、响应却继续写向已失效的旧 P2P 隧道。
+func (s *ShareMode) handleRelayToolHello(msg *proto.Message) error {
+	var hello proto.Hello
+	if err := proto.DecodePayload(msg, &hello); err != nil {
+		return fmt.Errorf("decode relay tool hello: %w", err)
+	}
+	ack, key := buildHelloAck(hello, s.code)
+	if err := s.client.SendMessage(proto.MsgToolHelloAck, &ack); err != nil {
+		return fmt.Errorf("send relay tool hello ack: %w", err)
+	}
+	if ack.Accept {
+		s.ensureDaemon(key)
+		s.daemon.SwapConn(s.client, key)
+	}
+	return nil
 }
 
 // ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅 rotate key。

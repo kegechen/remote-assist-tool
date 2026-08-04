@@ -32,9 +32,12 @@ const fileTransferChunk = 512 * 1024
 type HelpMCPBootstrap struct {
 	cfg *Config
 
-	mu     sync.Mutex
-	help   *HelpMode   // 装载成功后非 nil
-	bridge *mcp.Bridge // 装载成功后非 nil
+	connectMu    sync.Mutex // 串行化 connect，避免并发调用互相拆连接
+	mu           sync.Mutex
+	help         *HelpMode   // 装载成功后非 nil
+	bridge       *mcp.Bridge // 装载成功后非 nil
+	activeTarget connectTarget
+	activeResult connectResult
 	// 记录最近一次成功 connect 的参数，供传输中隧道断时自动重连+续传（抗抖动）
 	lastCode   string
 	lastServer string
@@ -208,7 +211,16 @@ type connectResult struct {
 	HelpVersion string `json:"help_version,omitempty"` // 当前 help CLI 版本，供 GUI 做升级提示
 }
 
+type connectTarget struct {
+	Code   string
+	Server string
+	NoAuth bool
+}
+
 func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	b.connectMu.Lock()
+	defer b.connectMu.Unlock()
+
 	var a connectArgs
 	// 拒绝未知字段：静默忽略会让写错名字的参数悄悄失效，connect 转而连上内置默认
 	// relay，报出的超时错误完全指不到根因（调用方臆造 relay_url 时就这么栽过）。
@@ -235,22 +247,35 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		return nil, fmt.Errorf("code required (or set no_auth=true for trusted LANs)")
 	}
 
+	// 先算出实际连接目标。相同目标的重复 connect 是常见操作（新一轮 agent 可能不
+	// 知道 MCP 子进程仍保持着连接），必须幂等复用，不能拆掉健康的 relay/P2P 会话。
+	effectiveCfg := *b.cfg
+	if a.Server != "" {
+		effectiveCfg.ServerAddr = a.Server
+	}
+	effectiveCfg.ServerAddr = NormalizeServerAddr(effectiveCfg.ServerAddr)
+	target := connectTarget{
+		Code:   normalizeCode(a.Code),
+		Server: effectiveCfg.ServerAddr,
+		NoAuth: a.NoAuth,
+	}
+
 	b.mu.Lock()
+	if b.help != nil && b.bridge != nil && b.activeTarget == target {
+		result := b.activeResult
+		b.mu.Unlock()
+		return json.Marshal(result)
+	}
 	// 关闭老连接（reconnect 支持）
 	if b.help != nil {
 		b.help.client.Close()
 		b.help = nil
 		b.bridge = nil
 	}
+	b.activeTarget = connectTarget{}
+	b.activeResult = connectResult{}
 	b.mu.Unlock()
 
-	// 拷贝一份 cfg，避免修改影响后续 connect。若调用方传了 server 就覆盖 ServerAddr
-	// （典型场景：share --standalone 跑在 LAN 上，由用户告知地址；help 这边无需重启）
-	effectiveCfg := *b.cfg
-	if a.Server != "" {
-		effectiveCfg.ServerAddr = a.Server
-	}
-	effectiveCfg.ServerAddr = NormalizeServerAddr(effectiveCfg.ServerAddr) // 无端口补默认 :8443
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
 	if err := h.client.Connect(); err != nil {
 		return nil, fmt.Errorf("relay connect failed: %w", err)
@@ -366,10 +391,36 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 			if b.bridge == bridge {
 				b.help = nil
 				b.bridge = nil
+				b.activeTarget = connectTarget{}
+				b.activeResult = connectResult{}
 			}
 			b.mu.Unlock()
 		})
 	}
+	result := connectResult{
+		Connected:   true,
+		SessionID:   resp.SessionID,
+		Server:      effectiveCfg.ServerAddr,
+		PeerVersion: resp.PeerVersion,
+		PeerHost:    resp.PeerHost,
+		HelpVersion: version.Info(),
+	}
+	if p2pConn != nil {
+		result.P2P = true
+	}
+
+	// 必须在启动读循环前发布活动状态。否则连接若立即断开，teardown 可能先运行却
+	// 因 b.bridge 尚未登记而清理不到，随后这里反而缓存一个已经死亡的会话。
+	b.mu.Lock()
+	b.help = h
+	b.bridge = bridge
+	b.activeTarget = target
+	b.activeResult = result
+	// 缓存本次 connect 参数，供传输中隧道断时自动重连（用同一码/同一 relay 续传）
+	b.lastCode = a.Code
+	b.lastServer = a.Server
+	b.lastNoAuth = a.NoAuth
+	b.mu.Unlock()
 
 	// 后台 ReadMessage 循环，把工具消息投给 bridge。
 	// When P2P is active, tool messages arrive via p2pConn; the relay read
@@ -427,26 +478,6 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		}()
 	}
 
-	b.mu.Lock()
-	b.help = h
-	b.bridge = bridge
-	// 缓存本次 connect 参数，供传输中隧道断时自动重连（用同一码/同一 relay 续传）
-	b.lastCode = a.Code
-	b.lastServer = a.Server
-	b.lastNoAuth = a.NoAuth
-	b.mu.Unlock()
-
-	result := connectResult{
-		Connected:   true,
-		SessionID:   resp.SessionID,
-		Server:      effectiveCfg.ServerAddr,
-		PeerVersion: resp.PeerVersion,
-		PeerHost:    resp.PeerHost,
-		HelpVersion: version.Info(),
-	}
-	if p2pConn != nil {
-		result.P2P = true
-	}
 	return json.Marshal(result)
 }
 

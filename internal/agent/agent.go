@@ -100,7 +100,7 @@ type Daemon struct {
 	connMu     sync.RWMutex // protects conn for SwapConn
 	key        [32]byte
 	inbound    chan *proto.Message
-	cancels    sync.Map // id -> context.CancelFunc
+	cancels    sync.Map          // id -> context.CancelFunc
 	OnActivity func(line string) // 可选钩子，每条工具调用完成时触发
 }
 
@@ -259,7 +259,9 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
 			time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
 	}
-	d.sendMsg(proto.MsgToolResp, &resp)
+	if err := d.sendMsg(proto.MsgToolResp, &resp); err != nil {
+		log.Printf("tool | %s | response send failed: %v", req.Tool, err)
+	}
 }
 
 // chunkSink reserved for v2 streaming; v1 tools do not use sink
