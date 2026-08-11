@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -10,6 +11,47 @@ import (
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/ratelimit"
 )
+
+func TestStartWithContextReadySignalsAfterListen(t *testing.T) {
+	server, err := NewServer(&Config{ListenAddr: "127.0.0.1:0", UseTLS: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- server.StartWithContextReady(ctx, func() { close(ready) })
+	}()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("server did not report ready")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestStartWithContextReadyDoesNotSignalOnListenFailure(t *testing.T) {
+	server, err := NewServer(&Config{ListenAddr: "127.0.0.1:-1", UseTLS: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := server.StartWithContextReady(context.Background(), func() { called = true }); err == nil {
+		t.Fatal("StartWithContextReady succeeded with invalid listen address")
+	}
+	if called {
+		t.Fatal("ready callback ran after listen failure")
+	}
+}
 
 func TestAcquireConnSlotPerIPLimit(t *testing.T) {
 	s := &Server{connPerIP: make(map[string]int), limits: DefaultLimits()}

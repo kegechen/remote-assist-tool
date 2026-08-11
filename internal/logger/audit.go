@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -118,12 +118,13 @@ func (l *AuditLogger) Close() error {
 // Log 记录审计事件
 func (l *AuditLogger) Log(event AuditEvent) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	event.Timestamp = time.Now().UTC()
 	_ = l.encoder.Encode(event)
+	l.mu.Unlock()
 
-	fmt.Printf("[%s] %s: %s\n", event.Level, event.Event, event.Message)
+	// Keep console/Event Log output outside the file lock. A blocked output sink
+	// must not stop other audit records from reaching disk.
+	log.Printf("[%s] %s: %s", event.Level, event.Event, event.Message)
 }
 
 // Log 便捷方法

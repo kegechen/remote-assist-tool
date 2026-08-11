@@ -182,6 +182,12 @@ func (s *Server) Start() error {
 
 // StartWithContext starts the server with context for graceful shutdown
 func (s *Server) StartWithContext(ctx context.Context) error {
+	return s.StartWithContextReady(ctx, nil)
+}
+
+// StartWithContextReady starts the server and calls onReady after all listeners
+// are established, immediately before the accept loop begins.
+func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) error {
 	// Start STUN server if configured
 	if s.config.STUNListenAddr != "" {
 		var err error
@@ -223,6 +229,9 @@ func (s *Server) StartWithContext(ctx context.Context) error {
 		log.Printf("Shutting down server...")
 		listener.Close()
 	}()
+	if onReady != nil {
+		onReady()
+	}
 
 	for {
 		conn, err := listener.Accept()

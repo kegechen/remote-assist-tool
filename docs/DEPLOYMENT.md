@@ -47,6 +47,14 @@ cd /root/remote-assist
 
 ## 服务器管理
 
+Windows 上推荐将 relay 安装为无窗口原生服务。双击无参数 EXE 可进入交互管理菜单，非交互部署和完整配置说明见 [Windows Relay 服务部署](WINDOWS_RELAY_SERVICE.md)。
+
+```powershell
+.\remote-assist-relay-windows-amd64.exe service install
+.\remote-assist-relay-windows-amd64.exe service start
+.\remote-assist-relay-windows-amd64.exe service status
+```
+
 ### 查看服务器状态
 ```bash
 ssh root@192.168.1.101

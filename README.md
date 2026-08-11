@@ -201,6 +201,22 @@ remote share --server relay.example.com:8443
 
 Relay 的来源 IP 判断、完整限流参数、默认值依据、公共 STUN 行为和部署监控方法见 [Relay 来源 IP、限流与监控指南](docs/RELAY_LIMITS.md)。
 
+Windows 下直接双击无参数的 relay 会打开服务管理菜单。也可以使用非交互命令安装和管理原生 Windows 服务：
+
+```powershell
+remote-assist-relay-windows-amd64.exe service install
+remote-assist-relay-windows-amd64.exe service start
+remote-assist-relay-windows-amd64.exe service status
+remote-assist-relay-windows-amd64.exe service stop
+remote-assist-relay-windows-amd64.exe service uninstall
+```
+
+服务程序安装到 `C:\Program Files\RemoteAssistRelay`，配置、证书和审计文件位于 `C:\ProgramData\RemoteAssistRelay`，运行日志写入 Windows Application Event Log。服务模式、配置格式、权限和卸载行为见 [Windows Relay 服务部署](docs/WINDOWS_RELAY_SERVICE.md)。原有前台参数保持兼容；显式使用 `run` 可避免与服务管理命令混淆：
+
+```powershell
+remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
+```
+
 ### remote share — 被协助模式
 
 | 选项 | 默认值 | 说明 |
