@@ -12,6 +12,26 @@
 
 ## 快速开始
 
+### 一键安装 remote
+
+脚本会从 GitHub 最新正式 Release 下载当前系统与架构对应的客户端，并安装为
+`~/.local/bin/remote`（Windows 的 Git Bash / MSYS2 / Cygwin 中为 `remote.exe`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | sh
+```
+
+也可以使用 `wget`，或通过 `REMOTE_INSTALL_DIR` 指定安装目录：
+
+```bash
+wget -qO- https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | sh
+REMOTE_INSTALL_DIR=/usr/local/bin sh install.sh
+```
+
+支持 Linux、macOS 和 Windows（Git Bash / MSYS2 / Cygwin）的 amd64、arm64 架构；
+Linux/macOS 下载后会自动添加可执行权限；Windows 中 `curl` / `wget` 下载失败时会自动回退到
+系统 PowerShell。
+
 ### 构建
 
 用仓库自带脚本，产物输出到 `bin/`（Windows 为 `.exe`）：
