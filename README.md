@@ -146,6 +146,8 @@ Help side connects exactly like a normal relay (no --plain needed):
 ### 用法三：Claude Code MCP 远程调试
 
 让本地 Claude Code 直接调试远端机器，无需在远端开 openssh-server。
+首次接入可直接把 [`MCP_SETUP.md`](MCP_SETUP.md) 交给 Claude Code 或 Codex，自动完成
+`remote` 下载与 `remote-debug` MCP 配置。
 
 远端启动 share（带沙箱）：
 

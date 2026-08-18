@@ -193,14 +193,13 @@ func (s *ShareMode) register() error {
 	}
 	s.code = resp.Code
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
-	fmt.Printf("\n协助码: %s\n", formatCode(resp.Code))
-	fmt.Printf("本机标识: %s\n", hostInfo)
-	fmt.Printf("中转服务: %s\n", relayDesc(s.client.config))
-	fmt.Printf("有效期至: %s\n\n", s.expiresAt.Local().Format("2006-01-02 15:04:05"))
-	// 复制到系统剪贴板，方便直接粘贴给协助端（尽力而为：失败静默，不影响协助流程）。
-	// 首次注册与重连刷新 code 都走到这里，剪贴板始终是最新协助码。
-	if err := copyToClipboard(formatCode(resp.Code)); err == nil {
-		fmt.Println("（协助码已复制到剪贴板）")
+	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
+	fmt.Printf("\n================ 请复制给 Claude/Codex ================\n%s\n", instructions)
+	fmt.Println("========================================================")
+	// 整段复制到系统剪贴板，让未配置 MCP 的协助端也能直接按文案中的指南完成安装。
+	// 首次注册与重连刷新 code 都走到这里，剪贴板始终包含最新协助信息。
+	if err := copyToClipboard(instructions); err == nil {
+		fmt.Println("（以上协助信息已复制到剪贴板）")
 	}
 	fmt.Println("等待协助端连接...")
 	s.writeCodeFile()
