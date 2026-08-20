@@ -119,11 +119,18 @@ not_connected       （未先调用 connect 时其他工具返回）
 | 现象 | 多半原因 / 处理 |
 |---|---|
 | 工具都报 `not_connected` | 还没调 `connect`，或上次会话已断；说一句「协助码 XXXX 连上去」重连 |
+| `connect` 直接报 `Transport closed`，且没有连接结果 | MCP 宿主持有的 stdio transport 已关闭，请求通常未到达 CLI。检查报错客户端自身的 MCP 子进程和宿主日志；若工具调用前已有 `rmcp::service ... task cancelled`，重启受影响的 Claude Code / Codex 进程后用同一码重试。不要用其他客户端下仍存活的同名进程判断当前句柄健康 |
 | `connect` 报 `join failed` / `relay connect failed` | relay 地址/端口不对，或 relay 没起；standalone 场景确认带了 `server=LAN_IP:port` |
 | `path_outside_root` | 远端显式传了 `--root`，目标不在其子树内（默认不传 = 不限制，不会遇到）；让远端换更大的 `--root` 或直接不传 |
 | `exec_denied` | 命中 deny-exec 黑名单；确属需要可让远端调整 `--allow-exec`/`--deny-exec` |
 | 连一会就 `tunnel_lost` | 网络中断导致隧道断开（不会自动重连）；重新说一句「协助码 XXXX 连上去」重新握手，码已过期则远端重跑 share |
 | 协助码失效 | 默认 30 分钟 TTL，过期重新生成 |
+
+`Transport closed` 与 CLI 返回的 `join failed` / `relay connect failed` 不同：前者可能发生在
+JSON-RPC 请求进入 MCP server 之前。直接运行 `remote help --code <协助码>` 成功，只能证明
+relay Join 可用，不能证明报错会话的 MCP stdio 句柄仍然存活。可用全新客户端进程执行
+`initialize -> connect -> ping -> process_list` 作为对照；若该路径成功，应恢复或重启宿主，
+而不是继续修改协助码或远端配置。
 
 ---
 

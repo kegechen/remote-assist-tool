@@ -179,6 +179,12 @@ remote share --server relay.example.com:8443
 
 旧用法（写死协助码）仍支持：在 args 里加 `"--code", "ABCD-EFGHIJ"` 跳过 bootstrap。
 
+> 若 `connect` 直接报 `Transport closed`，且没有返回 `session_id` / `peer_host`，请求通常
+> 尚未到达 `remote` CLI。不要据此判断协助码失效或 relay 故障；先重启受影响的 Claude
+> Code / Codex 进程，再用同一码重试。旧 stdio 句柄一旦被宿主取消，反复调用 `connect`
+> 无法恢复。详细证据与排查步骤见 [`MCP_SETUP.md`](MCP_SETUP.md#4-排查-transport-closed)
+> 和 [`remote-debug` MCP 接入参考](docs/remote-debug-MCP接入参考.md#7-排错速查)。
+
 ## 架构
 
 ```

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 )
 
@@ -105,7 +107,20 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			s.dispatch(ctx, &req, out)
 		}
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil && !isClosedInputError(err) {
+		return err
+	}
+	return nil
+}
+
+// isClosedInputError 识别 MCP 宿主结束 stdio transport 时的终止错误。宿主关闭
+// stdin 后服务端已没有可继续处理的连接，这属于正常生命周期结束，不应让 CLI 以 1
+// 退出；Scanner 的解析/容量等真实错误仍继续返回给调用方。
+func isClosedInputError(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, os.ErrClosed) ||
+		isPlatformClosedInputError(err)
 }
 
 func (s *Server) dispatch(ctx context.Context, req *rpcReq, out io.Writer) {
@@ -116,6 +131,9 @@ func (s *Server) dispatch(ctx context.Context, req *rpcReq, out io.Writer) {
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "remote-assist", "version": "1"},
 		}})
+	case "ping":
+		// MCP 标准健康检查。空对象响应表示 server loop 与 stdio transport 均存活。
+		s.write(out, rpcResp{JSONRPC: "2.0", ID: req.ID, Result: struct{}{}})
 	case "tools/list":
 		s.write(out, rpcResp{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": AllSchemas()}})
 	case "tools/call":
