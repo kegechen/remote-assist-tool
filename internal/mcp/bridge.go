@@ -56,7 +56,7 @@ type Bridge struct {
 	conn      MsgConn
 	key       [32]byte
 	nextID    uint64
-	pending   sync.Map    // id -> chan proto.ToolResp
+	pending   sync.Map    // id -> chan toolReply
 	streamCbs sync.Map    // id -> *streamRecv，仅流式调用登记
 	closed    atomic.Bool // 隧道断开后置 true，CallTool 立即快速失败
 	closeMu   sync.Mutex  // 串行化 Disconnect，避免重复广播
@@ -77,6 +77,17 @@ const (
 	streamGapSettle     = 300 * time.Millisecond
 	streamGapSettleStep = 20 * time.Millisecond
 )
+
+// toolReply 一次调用的结局。
+//
+// local 标记这条结果是 bridge 自己合成的（Disconnect 唤醒在途调用），而不是从线上收来的。
+// 两者必须分得开：线上响应要先过 AEAD 验真才能采信，本地合成的结果既没有也不需要密文，
+// 混在一起的话隧道一断，调用方看到的是"响应未加封（对端过旧，或响应被篡改）"，而不是
+// 真正的原因"隧道断了，请重新 connect"。
+type toolReply struct {
+	resp  proto.ToolResp
+	local bool
+}
 
 // streamRecv 一次流式调用的接收状态：回调 + Seq 完整性。
 //
@@ -209,9 +220,9 @@ func (b *Bridge) Disconnect(err error) {
 	b.closed.Store(true)
 	// 遍历所有在途调用，投递失败结果（OK=false）唤醒它们。
 	b.pending.Range(func(_, v interface{}) bool {
-		ch := v.(chan proto.ToolResp)
+		ch := v.(chan toolReply)
 		select {
-		case ch <- proto.ToolResp{OK: false, ErrorCode: "tunnel_lost", ErrorMsg: err.Error()}:
+		case ch <- toolReply{resp: proto.ToolResp{OK: false, ErrorCode: "tunnel_lost", ErrorMsg: err.Error()}, local: true}:
 		default: // channel 已有结果（HandleInbound 抢先投递过），无需再唤醒
 		}
 		return true
@@ -242,7 +253,7 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 	}
 
 	id := atomic.AddUint64(&b.nextID, 1)
-	ch := make(chan proto.ToolResp, 1)
+	ch := make(chan toolReply, 1)
 	b.pending.Store(id, ch)
 	defer b.pending.Delete(id)
 	var recv *streamRecv
@@ -304,7 +315,12 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 			return nil, fmt.Errorf("tunnel_lost: no response within deadline")
 		}
 		return nil, ctx.Err()
-	case resp := <-ch:
+	case reply := <-ch:
+		// 本地合成的结局（Disconnect 唤醒）没有也不需要密文，直接原样透出。
+		if reply.local {
+			return nil, fmt.Errorf("%s: %s", reply.resp.ErrorCode, reply.resp.ErrorMsg)
+		}
+		resp := reply.resp
 		// 先验真、再看 ok。ok / error_code / error_msg 都是外层明文，唯一的认证依据
 		// 是它们进了 result 密文的 AAD。先按 ok 分支就等于信了未经认证的字段：中间人
 		// 把一次成功的 read_file 改成 ok:true + result 清空，调用方拿到的是"空结果 +
@@ -343,9 +359,9 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			return
 		}
 		if v, ok := b.pending.Load(r.ID); ok {
-			ch := v.(chan proto.ToolResp)
+			ch := v.(chan toolReply)
 			select {
-			case ch <- r:
+			case ch <- toolReply{resp: r}:
 			default:
 			}
 		}

@@ -114,3 +114,43 @@ func TestBridgeAcceptsSealedSuccess(t *testing.T) {
 		t.Fatalf("result=%s", out)
 	}
 }
+
+// TestBridgeDisconnectKeepsRealReasonWhenSealed 已握手（key 非零）时 Disconnect 唤醒的
+// 在途调用，必须原样透出 tunnel_lost。
+//
+// 现有的 TestBridgeDisconnectWakesInflight 用的是零 key，正好绕开了响应认证那条路，
+// 所以覆盖不到这里：响应认证要求「key 非零就必须带密文」，而 Disconnect 合成的结局
+// 是本地造的、根本没有密文。不把本地结局和线上响应分开，隧道一断调用方看到的就是
+// 「响应未加封（对端过旧，或响应被篡改）」——把一次普通掉线说成被人动了手脚。
+func TestBridgeDisconnectKeepsRealReasonWhenSealed(t *testing.T) {
+	conn := &stubConn{sent: make(chan *proto.Message, 4)}
+	br := NewBridge(conn, streamKey) // 非零 key：走响应认证那条路
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := br.CallTool(context.Background(), "exec", json.RawMessage(`{"argv":["sleep"]}`))
+		done <- err
+	}()
+
+	select {
+	case <-conn.sent: // 等 pending 登记完成
+	case <-time.After(2 * time.Second):
+		t.Fatal("ToolReq 未在预期内发出")
+	}
+	br.Disconnect(nil)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("期望断开错误")
+		}
+		if !strings.Contains(err.Error(), "tunnel_lost") {
+			t.Fatalf("应透出真正的原因 tunnel_lost，实际: %v", err)
+		}
+		if strings.Contains(err.Error(), "unauthenticated") {
+			t.Fatalf("本地合成的断开结局被当成线上响应验真了: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Disconnect 后在途调用未返回")
+	}
+}
