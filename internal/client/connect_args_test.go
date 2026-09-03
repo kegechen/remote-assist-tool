@@ -13,7 +13,7 @@ import (
 // cfg 用 127.0.0.1:1：万一未知字段没被拦住，拨号会立刻 refuse 而不是挂住测试。
 func TestDoConnectRejectsUnknownFields(t *testing.T) {
 	b := NewHelpMCPBootstrap(&Config{ServerAddr: "127.0.0.1:1"})
-	raw := json.RawMessage(`{"code":"ABCD-EFGHIJ","relay_url":"http://113.44.139.100:8443","session_name":"0717Aihub"}`)
+	raw := json.RawMessage(`{"code":"ABCD-EFGHIJ","relay_url":"http://113.44.139.100:8443","session_name":"demo-session"}`)
 
 	_, err := b.doConnect(context.Background(), raw)
 	if err == nil {

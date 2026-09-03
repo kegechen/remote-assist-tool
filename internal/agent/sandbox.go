@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -68,10 +69,32 @@ func (s *Sandbox) ResolvePath(p string) (string, error) {
 		}
 	}
 	rel, err := filepath.Rel(s.root, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+	// 只有 ".." 本身和 "../" 开头才是越界。裸用 HasPrefix(rel, "..") 会把 root 内以两点
+	// 开头的合法条目（如 <root>/..data/cfg.txt，k8s ConfigMap 挂载就长这样）误判为越权，
+	// 报出的还是 path_outside_root，排查时极具误导性。
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path_outside_root: %s", p)
 	}
 	return resolved, nil
+}
+
+// execName 归一化 argv[0] 与配置项，用于名单比较：取 basename，Windows 上再转小写并剥掉
+// 可执行扩展名。Windows 是本项目的主平台（GUI、服务托管、--elevate 都是 Windows 专属），
+// 而在那里文件名大小写不敏感、且 `git` 与 `git.exe` 指同一个程序——不归一化的话护栏是
+// 双向失效的：deny 列表里的 "shutdown" 拦不住 `shutdown.exe`/`SHUTDOWN.EXE`，allow 列表里的
+// "git" 又会把 AI 按 Windows 习惯发来的 `git.exe` 误拒。Unix 上大小写与扩展名都有意义，
+// 保持原样比较。
+func execName(s string) string {
+	name := filepath.Base(s)
+	if runtime.GOOS != "windows" {
+		return name
+	}
+	name = strings.ToLower(name)
+	switch ext := filepath.Ext(name); ext {
+	case ".exe", ".bat", ".cmd", ".com":
+		return strings.TrimSuffix(name, ext)
+	}
+	return name
 }
 
 // CheckExec argv[0] 的 basename 比较。注意这是防手滑的护栏而非安全边界：basename 过滤
@@ -83,15 +106,15 @@ func (s *Sandbox) CheckExec(argv []string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("exec_denied: empty argv")
 	}
-	name := filepath.Base(argv[0])
+	name := execName(argv[0])
 	for _, d := range s.cfg.DenyExec {
-		if d == name {
+		if execName(d) == name {
 			return fmt.Errorf("exec_denied: %s in deny list", name)
 		}
 	}
 	if len(s.cfg.AllowExec) > 0 {
 		for _, a := range s.cfg.AllowExec {
-			if a == name {
+			if execName(a) == name {
 				return nil
 			}
 		}

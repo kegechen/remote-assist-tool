@@ -897,6 +897,14 @@ func (b *HelpMCPBootstrap) doUploadFile(ctx context.Context, br toolCaller, raw 
 		select {
 		case sem <- struct{}{}:
 		case <-cctx.Done():
+			// 两条取消源都会走到这里：setErr 内部取消（firstErr 已置，下面 hasErr 直接 break），
+			// 以及外部 ctx 取消（notifications/cancelled、GUI 超时）。后者 firstErr 仍是 nil，
+			// 必须在此显式置错，否则 (a) 下面 hasErr 为假会继续起 worker，而 worker 的
+			// `defer <-sem` 没有配对的 put，sem 容量只有 1，wg.Wait 必然永久阻塞；
+			// (b) 即便 break 掉，firstErr 为 nil 会让本函数谎报上传成功，而 total 里
+			// 含着从未写到远端的 chunk——续传正是按远端 stat size 去重的，会被带坏。
+			// setErr 只在 firstErr==nil 时生效，不会盖掉真正的失败原因。
+			setErr(fmt.Errorf("upload to remote %q cancelled at offset %d (re-call upload_file with offset=%d to resume): %w", a.RemotePath, at, at, cctx.Err()))
 		}
 		if hasErr() {
 			break

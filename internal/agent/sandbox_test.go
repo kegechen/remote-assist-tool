@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -89,5 +90,83 @@ func TestUnsafeExecDropsExecLists(t *testing.T) {
 	}
 	if err := sb.CheckExec([]string{"curl"}); err != nil {
 		t.Fatalf("--unsafe-exec should drop the allow list, got %v", err)
+	}
+}
+
+// Windows 上文件名大小写不敏感且 `shutdown` 与 `shutdown.exe` 是同一个程序。
+// 归一化之前，deny 列表里的 "shutdown" 只拦裸名，`shutdown.exe` / `SHUTDOWN.EXE` /
+// 绝对路径写法全部放行——护栏在主平台上形同虚设。
+func TestExecPolicyDenyListNormalizesOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("扩展名/大小写归一化只在 Windows 生效")
+	}
+	sb := NewSandbox(SandboxConfig{DenyExec: []string{"rm", "shutdown"}})
+	for _, argv0 := range []string{
+		"shutdown.exe",
+		"SHUTDOWN.EXE",
+		"Shutdown.Exe",
+		`C:\Windows\System32\shutdown.exe`,
+	} {
+		if err := sb.CheckExec([]string{argv0, "/s"}); err == nil {
+			t.Errorf("expected deny for %q", argv0)
+		}
+	}
+}
+
+// 反向：allow 列表写 "git"，AI 按 Windows 习惯发来 git.exe 不该被误拒。
+func TestExecPolicyAllowListNormalizesOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("扩展名/大小写归一化只在 Windows 生效")
+	}
+	sb := NewSandbox(SandboxConfig{AllowExec: []string{"git", "go"}})
+	for _, argv0 := range []string{"git.exe", "GIT.EXE", `C:\Program Files\Git\cmd\git.exe`} {
+		if err := sb.CheckExec([]string{argv0, "status"}); err != nil {
+			t.Errorf("expected allow for %q, got %v", argv0, err)
+		}
+	}
+	if err := sb.CheckExec([]string{"curl.exe"}); err == nil {
+		t.Fatal("expected deny for curl.exe not in allowlist")
+	}
+}
+
+// 配置项本身带扩展名也应归一化，否则 --deny-exec shutdown.exe 拦不住裸 `shutdown`。
+func TestExecPolicyNormalizesConfigSide(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("扩展名/大小写归一化只在 Windows 生效")
+	}
+	sb := NewSandbox(SandboxConfig{DenyExec: []string{"Shutdown.EXE"}})
+	if err := sb.CheckExec([]string{"shutdown"}); err == nil {
+		t.Fatal("expected deny for shutdown when deny list spells it Shutdown.EXE")
+	}
+}
+
+// Unix 上大小写与扩展名都有意义，不能跟着归一化：foo.exe 与 foo 是两个不同的文件。
+func TestExecPolicyKeepsUnixSemantics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("仅验证非 Windows 语义")
+	}
+	sb := NewSandbox(SandboxConfig{DenyExec: []string{"rm"}})
+	if err := sb.CheckExec([]string{"RM"}); err != nil {
+		t.Fatalf("Unix 区分大小写，RM 不该被 rm 的 deny 规则命中，got %v", err)
+	}
+	if err := sb.CheckExec([]string{"rm.exe"}); err != nil {
+		t.Fatalf("Unix 上 rm.exe 是另一个文件，不该被 rm 的 deny 规则命中，got %v", err)
+	}
+}
+
+// root 内以两点开头的条目是合法的（k8s ConfigMap 挂载就长这样），
+// 不能被 HasPrefix(rel, "..") 误判成越界。
+func TestSandboxAllowsDotDotPrefixedNameInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	sb := NewSandbox(SandboxConfig{Root: root})
+	inside := filepath.Join(root, "..data", "cfg.txt")
+	if err := os.MkdirAll(filepath.Dir(inside), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inside, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sb.ResolvePath(inside); err != nil {
+		t.Fatalf("..data 在 root 内，应放行，got %v", err)
 	}
 }

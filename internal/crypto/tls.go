@@ -39,7 +39,16 @@ func NewTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 }
 
 // NewTLSClientConfig 创建客户端TLS配置
+//
+// skipVerify 与 caFile 互斥：crypto/tls 里 InsecureSkipVerify 的优先级高于 RootCAs，
+// 两者同时给出时整条证书链与域名校验都会被跳过，caFile 变成毫无作用的装饰品。
+// 与其静默吞掉调用方明确表达的校验意图，不如在这里 fail closed。调用方（cmd/remote）
+// 已在 flag 层做过调和，这里是最后一道防线。
 func NewTLSClientConfig(skipVerify bool, caFile string) (*tls.Config, error) {
+	if skipVerify && caFile != "" {
+		return nil, fmt.Errorf("refusing to build TLS config: --ca %q would be silently ignored because certificate verification is disabled; drop --ca or pass --insecure=false", caFile)
+	}
+
 	config := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: skipVerify,

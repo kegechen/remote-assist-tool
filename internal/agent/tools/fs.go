@@ -75,7 +75,14 @@ func (t *ListDirTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stre
 			}
 			return nil
 		}
-		info, _ := d.Info()
+		// Info() 在 Unix 上是惰性 lstat：条目在 ReadDir/WalkDir 之后被删除时返回
+		// (nil, ErrNotExist)。丢掉 err 直接 info.Size() 会 nil 解引用 panic，daemon 的
+		// recover 虽然兜住了进程，但整次调用会退化成 remote_panic 并丢光已收集的条目。
+		// list 一个正在跑构建的 target/ 或日志轮转目录就能撞上。
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
 		kind := "other"
 		switch {
 		case d.IsDir():
@@ -179,6 +186,14 @@ func (t *GlobTool) Run(ctx context.Context, raw json.RawMessage, _ agent.StreamS
 	}
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
+		// pattern 里的 ".." 会在 Join 时被一起 Clean 掉，绕过上面只针对 root 的那次校验
+		// （pattern:"../*.txt" 就能列出 root 外的条目）。这是本包里唯一一处"先校验再拼接"，
+		// list_dir/stat/grep 都是拼好再校验。逐个 match 补一次沙箱，让护栏行为一致——
+		// 注意 --root 本就只是防手滑护栏而非安全边界（见 Sandbox.ResolvePath 注释），
+		// 这里修的是"护栏漏了一个口子"，不是堵安全漏洞。
+		if _, err := t.sb.ResolvePath(m); err != nil {
+			continue
+		}
 		rel, _ := filepath.Rel(resolved, m)
 		out = append(out, rel)
 	}

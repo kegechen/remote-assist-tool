@@ -515,8 +515,13 @@ func (sm *SessionManager) CleanupExpired() []string {
 	var toClose []*ClientConn
 	for id, session := range sm.sessions {
 		if now.After(session.ExpiresAt) {
-			// 移除协助码映射，防止新的 help 通过过期码加入
-			delete(sm.byCode, session.Code)
+			// 移除协助码映射，防止新的 help 通过过期码加入。
+			// 与 deleteSessionLocked 一致做指针复核：no-auth 下 code 恒为 NoAuthCode，
+			// 后注册的 B 会顶掉 A 在 byCode 里的映射，此时 A 过期若无条件 delete，
+			// 抹掉的其实是指向 B 的条目——B 在线且未过期却从此 ErrCodeInvalid，且无日志可循。
+			if sm.byCode[session.Code] == session {
+				delete(sm.byCode, session.Code)
+			}
 
 			// 如果会话正在使用中（share 和 help 都在），保持连接
 			if session.Share != nil && session.Help != nil {

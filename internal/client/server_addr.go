@@ -31,7 +31,7 @@ func NormalizeServerAddr(addr string) string {
 // 才失败，报错完全指不到根因。relay 是裸 TCP/TLS，本来也没有 URL 一说。
 func ValidateServerAddr(addr string) error {
 	if i := strings.Index(addr, "://"); i >= 0 {
-		return fmt.Errorf("server 只接受 host:port，不能带 %q 这样的 URL scheme（relay 是裸 TCP/TLS，不是 HTTP）；例：server=\"113.44.139.100:8443\"", addr[:i+3])
+		return fmt.Errorf("server 只接受 host:port，不能带 %q 这样的 URL scheme（relay 是裸 TCP/TLS，不是 HTTP）；例：server=\"203.0.113.10:8443\"", addr[:i+3])
 	}
 	if strings.ContainsAny(addr, "/?#") {
 		return fmt.Errorf("server 只接受 host:port，不能带路径或查询串: %q", addr)
