@@ -135,6 +135,8 @@ ssh -p 2222 user@127.0.0.1
 ```
 
 > `--insecure` 默认 **true**：内置/standalone relay 使用自签证书，开箱即用。对接装有受信 CA 证书的 relay 时，请显式传 `--insecure=false` 启用证书校验。
+>
+> 跳过校验不等于没有身份认证：首次连上某个 relay 地址时会把它的证书指纹记到 `~/.remote_assist_known_hosts`（TOFU，同 SSH 的 known_hosts），之后指纹变了就拒连。relay 确实换过证书时加 `--trust-new-cert` 重新信任，或删掉文件里对应的那一行。连 `localhost` / `127.0.0.1` 不做钉扎（回环没有中间人可防，且本机上多个 relay 会共用同一个地址键）。
 
 ### 用法二：LAN 直连（standalone，无需外部服务器）
 
@@ -155,6 +157,8 @@ Help side connects exactly like a normal relay (no --plain needed):
 ```
 
 > standalone 自签证书只覆盖 `localhost`，LAN 场景请保持默认 `--insecure=true`（勿用 `--insecure=false`，会因证书 SAN 不含 LAN IP 而失败）。
+>
+> 该证书存放在 `~/.remote_assist_standalone_certs/`，跨次启动复用（临近过期才重新生成），这样 help 端的指纹钉扎才能稳定命中。删掉这个目录会换新证书，届时老的 help 端需要 `--trust-new-cert`。
 
 ### 用法三：Claude Code MCP 远程调试
 
@@ -265,6 +269,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--server` | `localhost:8443` | 中转服务器地址（也可用环境变量 `REMOTE_RELAY_SERVER` 覆盖） |
 | `--insecure` | `true` | 跳过 TLS 校验（自签 relay 用；对接受信 CA relay 改 `false`） |
 | `--ca` | - | CA 证书文件 |
+| `--trust-new-cert` | `false` | 接受与首次连接时不一致的 relay 证书指纹并重新记录（relay 确实换了证书时用） |
 | `--ssh` | `127.0.0.1:22` | 本地 SSH 地址（SSH 隧道模式） |
 | `--new-instance` | `false` | 额外启动独立 share；生成新协助码且不影响默认实例 |
 | `--p2p` | `auto` | P2P 模式：`disabled` / `auto` / `required` |
@@ -288,6 +293,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--code` | - | 协助码（SSH/直连模式必填；MCP bootstrap 模式留空，由 `connect` 工具提供） |
 | `--insecure` | `true` | 跳过 TLS 校验（同 share） |
 | `--ca` | - | CA 证书文件 |
+| `--trust-new-cert` | `false` | 同 share |
 | `--listen` | `127.0.0.1:2222` | 本地监听地址（SSH 隧道模式） |
 | `--p2p` | `auto` | P2P 模式：`disabled` / `auto` / `required` |
 | `--stun` | - | STUN 服务地址 |
@@ -313,7 +319,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 ## 安全特性
 
-- relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。
+- relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。跳过校验时退化为 TOFU 指纹钉扎（`~/.remote_assist_known_hosts`），把中间人窗口从「永远」压到「仅首次连接」；回环地址不钉扎。
 - MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 仅转发密文，看不见也无法伪造工具内容。
 - 协助码：安全随机生成（54 字符集 × 10 位，去除易混淆字符），默认 30 分钟过期。
 - **信任边界是协助码**：share 由本机用户主动发起，码交给谁，就等于把这台机器交给谁。`--root` / exec 名单是防手滑的护栏，不是对抗恶意方的边界 —— exec 可跑任意程序，一句 `sh -c 'cp /etc/passwd <root>/'` 即可绕过 `--root`。需要真隔离请在进程外面套（容器 / 专用低权限账号）。

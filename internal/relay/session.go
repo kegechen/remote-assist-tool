@@ -2,11 +2,13 @@ package relay
 
 import (
 	"crypto/rand"
+	"encoding/base32"
 	"errors"
 	"io"
 	"log"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -140,8 +142,24 @@ func (sm *SessionManager) createSession(code string, share *ClientConn, ttl time
 	}
 
 	now := time.Now()
+	// 唯一性由插入点保证，而不是靠"128 bit 不会撞"这句断言：sessions/byCode/byConnID
+	// 三张表都是覆盖写，一旦撞键就是把另一条在线会话悄悄挤掉，没有任何日志。
+	sessionID := generateSessionID()
+	for {
+		if _, taken := sm.sessions[sessionID]; !taken {
+			break
+		}
+		log.Printf("Session ID collision on %s, regenerating", sessionID)
+		sessionID = generateSessionID()
+	}
+	if prev, taken := sm.byCode[code]; taken {
+		// --no-auth 下 code 是固定常量，后注册顶掉前一个是已知限制（见 proto.NoAuthCode
+		// 的注释）。但至少要留一行日志，否则被顶掉的那端只会表现为莫名其妙的 invalid code。
+		log.Printf("Session code %s already registered (session %s), overwriting with %s",
+			code, prev.ID, sessionID)
+	}
 	session := &TunnelSession{
-		ID:          generateSessionID(),
+		ID:          sessionID,
 		Code:        code,
 		Share:       share,
 		CreatedAt:   now,
@@ -568,9 +586,9 @@ func (sm *SessionManager) CleanupExpired() []string {
 	return expired
 }
 
-// generateSessionID 生成会话ID
+// generateSessionID 生成会话ID。保留时间戳段便于排障，随机段是 128 bit（见 idRandomBytes）。
 func generateSessionID() string {
-	return "ses_" + time.Now().Format("20060102150405") + "_" + randomString(8)
+	return "ses_" + time.Now().Format("20060102150405") + "_" + randomToken(idRandomBytes)
 }
 
 // PeerAddrUpdate contains the result of a peer address update
@@ -673,4 +691,23 @@ func randomString(n int) string {
 		b[i] = charset[num.Int64()]
 	}
 	return string(b)
+}
+
+// idRandomBytes 连接 ID / 会话 ID 随机部分的字节数。
+//
+// 这两个 ID 不只是日志标识：连接 ID 是 byConnID 的唯一路由键（FindPeer/UpdatePeerAddr
+// 全靠它决定把 tunnel_data、tool_resp 投给谁），会话 ID 还兼作 P2P 打洞与 UDP relay 的
+// 准入凭据。原先的 randomString(6)/randomString(8) 只有 36^6≈2^31 / 36^8≈2^41，碰撞后
+// 两条互不相干的会话会共用一个路由键，数据被投错人。128 bit 把碰撞从"打满几小时就有
+// 期望命中"变成不可能。
+const idRandomBytes = 16
+
+// randomToken 返回 n 字节 crypto/rand 的小写 base32（无填充）。
+// base32 而非 hex：同样的熵少 20% 字符，且字符集与既有 ID 一样是小写字母数字。
+func randomToken(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 }

@@ -45,6 +45,12 @@ type Config struct {
 	P2PMode      string // "disabled", "auto", "required"
 	STUNServer   string // STUN server address for P2P
 	BindIP       string // 手动指定绑定 IP，为空则自动检测
+
+	// TrustNewCert 对应 --trust-new-cert：relay 证书指纹与首次连接时不一致也接受，
+	// 并覆盖记录。只在 InsecureSkip（默认）路径下有意义，见 crypto/tofu.go。
+	TrustNewCert bool
+	// trustStore 仅供测试注入自定义指纹表位置；零值走 ~/.remote_assist_known_hosts。
+	trustStore *crypto.TrustStore
 }
 
 // relayDesc 描述实际连上的 relay：地址 + 传输方式。
@@ -62,6 +68,26 @@ func relayDesc(cfg *Config) string {
 		}
 	}
 	return fmt.Sprintf("%s (%s)", cfg.ServerAddr, mode)
+}
+
+// logPinResult 把 TOFU 的结果打成一行。
+//
+// 只有「首次学习」和「显式换证书」值得打——匹配是常态，每次连接刷一行只会让人学会
+// 忽略它，真出事那天也照样忽略。指纹只取前 16 个 hex（64 bit），够人肉核对，又不至于
+// 让一行日志变成两行。
+func logPinResult(addr string) func(crypto.PinResult, string) {
+	return func(r crypto.PinResult, fp string) {
+		short := fp
+		if len(short) > 16 {
+			short = short[:16]
+		}
+		switch r {
+		case crypto.PinLearned:
+			log.Printf("已记住 %s 的 relay 证书指纹 %s…（首次连接）。此后指纹变化将被拒绝。", addr, short)
+		case crypto.PinReplaced:
+			log.Printf("已按 --trust-new-cert 更新 %s 的 relay 证书指纹为 %s…", addr, short)
+		}
+	}
 }
 
 // Client 基础客户端
@@ -93,7 +119,7 @@ func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.closed = false // 允许 Close 后重新连接
+	c.closed = false               // 允许 Close 后重新连接
 	c.hbStop = make(chan struct{}) // 新一代连接：上一代的 hbStop 已在 Close 里关闭
 
 	var conn net.Conn
@@ -102,7 +128,14 @@ func (c *Client) Connect() error {
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	if c.config.UseTLS {
 		var tlsConfig *tls.Config
-		tlsConfig, err = crypto.NewTLSClientConfig(c.config.InsecureSkip, c.config.CAFile)
+		tlsConfig, err = crypto.NewClientTLSConfig(crypto.ClientTLSOptions{
+			SkipVerify:   c.config.InsecureSkip,
+			CAFile:       c.config.CAFile,
+			PinAddr:      c.config.ServerAddr,
+			TrustNewCert: c.config.TrustNewCert,
+			TrustStore:   c.config.trustStore,
+			OnPin:        logPinResult(c.config.ServerAddr),
+		})
 		if err != nil {
 			return fmt.Errorf("failed to create TLS config: %w", err)
 		}

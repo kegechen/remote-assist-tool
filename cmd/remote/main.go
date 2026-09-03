@@ -24,6 +24,33 @@ import (
 // detectLANIPv4 找一个 non-loopback、non-down 的 IPv4 私网地址（用于 standalone 模式
 // 提示用户告诉 Claude 哪个地址）。优先返回 192.168.* / 10.* / 172.16-31.*；
 // 找不到私网地址时回退到第一个非环回 IPv4。空字符串表示完全找不到 IPv4。
+// standaloneCertDirName standalone relay 自签证书的固定存放目录名（位于用户主目录下）。
+const standaloneCertDirName = ".remote_assist_standalone_certs"
+
+// standaloneCertDir 返回 standalone relay 自签证书的存放目录，以及一个清理函数。
+//
+// 用固定路径而不是 os.MkdirTemp：证书指纹钉扎（TOFU，见 internal/crypto/tofu.go）要求
+// 同一个 relay 地址的证书跨进程稳定，每次启动换一张新证书会让 LAN 上的 help 端第二次
+// 会话必然撞上「指纹变了」而拒连。固定路径也更贴合 0dac99c 里「避免残留」的本意——
+// 它就一份，不随运行次数累积，异常退出也没有需要兜底清理的东西（cleanup 是空操作）。
+//
+// 拿不到主目录时退回临时目录并保留清理逻辑：此时钉扎在该地址上会反复重新学习，属于
+// 可接受的降级，总好过起不来。
+func standaloneCertDir() (string, func(), error) {
+	noop := func() {}
+	if home, err := os.UserHomeDir(); err == nil {
+		dir := filepath.Join(home, standaloneCertDirName)
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			return dir, noop, nil
+		}
+	}
+	dir, err := os.MkdirTemp("", "remote-standalone-certs-")
+	if err != nil {
+		return "", noop, err
+	}
+	return dir, func() { os.RemoveAll(dir) }, nil
+}
+
 func detectLANIPv4() string {
 	ifaces, _ := net.Interfaces()
 	var fallback string
@@ -94,6 +121,7 @@ func runShare(args []string) {
 	newInstance := fs.Bool("new-instance", false, "Start an additional independent share with a new assist code")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
+	trustNewCert := fs.Bool("trust-new-cert", false, "Accept a relay certificate whose fingerprint differs from the one recorded on first connect, and re-pin it. Use after the relay legitimately regenerated its cert.")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
@@ -231,16 +259,20 @@ func runShare(args []string) {
 			fmt.Fprintln(os.Stderr, "standalone mode: ignoring --plain; embedded relay uses TLS with a self-signed cert so the help side needs no special flag")
 			*plain = false
 		}
-		certDir, err := os.MkdirTemp("", "remote-standalone-certs-")
+		certDir, cleanupCerts, err := standaloneCertDir()
 		if err != nil {
-			log.Fatalf("standalone: create temp cert dir failed: %v", err)
+			log.Fatalf("standalone: prepare cert dir failed: %v", err)
 		}
-		defer os.RemoveAll(certDir)
+		defer cleanupCerts()
 		certFile := filepath.Join(certDir, "server.crt")
 		keyFile := filepath.Join(certDir, "server.key")
-		if err := crypto.GenerateSelfSignedCert(certFile, keyFile); err != nil {
-			os.RemoveAll(certDir) // log.Fatalf 会 os.Exit 跳过 defer，手动兜底清理
+		fresh, err := crypto.LoadOrCreateSelfSignedCert(certFile, keyFile)
+		if err != nil {
+			cleanupCerts() // log.Fatalf 会 os.Exit 跳过 defer，手动兜底清理
 			log.Fatalf("standalone: generate self-signed cert failed: %v", err)
+		}
+		if fresh {
+			fmt.Fprintf(os.Stderr, "standalone: 已在 %s 生成自签证书；此前连过本机的 help 端会看到「指纹变了」，需要加 --trust-new-cert 重新信任。\n", certDir)
 		}
 		relayCfg := &relay.Config{
 			ListenAddr:     *standaloneListen,
@@ -258,12 +290,12 @@ func runShare(args []string) {
 		}
 		relaySrv, err := relay.NewServer(relayCfg)
 		if err != nil {
-			os.RemoveAll(certDir) // log.Fatalf 会 os.Exit 跳过 defer，手动兜底清理
+			cleanupCerts() // log.Fatalf 会 os.Exit 跳过 defer，手动兜底清理
 			log.Fatalf("standalone relay init failed: %v", err)
 		}
 		go func() {
 			if err := relaySrv.StartWithContext(context.Background()); err != nil {
-				os.RemoveAll(certDir) // 后台 goroutine 内 log.Fatalf 直接 os.Exit，主 goroutine 的 defer 不会执行，手动兜底清理
+				cleanupCerts() // 后台 goroutine 内 log.Fatalf 直接 os.Exit，主 goroutine 的 defer 不会执行，手动兜底清理
 				log.Fatalf("standalone relay error: %v", err)
 			}
 		}()
@@ -314,6 +346,7 @@ func runShare(args []string) {
 		P2PMode:      *p2pMode,
 		STUNServer:   *stunServer,
 		BindIP:       *bindIP,
+		TrustNewCert: *trustNewCert,
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
@@ -332,6 +365,7 @@ func runHelp(args []string) {
 	listenAddr := fs.String("listen", "127.0.0.1:2222", "Local listen address")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
 	caFile := fs.String("ca", "", "CA certificate file")
+	trustNewCert := fs.Bool("trust-new-cert", false, "Accept a relay certificate whose fingerprint differs from the one recorded on first connect, and re-pin it. Use after the relay legitimately regenerated its cert.")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
@@ -396,6 +430,7 @@ func runHelp(args []string) {
 		P2PMode:      *p2pMode,
 		STUNServer:   *stunServer,
 		BindIP:       *bindIP,
+		TrustNewCert: *trustNewCert,
 	}
 
 	if *mcpStdio {

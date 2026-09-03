@@ -451,9 +451,6 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 	}
 
-	log.Printf("New connection from %s (client_id: %s, version: pending)", clientIP, clientID)
-	logger.LogConnection(clientIP, clientID, true, "客户端已连接")
-
 	wrapped := &connWrapper{Conn: conn}
 
 	client := &ClientConn{
@@ -462,9 +459,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		Send: make(chan []byte, 100),
 	}
 
-	s.clientsMu.Lock()
-	s.clients[clientID] = client
-	s.clientsMu.Unlock()
+	// 先登记再打日志：撞键时 registerClient 会换一个 ID，日志里必须是最终生效的那个，
+	// 否则运维拿着日志里的 ID 在 byConnID 里根本查不到这条连接。
+	clientID = s.registerClient(client)
+
+	log.Printf("New connection from %s (client_id: %s, version: pending)", clientIP, clientID)
+	logger.LogConnection(clientIP, clientID, true, "客户端已连接")
 
 	defer func() {
 		s.clientsMu.Lock()
@@ -938,8 +938,27 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 	}
 }
 
+// generateClientID 生成连接 ID。保留时间戳段便于排障，随机段是 128 bit（见 idRandomBytes）。
 func generateClientID() string {
-	return "cli_" + time.Now().Format("20060102150405") + "_" + randomString(6)
+	return "cli_" + time.Now().Format("20060102150405") + "_" + randomToken(idRandomBytes)
+}
+
+// registerClient 把连接登记进 clients 表，返回最终生效的连接 ID。
+//
+// 连接 ID 是 byConnID 的唯一路由键，撞键意味着两条互不相干的会话共用一条路由——A 的
+// tunnel_data / tool_resp 会被投给 B，任一方断开还会连带打掉另一方。所以唯一性在插入点
+// 兜住，而不是靠 ID 长度做概率论断言。
+func (s *Server) registerClient(client *ClientConn) string {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+	for {
+		if _, taken := s.clients[client.ID]; !taken {
+			s.clients[client.ID] = client
+			return client.ID
+		}
+		log.Printf("Client ID collision on %s, regenerating", client.ID)
+		client.ID = generateClientID()
+	}
 }
 
 // connWrapper 包装net.Conn
