@@ -97,9 +97,13 @@ type STUNServer struct {
 	// invalidPktCount 无效/超长 relay 包计数，用于采样日志（不逐包写日志）。原子访问。
 	invalidPktCount uint64
 
-	// dataSessionValidator 数据面准入校验器，由 relay 层在构造时注入（IsActiveDataSession）。
+	// dataSessionValidator 数据面准入校验器，由 relay 层在构造时注入（IsActiveDataSource）。
+	//
+	// 签名里带 srcIP 是有意为之：只校验 sessionID 会让 relay 槽位变成先到先得，
+	// 拿到 sessionID 的第三方抢先占一端即可中间人或黑洞。带上来源后由控制面回答
+	// 「这个 IP 是不是该会话的端点」。
 	// nil 表示禁用 UDP relay，仅保留 STUN binding。在 serve() 启动前设定，之后只读。
-	dataSessionValidator func(sessionID string) bool
+	dataSessionValidator func(sessionID string, srcIP net.IP) bool
 
 	// Worker 池：固定 goroutine 从 taskQueue 取任务处理，避免每包一个 goroutine。
 	taskQueue        chan stunTask
@@ -128,12 +132,12 @@ func NewSTUNServer(addr string) (*STUNServer, error) {
 
 // NewSTUNServerWithValidator 创建带数据面准入校验器的 STUN 服务器。
 // validator 在 serve() goroutine 启动前设定，避免与读循环产生数据竞态。
-func NewSTUNServerWithValidator(addr string, validator func(sessionID string) bool) (*STUNServer, error) {
+func NewSTUNServerWithValidator(addr string, validator func(sessionID string, srcIP net.IP) bool) (*STUNServer, error) {
 	return NewSTUNServerWithValidatorAndLimits(addr, validator, DefaultLimits())
 }
 
 // NewSTUNServerWithValidatorAndLimits 创建使用指定运营阈值的 STUN/UDP relay。
-func NewSTUNServerWithValidatorAndLimits(addr string, validator func(sessionID string) bool, limits Limits) (*STUNServer, error) {
+func NewSTUNServerWithValidatorAndLimits(addr string, validator func(sessionID string, srcIP net.IP) bool, limits Limits) (*STUNServer, error) {
 	limits = normalizeLimits(limits)
 	if err := ValidateLimits(limits); err != nil {
 		return nil, err
@@ -362,7 +366,8 @@ func (s *STUNServer) handleRelayPacket(data []byte, fromAddr *net.UDPAddr) {
 	}
 
 	// 快速预检减少无效包进入 relayMu；锁内还会复检并作为准入线性化点。
-	if s.dataSessionValidator == nil || !s.dataSessionValidator(sessionID) {
+	// 校验同时覆盖「会话活跃」与「来源属于该会话」，两者缺一都不足以准入。
+	if s.dataSessionValidator == nil || !s.dataSessionValidator(sessionID, fromAddr.IP) {
 		s.logSampledInvalidPacket(fromAddr, "inactive_data_session")
 		return
 	}
@@ -370,7 +375,7 @@ func (s *STUNServer) handleRelayPacket(data []byte, fromAddr *net.UDPAddr) {
 	s.relayMu.Lock()
 	// 以 relayMu 内的复检作为准入线性化点。控制面从不持 sm.mu 调用 STUN，
 	// 因此固定 relayMu -> sm.RLock 不会形成锁反转。
-	if !s.dataSessionValidator(sessionID) {
+	if !s.dataSessionValidator(sessionID, fromAddr.IP) {
 		s.relayMu.Unlock()
 		s.logSampledInvalidPacket(fromAddr, "inactive_data_session_recheck")
 		return

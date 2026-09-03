@@ -56,7 +56,7 @@ func TestParseRelayHeaderSidLenBounds(t *testing.T) {
 // startTestSTUN 启动一个监听随机端口的 STUNServer，返回它与其地址。
 func startTestSTUN(t *testing.T) (*STUNServer, *net.UDPAddr) {
 	t.Helper()
-	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string) bool { return true })
+	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string, net.IP) bool { return true })
 	if err != nil {
 		t.Fatalf("NewSTUNServer: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRelayValidatorRecheckedBeforeCreate(t *testing.T) {
 	active := true
 	var mu sync.Mutex
 	calls := 0
-	validator := func(string) bool {
+	validator := func(string, net.IP) bool {
 		mu.Lock()
 		calls++
 		call := calls
@@ -118,7 +118,7 @@ func TestRelayValidatorRecheckedBeforeCreate(t *testing.T) {
 }
 
 func TestRelayStateLimitAndInvalidateRelease(t *testing.T) {
-	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string) bool { return true })
+	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string, net.IP) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestRelayStateLimitAndInvalidateRelease(t *testing.T) {
 }
 
 func TestRelayPerSessionLimitDoesNotConsumeGlobalBudget(t *testing.T) {
-	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string) bool { return true })
+	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string, net.IP) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestRelayPerSessionLimitDoesNotConsumeGlobalBudget(t *testing.T) {
 }
 
 func TestRelayInvalidateAndCloseReleaseCountsIdempotently(t *testing.T) {
-	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string) bool { return true })
+	s, err := NewSTUNServerWithValidator("127.0.0.1:0", func(string, net.IP) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}

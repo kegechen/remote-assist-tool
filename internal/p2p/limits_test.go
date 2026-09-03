@@ -1,6 +1,9 @@
 package p2p
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
 
 func TestSTUNCustomLimitsApplied(t *testing.T) {
 	limits := DefaultLimits()
@@ -8,7 +11,7 @@ func TestSTUNCustomLimitsApplied(t *testing.T) {
 	limits.TaskQueueDepth = 7
 	limits.MaxRelaySessionsTotal = 3
 	limits.InvalidLogSampleEvery = 1
-	s, err := NewSTUNServerWithValidatorAndLimits("127.0.0.1:0", func(string) bool { return true }, limits)
+	s, err := NewSTUNServerWithValidatorAndLimits("127.0.0.1:0", func(string, net.IP) bool { return true }, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +24,7 @@ func TestSTUNCustomLimitsApplied(t *testing.T) {
 func TestSTUNRejectsInvalidLimitsBeforeListen(t *testing.T) {
 	limits := DefaultLimits()
 	limits.WorkerCount = -1
-	if _, err := NewSTUNServerWithValidatorAndLimits("127.0.0.1:0", func(string) bool { return true }, limits); err == nil {
+	if _, err := NewSTUNServerWithValidatorAndLimits("127.0.0.1:0", func(string, net.IP) bool { return true }, limits); err == nil {
 		t.Fatal("非法 worker_count 应被拒绝")
 	}
 }

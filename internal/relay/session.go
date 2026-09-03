@@ -404,6 +404,74 @@ func (sm *SessionManager) IsActiveDataSession(sessionID string) bool {
 		session.dataPlaneReady
 }
 
+// IsActiveDataSource 在 IsActiveDataSession 之上追加来源校验：srcIP 必须是该会话某一端
+// 已知的地址。供 STUN/UDP relay 做准入。
+//
+// 为什么需要：只问「会话是否活跃」等于把 UDP relay 的槽位做成先到先得——任何拿到
+// sessionID 的第三方抢先发一个包就能占住一端，之后合法端的数据全被转给它（中间人），
+// 或者占满两槽把会话变黑洞。sessionID 会被主动喷洒到对端公网 IP 的一批端口上，并非秘密。
+//
+// 只比 IP 不比端口：对称 NAT 下每个目的地对应不同的外部端口，45f72ff 里「按 IP 重匹配、
+// 更新端口」正是为此而加，比端口会把它打回原形。收紧到 IP 已经挡掉全部离路径攻击者，
+// 剩下的同 IP（同一 NAT 出口）攻击面需要 relay-token 才能覆盖，那要改 relay 头部格式。
+func (sm *SessionManager) IsActiveDataSource(sessionID string, srcIP net.IP) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, ok := sm.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	if session.closed ||
+		session.Share == nil || !session.shareReady ||
+		session.Help == nil || session.pendingHelpID != "" ||
+		!session.dataPlaneReady {
+		return false
+	}
+	if srcIP == nil {
+		return false
+	}
+	return sessionKnowsIPLocked(session, srcIP)
+}
+
+// sessionKnowsIPLocked 判断 srcIP 是否属于会话任一端。调用方须持 sm.mu（读锁即可）。
+//
+// 三个来源都算数：STUN 反射得到的公网地址、对端自报的私网地址（两端同 LAN 时 relay
+// 看到的就是它），以及 relay 自己观测到的 TCP 源 IP。最后一个不依赖对端自报，是通告
+// 尚未到达时唯一可用的凭据，handlePeerAddrAdvertise 的公网地址回退用的也是它。
+func sessionKnowsIPLocked(session *TunnelSession, srcIP net.IP) bool {
+	candidates := []string{
+		session.SharePublicAddr, session.SharePrivateAddr,
+		session.HelpPublicAddr, session.HelpPrivateAddr,
+	}
+	if session.Share != nil && session.Share.Conn != nil {
+		candidates = append(candidates, session.Share.Conn.RemoteAddr())
+	}
+	if session.Help != nil && session.Help.Conn != nil {
+		candidates = append(candidates, session.Help.Conn.RemoteAddr())
+	}
+	for _, c := range candidates {
+		if hostMatchesIP(c, srcIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostMatchesIP 比较 "host:port"（或裸 host）里的 IP 与 srcIP。解析不出 IP 的一律不匹配：
+// 通告字段是对端自报的，允许域名只会把校验变成可绕过的摆设。
+func hostMatchesIP(hostPort string, srcIP net.IP) bool {
+	if hostPort == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		host = hostPort
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.Equal(srcIP)
+}
+
 // decrementSessionCountLocked 减少 shareIP 的会话计数。调用方须持 sm.mu。
 func (sm *SessionManager) decrementSessionCountLocked(shareIP string) {
 	if shareIP == "" {

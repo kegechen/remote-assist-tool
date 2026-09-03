@@ -32,6 +32,8 @@ share/help 未显式设置 `--stun` 时，会先尝试 `Relay主机:3478`；失�
 - P2P 直连成功时使用 UDP 直连；失败时 `--p2p=auto` 回退 TCP relay。
 - 当前客户端内部仍复用一个地址表示 STUN discovery 和自定义 UDP relay。不要把公共 STUN 当作自定义 relay 部署；显式拆分两个地址属于后续协议改造。
 - 只有确实需要自建 STUN/UDP relay，且已开放、防火墙和监控 UDP 3478 时，才配置 Relay `--stun=:3478`。
+- UDP relay 的准入要同时满足两条：会话数据面已就绪，且 UDP 包的**来源 IP 属于该会话两端之一**（STUN 反射得到的公网地址、对端自报的私网地址、或 relay 观测到的 TCP 源 IP）。只比 IP 不比端口，对称 NAT 换端口仍然可用。
+- 残留风险：与合法端共用同一出口 IP（同一 NAT 之后）的攻击者若掌握 sessionID，仍可能抢占槽位。彻底封堵需要控制面下发 relay-token 并改 relay 头部格式，属于后续协议改造。
 
 ## 3. 限流配置文件
 

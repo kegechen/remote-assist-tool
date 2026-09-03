@@ -229,7 +229,7 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 	if s.config.STUNListenAddr != "" {
 		var err error
 		// 注入数据面准入校验：STUN relay 只为控制面就绪的会话创建/刷新 UDP 状态。
-		s.stunServer, err = p2p.NewSTUNServerWithValidatorAndLimits(s.config.STUNListenAddr, s.sessions.IsActiveDataSession, s.limits.UDP)
+		s.stunServer, err = p2p.NewSTUNServerWithValidatorAndLimits(s.config.STUNListenAddr, s.sessions.IsActiveDataSource, s.limits.UDP)
 		if err != nil {
 			log.Printf("Warning: failed to start STUN server: %v", err)
 		} else {
