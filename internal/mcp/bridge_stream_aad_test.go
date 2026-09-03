@@ -124,3 +124,44 @@ func TestBridgeAlwaysSealsArgs(t *testing.T) {
 		t.Fatalf("result=%s", out)
 	}
 }
+
+// TestBridgeRejectsGapFillingEmptyChunk 丢帧检测不能建立在未经认证的帧上。
+//
+// 旧代码 HandleInbound 先 observe(c.Seq) 再解密，且"len(data) > 0 才解密"。于是攻击者
+// （或任何能改流量的中间人）只要把真帧 N 丢掉、补一条 {seq:N, data:空} 的伪造帧，
+// observe 就把这个空洞从 missing 里删掉，最终 settledGapCount() 返回 0，一份被挖空
+// 的输出以 OK 交给调用方——恰好是 streamRecv 要防的那件事。
+//
+// 加封侧对空 data 也会产出非空密文，所以握手后线上不存在合法的空帧：解不开就算损坏。
+func TestBridgeRejectsGapFillingEmptyChunk(t *testing.T) {
+	conn := &stubConn{sent: make(chan *proto.Message, 4)}
+	br := NewBridge(conn, streamKey)
+
+	go func() {
+		req := <-conn.sent
+		var r proto.ToolReq
+		proto.DecodePayload(req, &r)
+		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "a"))
+		// 真帧 seq=1 被丢弃，替换成一条空 Data 的伪造帧。
+		m, _ := proto.NewMessage(proto.MsgToolStream, &proto.StreamChunk{ID: r.ID, Seq: 1, Stream: "stdout"})
+		br.HandleInbound(m)
+		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "c"))
+		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
+	}()
+
+	var mu sync.Mutex
+	var got string
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := br.CallToolStream(ctx, "exec", json.RawMessage(`{"argv":["x"],"stream":true}`),
+		func(_ string, data []byte) { mu.Lock(); got += string(data); mu.Unlock() })
+
+	if err == nil {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("空帧补洞后整次调用仍被判为完整，输出=%q", got)
+	}
+	if !strings.Contains(err.Error(), "stream_incomplete") {
+		t.Fatalf("应报 stream_incomplete，实际: %v", err)
+	}
+}

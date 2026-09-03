@@ -172,10 +172,15 @@ func (d *Daemon) Inject(msg *proto.Message) {
 		// 解出 req.ID 回一条 server_busy 错误，让调用方立即快速失败。
 		// Inject 必须保持非阻塞（见函数头注释）——sendMsg 可能阻塞（受写超时限最多 ~30s），
 		// 故放 goroutine 发，绝不阻塞 share 端主 dispatch 读循环 / 心跳。
+		//
+		// 必须走 sendResp 而不是裸 sendMsg：握手后 host 要求每条响应都带密文
+		// （明文的 ok/error_code 无从认证），裸发的 server_busy 会被判成
+		// unauthenticated，真正的原因「daemon 过载」就此丢失，排障时只看得到
+		// 一条误导人的鉴权错误。
 		if msg.Type == proto.MsgToolReq {
 			var req proto.ToolReq
 			if err := proto.DecodePayload(msg, &req); err == nil {
-				go d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "server_busy", ErrorMsg: "daemon inbound full"})
+				go d.sendResp(d.currentKey(), proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "server_busy", ErrorMsg: "daemon inbound full"})
 			}
 		}
 		log.Printf("daemon: inbound full, dropping %s", msg.Type)

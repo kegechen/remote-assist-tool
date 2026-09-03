@@ -259,3 +259,44 @@ func TestSealedRespPlainChannelStaysPlain(t *testing.T) {
 		t.Fatal("无响应")
 	}
 }
+
+// TestBusyRespIsSealed Inject 缓冲满时回的 server_busy 也必须加封。
+// 这条路径绕开了 handleReq（请求根本没进 daemon），最容易在收紧响应认证时被漏掉：
+// host 侧现在「key 非零就要求响应带密文」，裸发的 server_busy 会被判成
+// unauthenticated，运维看到的是一条误导人的鉴权错误，而不是真正的「daemon 过载」。
+func TestBusyRespIsSealed(t *testing.T) {
+	out := make(chan *proto.Message, 4)
+	r := NewRegistry()
+	r.Register(&countingTool{name: "probe"})
+	key := proto.DeriveSessionKey("ABCD-2345", "nonceA", "nonceB")
+	// 故意不起 RunLoop：没人消费 inbound，塞满即触发 default 分支。
+	d := NewDaemon(r, &fakeConn{in: make(chan *proto.Message, 4), out: out}, key)
+
+	msg, err := proto.NewMessage(proto.MsgToolReq, &proto.ToolReq{ID: 42, Tool: "probe", ArgsJSON: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < cap(d.inbound); i++ {
+		d.Inject(msg)
+	}
+	d.Inject(msg) // 第 65 条：缓冲已满
+
+	select {
+	case got := <-out:
+		var resp proto.ToolResp
+		if err := proto.DecodePayload(got, &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.ErrorCode != "server_busy" {
+			t.Fatalf("期望 server_busy，得到 %+v", resp)
+		}
+		if len(resp.ResultJSON) == 0 {
+			t.Fatal("server_busy 响应未加封，host 会把它判成 unauthenticated 并丢掉真正的原因")
+		}
+		if _, err := proto.AEADOpenJSON(&key, resp.ResultJSON, proto.ToolRespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg)); err != nil {
+			t.Fatalf("server_busy 响应的 AAD 未绑定自身明文字段: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("缓冲满时没有回 server_busy")
+	}
+}

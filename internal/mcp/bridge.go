@@ -360,18 +360,28 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			return
 		}
 		recv := v.(*streamRecv)
-		recv.observe(c.Seq)
 		data := c.Data
-		if _, key := b.snapshot(); key != [32]byte{} && len(data) > 0 {
+		if _, key := b.snapshot(); key != [32]byte{} {
+			// 必须先验真再 observe。observe 会把 Seq 记成"这一帧到了"，还会把先前
+			// 登记的空洞删掉——放一条未经认证的帧进去，等于把丢帧检测交给攻击者：
+			// 丢掉真帧 N、补一条 {seq:N, data:空} 的伪造帧，空洞就被抹平，一份被挖空
+			// 的输出会以 OK 返回，而这正是 streamRecv 存在的理由。
+			//
+			// 空 Data 同样按损坏处理，不能像以前那样"len>0 才解密"直接放行：
+			// 加封侧对空 data 也会产出非空密文（AEADSeal 至少带 nonce+tag），
+			// 所以握手后线上不存在合法的空帧。
 			plain, err := proto.AEADOpen(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
 			if err != nil {
-				// 帧损坏/换了 key：这一帧的内容没了，但后续帧与最终 ToolResp 不受影响。
-				// 记成一个空洞，由 callToolInner 在收尾时把整次调用判为不完整。
+				// 帧损坏/换了 key/伪造：这一帧的内容没了，但后续帧与最终 ToolResp 不受
+				// 影响。仍然 observe（否则同一个 Seq 之后会被再算成一个空洞，重复计数），
+				// 另记一笔 damaged，由 callToolInner 在收尾时把整次调用判为不完整。
+				recv.observe(c.Seq)
 				recv.markDamaged()
 				return
 			}
 			data = plain
 		}
+		recv.observe(c.Seq)
 		if len(data) > 0 {
 			recv.cb(c.Stream, data)
 		}
