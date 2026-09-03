@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,12 +57,74 @@ type Bridge struct {
 	key       [32]byte
 	nextID    uint64
 	pending   sync.Map    // id -> chan proto.ToolResp
-	streamCbs sync.Map    // id -> func(stream string, data []byte)，仅流式调用登记
+	streamCbs sync.Map    // id -> *streamRecv，仅流式调用登记
 	closed    atomic.Bool // 隧道断开后置 true，CallTool 立即快速失败
 	closeMu   sync.Mutex  // 串行化 Disconnect，避免重复广播
 }
 
-func NewBridge(c MsgConn, key [32]byte) *Bridge { return &Bridge{conn: c, key: key} }
+// streamRecv 一次流式调用的接收状态：回调 + Seq 连续性。
+//
+// StreamChunk.Seq 以前是只写不读的：share 端每帧递增，help 端从来不看。于是任何一处丢帧
+// （relay 限流丢弃、AEAD 解密失败）都表现为"输出中间静静少了几 KB，最终 ToolResp 仍然
+// OK"——调用方拿到一份看起来完整、实际被挖空的结果。这里补上校验：一旦发现空洞就记下，
+// 调用结束时把整次调用判为失败，宁可报错也不交出残缺输出。
+type streamRecv struct {
+	cb func(stream string, data []byte)
+
+	mu   sync.Mutex
+	next uint32 // 期望的下一个 Seq（share 端 chunkSink 从 0 开始）
+	gaps int    // 累计缺失的帧数
+}
+
+// observe 记录一帧的 Seq 并返回是否发现空洞。乱序不会发生（同一条隧道的读循环单线程
+// 投递，P2P 与 relay 之间的切换也是原子换连接），所以 Seq != next 即视为丢帧。
+// 小于 next 的（重复/滞后帧）不计入缺失，也不回退期望值。
+func (s *streamRecv) observe(seq uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if seq < s.next {
+		return
+	}
+	if seq > s.next {
+		s.gaps += int(seq - s.next)
+	}
+	s.next = seq + 1
+}
+
+// markGap 用于"帧到了但内容用不了"的情况（AEAD 解密失败）：Seq 是连续的，但数据丢了。
+func (s *streamRecv) markGap() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gaps++
+}
+
+func (s *streamRecv) gapCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gaps
+}
+
+func NewBridge(c MsgConn, key [32]byte) *Bridge {
+	return &Bridge{conn: c, key: key, nextID: newIDEpoch()}
+}
+
+// newIDEpoch 给每个 Bridge 实例的请求 ID 取一个随机高位起点。
+//
+// 为什么不能从 0 开始数：share 端的 agent.Daemon 由 daemonOnce 保证进程内只建一次，它的
+// cancels 表和在途 handleReq 跨会话存活；而 help 端每次 connect 都新建 Bridge。两边从 1
+// 开始重新数的话，重连后的第一条调用和上一会话的残留请求撞上同一个 ID：滞后的
+// ToolResp 会命中新调用的 pending，滞后的 cancel 清理会抹掉新调用的 cancels 登记。
+//
+// 随机高 32 位 + 从 0 递增的低 32 位，让两次会话撞号的概率降到可忽略，且不改动线上协议
+// （ID 本来就是 uint64，两端都只当作不透明标识）。
+// 拿不到随机源时退回 0（等价于旧行为），不因为熵不足就让整个 bridge 起不来。
+func newIDEpoch() uint64 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	return uint64(binary.BigEndian.Uint32(b[:])) << 32
+}
 
 // SwapConn 原子替换工具消息的出口连接与会话密钥，用于 relay ⇄ P2P 热切换：
 // 连接先在 relay 上完成握手并可用，P2P 打洞成功且双向证实后再切到隧道；
@@ -137,8 +201,10 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 	ch := make(chan proto.ToolResp, 1)
 	b.pending.Store(id, ch)
 	defer b.pending.Delete(id)
+	var recv *streamRecv
 	if onChunk != nil {
-		b.streamCbs.Store(id, onChunk)
+		recv = &streamRecv{cb: onChunk}
+		b.streamCbs.Store(id, recv)
 		defer b.streamCbs.Delete(id)
 	}
 
@@ -188,6 +254,13 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		if !resp.OK {
 			return nil, fmt.Errorf("%s: %s", resp.ErrorCode, resp.ErrorMsg)
 		}
+		// 流式输出缺了帧就不能当成功返回：调用方（GUI 终端 / AI）没有别的办法察觉，
+		// 一份被挖空却标着 OK 的输出比一次明确的失败危险得多。
+		if recv != nil {
+			if n := recv.gapCount(); n > 0 {
+				return nil, fmt.Errorf("stream_incomplete: 流式输出缺失 %d 帧（relay 限流或隧道异常），结果不完整", n)
+			}
+		}
 		result := resp.ResultJSON
 		if key != [32]byte{} && len(result) > 0 {
 			plain, err := proto.AEADOpenJSON(&key, result)
@@ -225,16 +298,21 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			// 非流式调用、或调用已结束（ToolResp 先到 / 超时后 share 端仍在吐）：丢弃。
 			return
 		}
+		recv := v.(*streamRecv)
+		recv.observe(c.Seq)
 		data := c.Data
 		if _, key := b.snapshot(); key != [32]byte{} && len(data) > 0 {
 			plain, err := proto.AEADOpen(&key, data)
 			if err != nil {
-				return // 帧损坏/换了 key：丢这一帧，不影响后续帧与最终 ToolResp
+				// 帧损坏/换了 key：这一帧的内容没了，但后续帧与最终 ToolResp 不受影响。
+				// 记成一个空洞，由 callToolInner 在收尾时把整次调用判为不完整。
+				recv.markGap()
+				return
 			}
 			data = plain
 		}
 		if len(data) > 0 {
-			v.(func(string, []byte))(c.Stream, data)
+			recv.cb(c.Stream, data)
 		}
 	}
 }

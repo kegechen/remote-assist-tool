@@ -5,7 +5,6 @@ package agent
 import (
 	"fmt"
 	"os"
-	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -23,7 +22,10 @@ func RelaunchElevated() error {
 	}
 	args := append([]string{}, os.Args[1:]...)
 	args = append(args, "--elevated-child")
-	param := strings.Join(args, " ")
+	// 必须按 CommandLineToArgvW 的规则转义再拼：朴素的空格 Join 会让
+	// --root "C:\Work Dir" 在 Work 处被撕开，后面的 --allow-exec 被子进程的
+	// flag 解析整个吞掉（详见 winargs.go 的说明）。
+	param := buildWindowsCommandLine(args)
 
 	verb, _ := syscall.UTF16PtrFromString("runas")
 	exeP, _ := syscall.UTF16PtrFromString(exe)

@@ -100,7 +100,12 @@ func NewKeyedLimiter(ratePerSec, burst float64, maxKeys int, idleExpiry time.Dur
 // 若 key 不存在且表已满，则回收 LRU 桶：空闲过期的桶按新来源初始化，仍活跃的桶
 // 保留令牌余额与补充时间后换绑到新 key。这样内存有界，且满表不会成为新来源的
 // 永久拒绝开关。
-func (k *KeyedLimiter) Allow(key string) bool {
+func (k *KeyedLimiter) Allow(key string) bool { return k.AllowN(key, 1) }
+
+// AllowN 对给定 key 一次消耗 n 个令牌，令牌不足时返回 false 且不扣减。
+// 用于按字节而非按条数计费的场景（relay 的工具通道）。注意 n > burst 时恒为 false：
+// 调用方要保证单次开销不超过 burst，否则等于把整条通道钉死。
+func (k *KeyedLimiter) AllowN(key string, n float64) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
@@ -146,10 +151,10 @@ func (k *KeyedLimiter) Allow(key string) bool {
 		}
 		kb.lastRefill = now
 	}
-	if kb.tokens < 1 {
+	if kb.tokens < n {
 		return false
 	}
-	kb.tokens--
+	kb.tokens -= n
 	return true
 }
 

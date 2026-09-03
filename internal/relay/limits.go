@@ -34,6 +34,10 @@ type Limits struct {
 	DataBurstPerConnection    float64    `json:"data_burst_per_connection"`
 	DataRateGlobal            float64    `json:"data_rate_global"`
 	DataBurstGlobal           float64    `json:"data_burst_global"`
+	ToolRateKiBPerConnection  float64    `json:"tool_rate_kib_per_connection"`
+	ToolBurstKiBPerConnection float64    `json:"tool_burst_kib_per_connection"`
+	ToolRateKiBGlobal         float64    `json:"tool_rate_kib_global"`
+	ToolBurstKiBGlobal        float64    `json:"tool_burst_kib_global"`
 	ControlRatePerConnection  float64    `json:"control_rate_per_connection"`
 	ControlBurstPerConnection float64    `json:"control_burst_per_connection"`
 	ControlRateGlobal         float64    `json:"control_rate_global"`
@@ -68,6 +72,10 @@ func DefaultLimits() Limits {
 		DataBurstPerConnection:    tunnelDataBurstPerConn,
 		DataRateGlobal:            tunnelDataRateGlobal,
 		DataBurstGlobal:           tunnelDataBurstGlobal,
+		ToolRateKiBPerConnection:  toolRateKiBPerConn,
+		ToolBurstKiBPerConnection: toolBurstKiBPerConn,
+		ToolRateKiBGlobal:         toolRateKiBGlobal,
+		ToolBurstKiBGlobal:        toolBurstKiBGlobal,
 		ControlRatePerConnection:  controlRatePerConn,
 		ControlBurstPerConnection: controlBurstPerConn,
 		ControlRateGlobal:         controlRateGlobal,
@@ -146,6 +154,18 @@ func normalizeLimits(l Limits) Limits {
 	if l.DataBurstGlobal == 0 {
 		l.DataBurstGlobal = d.DataBurstGlobal
 	}
+	if l.ToolRateKiBPerConnection == 0 {
+		l.ToolRateKiBPerConnection = d.ToolRateKiBPerConnection
+	}
+	if l.ToolBurstKiBPerConnection == 0 {
+		l.ToolBurstKiBPerConnection = d.ToolBurstKiBPerConnection
+	}
+	if l.ToolRateKiBGlobal == 0 {
+		l.ToolRateKiBGlobal = d.ToolRateKiBGlobal
+	}
+	if l.ToolBurstKiBGlobal == 0 {
+		l.ToolBurstKiBGlobal = d.ToolBurstKiBGlobal
+	}
 	if l.ControlRatePerConnection == 0 {
 		l.ControlRatePerConnection = d.ControlRatePerConnection
 	}
@@ -198,6 +218,10 @@ func ValidateLimits(l Limits) error {
 		{"data_burst_per_connection", l.DataBurstPerConnection},
 		{"data_rate_global", l.DataRateGlobal},
 		{"data_burst_global", l.DataBurstGlobal},
+		{"tool_rate_kib_per_connection", l.ToolRateKiBPerConnection},
+		{"tool_burst_kib_per_connection", l.ToolBurstKiBPerConnection},
+		{"tool_rate_kib_global", l.ToolRateKiBGlobal},
+		{"tool_burst_kib_global", l.ToolBurstKiBGlobal},
 		{"control_rate_per_connection", l.ControlRatePerConnection},
 		{"control_burst_per_connection", l.ControlBurstPerConnection},
 		{"control_rate_global", l.ControlRateGlobal},
@@ -208,6 +232,21 @@ func ValidateLimits(l Limits) error {
 	for _, check := range checks {
 		if check.value <= 0 {
 			return fmt.Errorf("%s must be greater than zero", check.name)
+		}
+	}
+	// 工具通道超限先节流、等不到额度才断连，所以 burst 必须装得下最大的单条消息
+	// （maxMessageSize，来自 read_file 的 1 MiB 分块）。装不下的话每一帧都永远等不到额度，
+	// 等于配置一生效工具通道就用不了，且现象是莫名其妙的反复断线。
+	maxFrameKiB := float64(maxMessageSize) / 1024
+	for _, check := range []struct {
+		name  string
+		value float64
+	}{
+		{"tool_burst_kib_per_connection", l.ToolBurstKiBPerConnection},
+		{"tool_burst_kib_global", l.ToolBurstKiBGlobal},
+	} {
+		if check.value < maxFrameKiB {
+			return fmt.Errorf("%s must be at least %.0f (one max-sized message)", check.name, maxFrameKiB)
 		}
 	}
 	return p2p.ValidateLimits(l.UDP)

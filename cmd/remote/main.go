@@ -135,6 +135,7 @@ func runShare(args []string) {
 	args = clean
 
 	fs.Parse(args)
+	rejectPositionalArgs(fs, "share")
 
 	resolveTLSVerify(fs, insecure, *caFile)
 
@@ -348,6 +349,7 @@ func runHelp(args []string) {
 		fmt.Fprintf(os.Stderr, "\n")
 	}
 	fs.Parse(args)
+	rejectPositionalArgs(fs, "help")
 
 	resolveTLSVerify(fs, insecure, *caFile)
 
@@ -431,6 +433,25 @@ func runHelp(args []string) {
 // 但用户显式传了 --ca 就已经明确表达"我要校验"，此时继续沿用 insecure 的默认值会让
 // RootCAs 被 InsecureSkipVerify 静默架空。这里按意图调和：未显式传 --insecure 时自动
 // 开启校验；显式传了 --insecure=true 又给 --ca 属自相矛盾，报错而不是二选一地静默忽略。
+// rejectPositionalArgs 在解析后拦下任何多余的位置参数。
+//
+// Go 的 flag 在第一个非旗标处停止解析，剩下的全落进 fs.Args()，默认被静默忽略——
+// 而这里的旗标大多是安全护栏（--root / --allow-exec / --deny-exec）。一旦命令行被
+// 意外撕开（历史上 Windows --elevate 的空格拼接就会这样，见 internal/agent/winargs.go），
+// 表现是"提权成功了，但白名单悄悄变成空"，也就是放行一切。宁可报错退出，也不能让
+// 护栏无声消失。
+func rejectPositionalArgs(fs *flag.FlagSet, mode string) {
+	if fs.NArg() == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Error: unexpected argument %q after the %s options: %v\n",
+		fs.Arg(0), mode, fs.Args())
+	fmt.Fprintf(os.Stderr, "Options must all start with '-'; a value containing spaces needs quoting.\n"+
+		"Refusing to continue: flags after this point were ignored, which can silently disable --root / --allow-exec / --deny-exec.\n\n")
+	fs.Usage()
+	os.Exit(2)
+}
+
 func resolveTLSVerify(fs *flag.FlagSet, insecure *bool, caFile string) {
 	if caFile == "" {
 		return

@@ -73,6 +73,26 @@ const (
 	tunnelDataRateGlobal   = 5000 // 全局每秒 5000 条消息
 	tunnelDataBurstGlobal  = 10000
 
+	// 工具通道限流：单位是 KiB/s，按 payload 实际大小计费。
+	//
+	// 为什么不能沿用 Tunnel data 那套"条数/秒"：exec stream=true 的 chunkSink 是管道读到
+	// 多少发多少（单帧上限 32 KiB），cat 一个大日志轻松超过 100 帧/秒——按条数限流会把
+	// 一次完全正常的输出判成洪水。按字节算才对得上"占用了多少带宽"这件事。
+	//
+	// toolMinFrameCostKiB 是每帧的最低计费：按字节计费之后，海量小帧的字节数很低，
+	// 但每帧都是一次 JSON 解析 + 转发，CPU 开销与大小无关。给个地板价把帧率一起压住
+	// （16 MiB/s ÷ 16 KiB = 1024 帧/秒，远高于任何正常用法，也远低于洪水）。
+	toolRateKiBPerConn  = 16384  // 单连接 16 MiB/s
+	toolBurstKiBPerConn = 32768  // 允许突发 32 MiB
+	toolRateKiBGlobal   = 131072 // 全局 128 MiB/s
+	toolBurstKiBGlobal  = 262144 // 允许突发 256 MiB
+	toolMinFrameCostKiB = 16     // 每帧地板价
+
+	// 工具通道超速时读循环最多让路多久。单帧最大 4 MiB、速率 16 MiB/s，补满一帧只要
+	// 250ms，所以正常情况永远碰不到这个上限——它只是防"限额配得离谱"时无限等待。
+	toolThrottleMaxWait = 2 * time.Second
+	toolThrottleStep    = 20 * time.Millisecond
+
 	// 低频控制消息限流：PeerAddrAdvertise / P2PConnected。
 	controlRatePerConn  = 2
 	controlBurstPerConn = 5
@@ -130,6 +150,8 @@ type Server struct {
 	tunnelDataLimiterGlobal  *ratelimit.Bucket       // 全局 Tunnel data 限流
 	controlLimiterPerConn    *ratelimit.KeyedLimiter // per-connection 控制消息限流
 	controlLimiterGlobal     *ratelimit.Bucket       // 全局控制消息限流
+	toolLimiterPerConn       *ratelimit.KeyedLimiter // per-connection 工具通道限流（KiB/s）
+	toolLimiterGlobal        *ratelimit.Bucket       // 全局工具通道限流（KiB/s）
 	logSampleCtr             uint64                  // TCP 高频拒绝日志采样计数
 	p2pSampleCtr             uint64                  // P2P 协商信息独立采样，避免污染拒绝计数
 	limits                   Limits
@@ -171,6 +193,8 @@ func NewServer(cfg *Config) (*Server, error) {
 		tunnelDataLimiterGlobal:  ratelimit.NewBucket(limits.DataRateGlobal, limits.DataBurstGlobal),
 		controlLimiterPerConn:    ratelimit.NewKeyedLimiter(limits.ControlRatePerConnection, limits.ControlBurstPerConnection, limits.LimiterMaxKeys, limiterIdleDuration),
 		controlLimiterGlobal:     ratelimit.NewBucket(limits.ControlRateGlobal, limits.ControlBurstGlobal),
+		toolLimiterPerConn:       ratelimit.NewKeyedLimiter(limits.ToolRateKiBPerConnection, limits.ToolBurstKiBPerConnection, limits.LimiterMaxKeys, limiterIdleDuration),
+		toolLimiterGlobal:        ratelimit.NewBucket(limits.ToolRateKiBGlobal, limits.ToolBurstKiBGlobal),
 		limits:                   limits,
 	}
 	// Help 去抖计时器真正清掉 Help 槽时，把 share 从「等隧道数据」里叫醒。
@@ -308,6 +332,54 @@ func (s *Server) allowDataMessage(client *ClientConn) bool {
 	}
 	if s.tunnelDataLimiterGlobal != nil && !s.tunnelDataLimiterGlobal.Allow() {
 		s.logSampled("Data message rate limited (global) from %s", client.ID)
+		return false
+	}
+	return true
+}
+
+// allowToolMessage 按 payload 字节数给工具通道计费，超速时**压住这条连接的读循环**
+// 而不是丢帧。
+//
+// relay 的转发是同步的：读一条、转一条。不读就等于不收，TCP 窗口自然收敛，背压一路
+// 传回发送端——发送端被压慢，一个字节都不丢。这正是丢帧唯一该被替换掉的原因：payload
+// 是 AEAD 的、每帧独立 nonce，中间少掉一帧不影响后续解密，两端谁都发现不了，用户拿到
+// 的是一份被悄悄挖空、却仍标着成功的输出。
+//
+// 只有等到 toolThrottleMaxWait 还拿不到额度才返回 false（调用方回 RATE_LIMITED 并断连）。
+// 按默认限额这条路走不到：单帧最大 4 MiB，16 MiB/s 补满只需 250ms。它是配置离谱时的兜底，
+// 保证读循环不会真的卡死。
+//
+// 先扣 per-conn 再扣 global：真正会触发节流的几乎总是单连接那只桶，这个顺序下常见路径
+// 不会白扣全局额度。反过来（全局满了）重试时会对 per-conn 多计几十 KiB，量级可忽略。
+func (s *Server) allowToolMessage(client *ClientConn, payloadBytes int) bool {
+	cost := float64((payloadBytes + 1023) / 1024)
+	if cost < toolMinFrameCostKiB {
+		cost = toolMinFrameCostKiB
+	}
+	deadline := time.Now().Add(toolThrottleMaxWait)
+	throttled := false
+	for {
+		if s.chargeToolTokens(client, cost) {
+			return true
+		}
+		if !throttled {
+			// 每次调用只记一条：节流是正常的背压，不是拒绝，不该按重试次数灌爆采样计数器。
+			throttled = true
+			s.logSampled("Tool channel throttled from %s", client.ID)
+		}
+		if !time.Now().Before(deadline) {
+			s.logSampled("Tool channel rate limit exceeded past throttle window from %s", client.ID)
+			return false
+		}
+		time.Sleep(toolThrottleStep)
+	}
+}
+
+func (s *Server) chargeToolTokens(client *ClientConn, cost float64) bool {
+	if s.toolLimiterPerConn != nil && !s.toolLimiterPerConn.AllowN(client.ID, cost) {
+		return false
+	}
+	if s.toolLimiterGlobal != nil && !s.toolLimiterGlobal.AllowN(cost) {
 		return false
 	}
 	return true
@@ -511,8 +583,13 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		case proto.MsgToolHello, proto.MsgToolHelloAck,
 			proto.MsgToolReq, proto.MsgToolResp,
 			proto.MsgToolStream, proto.MsgToolCancel:
-			if !s.allowDataMessage(client) {
-				return false
+			// 工具通道的帧一条都不能悄悄丢：ToolResp 丢了调用方只能干等到兜底超时，
+			// ToolStream 丢了输出中间被挖掉一段而两端都察觉不到（payload 是 AEAD 的，
+			// 每帧独立 nonce，丢帧不影响后续解密）。这里超限就回 RATE_LIMITED 并断连，
+			// 把"静默的数据损坏"换成"一次看得见的失败"。
+			if !s.allowToolMessage(client, len(msg.Payload)) {
+				s.sendError(client, "RATE_LIMITED", "tool channel rate limit exceeded")
+				return true
 			}
 			s.forwardToPeer(client, msg)
 		}

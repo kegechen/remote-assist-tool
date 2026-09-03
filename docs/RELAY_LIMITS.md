@@ -86,8 +86,10 @@ rate 单位为每秒事件数，burst 为令牌桶瞬时容量。
 | `create_rate_global` / `create_burst_global` | 100 / 200 | 限制会话创建和随机码生成总速率 |
 | `heartbeat_rate_per_ip` / `heartbeat_burst_per_ip` | 10 / 20 | 正常客户端约 30 秒一次，保留共享 NAT 余量 |
 | `heartbeat_rate_global` / `heartbeat_burst_global` | 500 / 1000 | 限制全局心跳处理和响应写入 |
-| `data_rate_per_connection` / `data_burst_per_connection` | 100 / 200 | Tunnel/Tool 消息数，不是字节数 |
+| `data_rate_per_connection` / `data_burst_per_connection` | 100 / 200 | Tunnel 消息数，不是字节数 |
 | `data_rate_global` / `data_burst_global` | 5000 / 10000 | 限制全局消息调度和转发开销 |
+| `tool_rate_kib_per_connection` / `tool_burst_kib_per_connection` | 16384 / 32768 | 工具通道 16 MiB/s、32 MiB burst；单位是 KiB/s |
+| `tool_rate_kib_global` / `tool_burst_kib_global` | 131072 / 262144 | 全局 128 MiB/s、256 MiB burst |
 | `control_rate_per_connection` / `control_burst_per_connection` | 2 / 5 | PeerAddr/P2PConnected 正常仅在协商时出现 |
 | `control_rate_global` / `control_burst_global` | 1000 / 2000 | 限制全局控制消息和日志开销 |
 | `limiter_max_keys` | 8192 | 限流器自身内存上限；满表时复用 LRU 桶且不刷新活跃桶 burst |
@@ -95,6 +97,17 @@ rate 单位为每秒事件数，burst 为令牌桶瞬时容量。
 | `reject_audit_sample_every` | 1000 | 默认每 1000 次高频拒绝记录一条 |
 
 不要只提高 per-IP 阈值而不检查 global 阈值。global 至少应覆盖预计并发来源的正常峰值，但仍必须低于主机压测得到的稳定容量。
+
+### 工具通道为什么单独一组，且按字节计费
+
+`MsgToolHello/HelloAck/Req/Resp/Stream/Cancel` 走 `tool_*` 这组限额，与 Tunnel data 分开：
+
+- **按字节而非条数**：`exec stream=true` 是管道读到多少发多少（单帧上限 32 KiB），`cat` 一个大日志轻松超过 100 帧/秒。按条数限流会把一次完全正常的输出判成洪水。每帧另有 16 KiB 的最低计费，把帧率一并压住（16 MiB/s ÷ 16 KiB ≈ 1024 帧/秒）。
+- **超限是节流，不是丢帧**：relay 读一条转一条，超速时读循环让路，TCP 窗口自然把发送端压慢，一个字节都不丢。工具通道的帧丢不起——payload 是 AEAD 的、每帧独立 nonce，少掉一帧不影响后续解密，两端谁都发现不了，用户拿到的是一份被悄悄挖空却仍标着成功的输出。
+- **burst 必须装得下最大的单条消息**（4 MiB，来自 `read_file` 分块），否则每帧都等不到额度；`ValidateLimits` 会直接拒绝这种配置。
+- 只有等待超过 2 秒仍拿不到额度才回 `RATE_LIMITED` 并断连。按默认限额走不到这条路，它是配置离谱时的兜底。
+
+日志里 `Tool channel throttled` 每次调用只记一条（不按重试次数记），`Tool channel rate limit exceeded past throttle window` 出现即说明限额配置有问题。
 
 ## 5. UDP 默认值与依据
 
@@ -130,7 +143,7 @@ sample_total=<该计数器启动后的累计拒绝数>, sample_every=<当前采�
 1. 保持默认阈值和 `sample_every=1000`，观察至少一个完整业务高峰。
 2. 按 reason 分组统计每分钟采样日志、`sample_total` 增量和来源 IP 分布。
 3. Join 的 `code_invalid` 持续增长通常表示枚举或客户端使用旧码；`rate_limited_*` 持续增长说明已触发容量保护。
-4. `Data message rate limited`、`Control message rate limited` 在正常业务中应接近零；持续出现时先区分攻击、客户端热循环和真实容量不足。
+4. `Data message rate limited`、`Control message rate limited` 在正常业务中应接近零；持续出现时先区分攻击、客户端热循环和真实容量不足。`Tool channel throttled` 偶发属正常（大文件传输/长输出会短暂触发背压），持续出现说明工具通道限额偏紧。
 5. UDP 的 `pps_limited_*`、`relay_state_limited`、`relay_bytes_*` 持续增长时，同时检查主机 CPU、丢包、出口带宽和会话数。
 6. 只有确认合法流量被误限后才提高对应 rate/burst；每次只改一组，并保留变更前后监控对比。
 
