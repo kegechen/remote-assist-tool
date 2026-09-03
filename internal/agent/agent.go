@@ -231,13 +231,13 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	// 全程不需要会话密钥。现在没有合法密文就一律拒绝，且拒绝发生在 Dispatch 之前。
 	if key != [32]byte{} {
 		if isBlankArgs(req.ArgsJSON) {
-			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "unauthenticated", ErrorMsg: "args must be AEAD-sealed after handshake"})
+			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "unauthenticated", ErrorMsg: "args must be AEAD-sealed after handshake"})
 			return
 		}
 		// AAD 绑定 id/tool/deadline_ms：把捕获的密文改挂到别的工具上会解密失败。
 		plain, err := proto.AEADOpenJSON(&key, req.ArgsJSON, proto.ToolReqAAD(req.ID, req.Tool, req.DeadlineMs))
 		if err != nil {
-			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
+			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
 			return
 		}
 		req.ArgsJSON = plain
@@ -245,7 +245,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		// 只能靠接收侧去重。放在解密之后，避免未认证的 ID 污染窗口。
 		if !d.replay.accept(req.ID) {
 			log.Printf("daemon: rejected replayed tool_req id=%d tool=%s", req.ID, req.Tool)
-			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "replayed", ErrorMsg: "duplicate or out-of-window request id"})
+			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "replayed", ErrorMsg: "duplicate or out-of-window request id"})
 			return
 		}
 	}
@@ -263,7 +263,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("tool | %s | panic | 0ms | err:remote_panic", req.Tool)
-			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
+			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
 		}
 	}()
 	sink := &chunkSink{daemon: d, id: req.ID}
@@ -291,12 +291,6 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		}
 		resp = proto.ToolResp{ID: req.ID, OK: false, ErrorCode: code, ErrorMsg: fmt.Sprintf("tool %s: %s (limit %s)", req.Tool, code, timeout)}
 	}
-	// 加密 result（密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法）
-	if key != [32]byte{} && len(resp.ResultJSON) > 0 {
-		if wrapped, err := proto.AEADSealJSON(&key, resp.ResultJSON, proto.ToolRespAAD(req.ID)); err == nil {
-			resp.ResultJSON = wrapped
-		}
-	}
 	status := "ok"
 	if !resp.OK {
 		status = "err:" + resp.ErrorCode
@@ -308,9 +302,38 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
 			time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
 	}
-	if err := d.sendMsg(proto.MsgToolResp, &resp); err != nil {
+	if err := d.sendResp(key, resp); err != nil {
 		log.Printf("tool | %s | response send failed: %v", req.Tool, err)
 	}
+}
+
+// sendResp 加封并发送一条工具响应。
+//
+// 握手后**每一条**响应都要封，包括 ResultJSON 为空的错误响应：密文里的 MAC 是
+// ok / error_code / error_msg 这些明文字段唯一的认证依据（它们都在 AAD 里）。
+// 不封的话，中间人把一次成功的 read_file 改成 ok:true + result 清空，接收侧会跳过
+// 解密、直接把"空结果 + 成功"交给调用方——比一次明确的失败危险得多。
+//
+// 空 result 归一成 "{}" 而不是留空，是为了让"封过"与"没封"在接收侧可以只按
+// len(result) > 0 区分，判据简单到不会有歧义。
+func (d *Daemon) sendResp(key [32]byte, resp proto.ToolResp) error {
+	if key != [32]byte{} {
+		plain := resp.ResultJSON
+		if len(plain) == 0 {
+			plain = json.RawMessage("{}")
+		}
+		// 密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法。
+		wrapped, err := proto.AEADSealJSON(&key, plain, proto.ToolRespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg))
+		if err != nil {
+			// 几乎只可能是熵源故障。宁可发一条接收侧必然拒绝的响应，也不能退回明文：
+			// 那等于把工具结果原样交给 relay。
+			log.Printf("daemon: seal tool_resp id=%d failed: %v", resp.ID, err)
+			resp.ResultJSON = nil
+		} else {
+			resp.ResultJSON = wrapped
+		}
+	}
+	return d.sendMsg(proto.MsgToolResp, &resp)
 }
 
 // chunkSink reserved for v2 streaming; v1 tools do not use sink
@@ -324,19 +347,19 @@ type chunkSink struct {
 func (s *chunkSink) Send(stream string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	seq := s.seq
-	payload := data
+	// 先把帧整体建好，AAD 直接取自它的字段——以后给 StreamChunk 添了新的明文字段
+	// （或真的用起 Fin），漏进 AAD 的话是编译期看得见的改动。
+	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: data}
 	// key 取当前值而非请求开始时的快照：接收侧（mcp.Bridge.HandleInbound）同样按
 	// 当前 key 解流帧，两边必须对称。换 key 会取消在途请求，所以这个窗口本就极短，
 	// 真撞上时接收侧记一个空洞并把整次调用判为 stream_incomplete。
 	if key := s.daemon.currentKey(); key != [32]byte{} {
-		ct, err := proto.AEADSeal(&key, data, proto.StreamChunkAAD(s.id, seq, stream))
+		ct, err := proto.AEADSeal(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
 		if err != nil {
 			return err
 		}
-		payload = ct
+		c.Data = ct
 	}
-	c := proto.StreamChunk{ID: s.id, Seq: seq, Stream: stream, Data: payload}
 	s.seq++
 	return s.daemon.sendMsg(proto.MsgToolStream, &c)
 }

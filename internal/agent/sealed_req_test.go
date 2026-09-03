@@ -95,7 +95,7 @@ func TestSealedReqRoundTrip(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("期望成功，得到 %+v", resp)
 	}
-	plain, err := proto.AEADOpenJSON(&f.key, resp.ResultJSON, proto.ToolRespAAD(1))
+	plain, err := proto.AEADOpenJSON(&f.key, resp.ResultJSON, proto.ToolRespAAD(1, true, "", ""))
 	if err != nil {
 		t.Fatalf("响应解密失败: %v", err)
 	}
@@ -209,5 +209,53 @@ func TestSealedReqPlainChannelUnaffected(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("第 %d 次无响应", i+1)
 		}
+	}
+}
+
+// TestSealedRespSealsErrors 握手后**每一条**响应都要加封，包括 ResultJSON 本来为空的
+// 错误响应：密文里的 MAC 是 ok / error_code / error_msg 唯一的认证依据。不封的话，
+// 中间人可以随手把一次失败改写成"成功 + 空结果"，接收侧无从分辨。
+func TestSealedRespSealsErrors(t *testing.T) {
+	f := newSealedFixture(t)
+	f.inject(&proto.ToolReq{ID: 2, Tool: "probe"}) // 不带 args -> unauthenticated
+
+	resp := f.resp()
+	if resp.OK || resp.ErrorCode != "unauthenticated" {
+		t.Fatalf("期望 unauthenticated，得到 %+v", resp)
+	}
+	if len(resp.ResultJSON) == 0 {
+		t.Fatal("错误响应没有加封，ok/error_code 全无认证")
+	}
+	if _, err := proto.AEADOpenJSON(&f.key, resp.ResultJSON, proto.ToolRespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg)); err != nil {
+		t.Fatalf("错误响应的 AAD 未绑定自身的明文字段: %v", err)
+	}
+	// 改一个字段就该验不过。
+	if _, err := proto.AEADOpenJSON(&f.key, resp.ResultJSON, proto.ToolRespAAD(resp.ID, true, resp.ErrorCode, resp.ErrorMsg)); err == nil {
+		t.Fatal("翻转 ok 后仍验得过")
+	}
+}
+
+// TestSealedRespPlainChannelStaysPlain key 为零时不得加封，否则本地 stdio 直连模式
+// 的调用方会拿到一坨 base64。
+func TestSealedRespPlainChannelStaysPlain(t *testing.T) {
+	in := make(chan *proto.Message, 4)
+	out := make(chan *proto.Message, 16)
+	r := NewRegistry()
+	r.Register(&countingTool{name: "probe"})
+	d := NewDaemon(r, &fakeConn{in: in, out: out}, [32]byte{})
+	go d.RunLoop(context.Background())
+
+	msg, _ := proto.NewMessage(proto.MsgToolReq, &proto.ToolReq{ID: 1, Tool: "probe", ArgsJSON: json.RawMessage(`{}`)})
+	d.Inject(msg)
+
+	select {
+	case got := <-out:
+		var resp proto.ToolResp
+		proto.DecodePayload(got, &resp)
+		if string(resp.ResultJSON) != `{"ok":true}` {
+			t.Fatalf("明文通道的结果被改写了: %s", resp.ResultJSON)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("无响应")
 	}
 }

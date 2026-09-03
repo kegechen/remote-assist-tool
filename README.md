@@ -322,7 +322,8 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 - relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。跳过校验时退化为 TOFU 指纹钉扎（`~/.remote_assist_known_hosts`），把中间人窗口从「永远」压到「仅首次连接」；回环地址不钉扎。
 - MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 仅转发密文，看不见也无法伪造工具内容。
 - 工具通道协议 v2 在 AEAD 之上补了三件事（**与 v1 不兼容**，见下）：
-  - **AAD 绑定明文字段**：`tool` / `id` / `deadline_ms` / 流帧的 `seq` / `stream` 都是外层明文。它们进 AAD 之后，把一条捕获的密文改挂到别的工具（比如把 `read_file` 的参数挂到 `write_file`，让远端把文件截断成 0 字节）、改 ID、改超时、把流帧重排或跨流投递，全部会解密失败。
+  - **AAD 绑定明文字段**：`tool` / `id` / `deadline_ms`、响应的 `ok` / `error_code` / `error_msg`、流帧的 `seq` / `stream` 都是外层明文。它们进 AAD 之后，把一条捕获的密文改挂到别的工具（比如把 `read_file` 的参数挂到 `write_file`，让远端把文件截断成 0 字节）、改 ID、改超时、把成功翻成失败、把流帧重排或跨流投递，全部会解密失败。
+  - **每条响应都要加封**（包括结果为空的错误响应），接收侧先验真再看 `ok`。否则中间人只要把一次成功的 `read_file` 的 `result` 清空，调用方就会拿到「空结果 + 成功」—— AI 会据此得出「这个文件是空的」，而它没有任何别的办法察觉。
   - **握手后 args 必须是密文**：包括「没有参数」的调用，host 也封一个 `{}`。此前的判据是「有 args 才解密」，等于留了后门 —— 发一条不带 args 的 `tool_req{tool:"process_list"}` 就能绕过全部解密直接触发远端执行。现在没有合法密文一律在 Dispatch 之前拒掉。
   - **抗重放**：nonce 由发送方给，AAD 挡得住改字段却挡不住原样重放。接收侧按调用 ID 做 1024 位滑动窗口去重（语义同 IPsec），重放返回 `replayed`。窗口每把 key 一份，重新握手时重置，P2P 热升级（不换 key）时保留。
 - P2P 打洞包带协助码派生的 HMAC，并绑定发送方身份：只知道 sessionID（打洞时会主动喷洒到对端公网 IP 的一批端口上，本就不是秘密）伪造不出打洞包，也无法把自己冒充成对端。

@@ -143,7 +143,7 @@ func TestBridgeSwapConnSwitchesKey(t *testing.T) {
 		if _, err := proto.AEADOpenJSON(&newKey, r.ArgsJSON, proto.ToolReqAAD(r.ID, r.Tool, r.DeadlineMs)); err != nil {
 			return
 		}
-		sealed, _ := proto.AEADSealJSON(&newKey, json.RawMessage(`{"ok":2}`), proto.ToolRespAAD(r.ID))
+		sealed, _ := proto.AEADSealJSON(&newKey, json.RawMessage(`{"ok":2}`), proto.ToolRespAAD(r.ID, true, "", ""))
 		resp, _ := proto.NewMessage(proto.MsgToolResp, &proto.ToolResp{ID: r.ID, OK: true, ResultJSON: sealed})
 		br.HandleInbound(resp)
 	}()

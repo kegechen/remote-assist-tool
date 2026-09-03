@@ -100,8 +100,10 @@ remote-assist-tool/
 v2 相对 v1 的三处变更，都不向后兼容：
 
 1. **AAD**：`tool_req` / `tool_resp` / `tool_stream` 的 AEAD 带附加认证数据，把外层明文字段
-   （`tool`、`id`、`deadline_ms`、`seq`、`stream`）绑进密文，见 `internal/proto/aad.go`。
-   三个方向各有自己的标签，请求的密文也无法当成响应或流帧重放。
+   （`tool`、`id`、`deadline_ms`、`ok`、`error_code`、`error_msg`、`seq`、`stream`、`fin`）
+   绑进密文，见 `internal/proto/aad.go`。三个方向各有自己的标签，请求的密文也无法当成响应
+   或流帧重放。响应方向额外要求「每条都加封」（结果为空的错误响应也封一个 `{}`），接收侧
+   先验真再看 `ok` —— 否则清空 `result` 就能把一次成功变成「空结果 + 成功」。
 2. **握手后 args 必须是密文**：包括无参调用（host 封 `{}`）。判据从「有 args 才解密」
    改为「没有合法密文一律拒绝」，且拒绝发生在 `Registry.Dispatch` 之前。
 3. **抗重放**：接收侧按调用 ID 做 1024 位滑动窗口去重（`internal/agent/replay.go`），

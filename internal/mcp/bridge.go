@@ -268,7 +268,10 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 	// 全程用同一份 conn/key 快照，避免中途 SwapConn 导致「用旧 key 加密、却按新 key 解密」。
 	conn, key := b.snapshot()
 
-	encArgs := args
+	// 先把请求整体建好，AAD 直接取自它的字段——这样以后给 ToolReq 添了新的明文字段
+	// （比如真的开始下发 DeadlineMs），漏进 AAD 的话是编译期看得见的改动，而不是
+	// 上线后远端每条请求都 decrypt_failed。
+	req := proto.ToolReq{ID: id, Tool: name, ArgsJSON: args}
 	if key != [32]byte{} {
 		// 空参数也要封：远端把「args 是合法密文」当作硬前置条件，否则一条不带 args
 		// 的伪造请求就能绕过认证触发工具执行。封 "{}" 而不是空串，远端解出来能直接
@@ -277,13 +280,13 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		if len(plain) == 0 {
 			plain = json.RawMessage("{}")
 		}
-		wrapped, err := proto.AEADSealJSON(&key, plain, proto.ToolReqAAD(id, name, 0))
+		wrapped, err := proto.AEADSealJSON(&key, plain, proto.ToolReqAAD(req.ID, req.Tool, req.DeadlineMs))
 		if err != nil {
 			return nil, err
 		}
-		encArgs = wrapped
+		req.ArgsJSON = wrapped
 	}
-	if err := conn.SendMessage(proto.MsgToolReq, &proto.ToolReq{ID: id, Tool: name, ArgsJSON: encArgs}); err != nil {
+	if err := conn.SendMessage(proto.MsgToolReq, &req); err != nil {
 		return nil, err
 	}
 	select {
@@ -302,6 +305,21 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		}
 		return nil, ctx.Err()
 	case resp := <-ch:
+		// 先验真、再看 ok。ok / error_code / error_msg 都是外层明文，唯一的认证依据
+		// 是它们进了 result 密文的 AAD。先按 ok 分支就等于信了未经认证的字段：中间人
+		// 把一次成功的 read_file 改成 ok:true + result 清空，调用方拿到的是"空结果 +
+		// 成功"，而它没有任何别的办法察觉。
+		result := resp.ResultJSON
+		if key != [32]byte{} {
+			if len(result) == 0 {
+				return nil, fmt.Errorf("unauthenticated: 响应未加封（对端过旧，或响应被篡改）")
+			}
+			plain, err := proto.AEADOpenJSON(&key, result, proto.ToolRespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg))
+			if err != nil {
+				return nil, fmt.Errorf("unauthenticated: 响应校验失败: %w", err)
+			}
+			result = plain
+		}
 		if !resp.OK {
 			return nil, fmt.Errorf("%s: %s", resp.ErrorCode, resp.ErrorMsg)
 		}
@@ -311,14 +329,6 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 			if n := recv.settledGapCount(); n > 0 {
 				return nil, fmt.Errorf("stream_incomplete: 流式输出缺失 %d 帧（relay 限流或隧道异常），结果不完整", n)
 			}
-		}
-		result := resp.ResultJSON
-		if key != [32]byte{} && len(result) > 0 {
-			plain, err := proto.AEADOpenJSON(&key, result, proto.ToolRespAAD(id))
-			if err != nil {
-				return nil, err
-			}
-			result = plain
 		}
 		return result, nil
 	}
@@ -353,7 +363,7 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 		recv.observe(c.Seq)
 		data := c.Data
 		if _, key := b.snapshot(); key != [32]byte{} && len(data) > 0 {
-			plain, err := proto.AEADOpen(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream))
+			plain, err := proto.AEADOpen(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
 			if err != nil {
 				// 帧损坏/换了 key：这一帧的内容没了，但后续帧与最终 ToolResp 不受影响。
 				// 记成一个空洞，由 callToolInner 在收尾时把整次调用判为不完整。

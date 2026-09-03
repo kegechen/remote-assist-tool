@@ -16,7 +16,7 @@ var streamKey = [32]byte{1, 2, 3, 4, 5}
 // sealChunk 模拟 share 端的 chunkSink：块数据用裸 AEADSeal 加密后放进 Data。
 func sealChunk(t *testing.T, id uint64, seq uint32, stream, text string) *proto.Message {
 	t.Helper()
-	ct, err := proto.AEADSeal(&streamKey, []byte(text), proto.StreamChunkAAD(id, seq, stream))
+	ct, err := proto.AEADSeal(&streamKey, []byte(text), proto.StreamChunkAAD(id, seq, stream, false))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -29,7 +29,7 @@ func sealChunk(t *testing.T, id uint64, seq uint32, stream, text string) *proto.
 
 func sealResp(t *testing.T, id uint64, result string) *proto.Message {
 	t.Helper()
-	wrapped, err := proto.AEADSealJSON(&streamKey, json.RawMessage(result), proto.ToolRespAAD(id))
+	wrapped, err := proto.AEADSealJSON(&streamKey, json.RawMessage(result), proto.ToolRespAAD(id, true, "", ""))
 	if err != nil {
 		t.Fatalf("seal resp: %v", err)
 	}

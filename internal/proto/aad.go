@@ -57,18 +57,34 @@ func (b *aadBuilder) addUint32(v uint32) *aadBuilder {
 	return b
 }
 
+func (b *aadBuilder) addBool(v bool) *aadBuilder {
+	var n byte
+	if v {
+		n = 1
+	}
+	b.buf = append(b.buf, n)
+	return b
+}
+
 // ToolReqAAD 绑定 ToolReq 的全部明文字段。
 func ToolReqAAD(id uint64, tool string, deadlineMs uint32) []byte {
 	return newAADBuilder(aadTagToolReq).addUint64(id).addString(tool).addUint32(deadlineMs).buf
 }
 
-// ToolRespAAD 绑定响应所属的调用。
-func ToolRespAAD(id uint64) []byte {
-	return newAADBuilder(aadTagToolResp).addUint64(id).buf
+// ToolRespAAD 绑定 ToolResp 的全部明文字段。
+//
+// 只绑 id 是不够的：ok / error_code / error_msg 同样是外层明文，中间人把一次成功
+// 翻成失败（或反过来）不需要任何密钥。绑进 AAD 之后，改动其中任何一个都会让结果
+// 解密失败，接收侧据此把整条响应判为不可信。
+func ToolRespAAD(id uint64, ok bool, errorCode, errorMsg string) []byte {
+	return newAADBuilder(aadTagToolResp).addUint64(id).addBool(ok).addString(errorCode).addString(errorMsg).buf
 }
 
-// StreamChunkAAD 绑定流帧的调用、序号与流别。Seq 进 AAD 意味着重排或重放某一帧
-// 都会解密失败，接收侧据此判定这次调用的输出不完整。
-func StreamChunkAAD(id uint64, seq uint32, stream string) []byte {
-	return newAADBuilder(aadTagStreamChunk).addUint64(id).addUint32(seq).addString(stream).buf
+// StreamChunkAAD 绑定流帧的全部明文字段。Seq 进 AAD 意味着重排或重放某一帧都会
+// 解密失败，接收侧据此判定这次调用的输出不完整。
+//
+// fin 目前全链路恒为 false（字段留着没用起来），一并绑上是为了将来真启用时
+// 「漏进 AAD」是编译期看得见的改动，而不是上线后一片解密失败。
+func StreamChunkAAD(id uint64, seq uint32, stream string, fin bool) []byte {
+	return newAADBuilder(aadTagStreamChunk).addUint64(id).addUint32(seq).addString(stream).addBool(fin).buf
 }

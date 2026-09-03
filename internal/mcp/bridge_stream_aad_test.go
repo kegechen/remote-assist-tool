@@ -15,7 +15,7 @@ import (
 // 挪到别的位置重放"。
 func sealChunkAs(t *testing.T, id uint64, sealSeq uint32, sealStream string, seq uint32, stream, text string) *proto.Message {
 	t.Helper()
-	ct, err := proto.AEADSeal(&streamKey, []byte(text), proto.StreamChunkAAD(id, sealSeq, sealStream))
+	ct, err := proto.AEADSeal(&streamKey, []byte(text), proto.StreamChunkAAD(id, sealSeq, sealStream, false))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}

@@ -37,14 +37,14 @@ func TestAEADAADMustMatch(t *testing.T) {
 
 func TestAEADSealJSONAADMustMatch(t *testing.T) {
 	key := testKey(t)
-	wrapped, err := AEADSealJSON(&key, json.RawMessage(`{"ok":1}`), ToolRespAAD(7))
+	wrapped, err := AEADSealJSON(&key, json.RawMessage(`{"ok":1}`), ToolRespAAD(7, true, "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AEADOpenJSON(&key, wrapped, ToolRespAAD(8)); err == nil {
+	if _, err := AEADOpenJSON(&key, wrapped, ToolRespAAD(8, true, "", "")); err == nil {
 		t.Fatal("换一个调用 ID 却解开了")
 	}
-	if _, err := AEADOpenJSON(&key, wrapped, ToolRespAAD(7)); err != nil {
+	if _, err := AEADOpenJSON(&key, wrapped, ToolRespAAD(7, true, "", "")); err != nil {
 		t.Fatalf("同 AAD 应能解开: %v", err)
 	}
 }
@@ -53,8 +53,8 @@ func TestAEADSealJSONAADMustMatch(t *testing.T) {
 // 当作响应或流帧重放回去。
 func TestAADDomainsAreDistinct(t *testing.T) {
 	req := ToolReqAAD(1, "", 0)
-	resp := ToolRespAAD(1)
-	chunk := StreamChunkAAD(1, 0, "")
+	resp := ToolRespAAD(1, false, "", "")
+	chunk := StreamChunkAAD(1, 0, "", false)
 	if bytes.Equal(req, resp) || bytes.Equal(req, chunk) || bytes.Equal(resp, chunk) {
 		t.Fatalf("三个方向的 AAD 出现重合: req=%x resp=%x chunk=%x", req, resp, chunk)
 	}
@@ -66,10 +66,10 @@ func TestAADFieldsAreUnambiguous(t *testing.T) {
 	if bytes.Equal(ToolReqAAD(1, "ab", 0), ToolReqAAD(1, "abc", 0)) {
 		t.Fatal("不同工具名产生了相同 AAD")
 	}
-	if bytes.Equal(StreamChunkAAD(1, 0, "stdout"), StreamChunkAAD(1, 0, "stderr")) {
+	if bytes.Equal(StreamChunkAAD(1, 0, "stdout", false), StreamChunkAAD(1, 0, "stderr", false)) {
 		t.Fatal("不同流别产生了相同 AAD")
 	}
-	if bytes.Equal(StreamChunkAAD(1, 0, "stdout"), StreamChunkAAD(1, 1, "stdout")) {
+	if bytes.Equal(StreamChunkAAD(1, 0, "stdout", false), StreamChunkAAD(1, 1, "stdout", false)) {
 		t.Fatal("不同 seq 产生了相同 AAD")
 	}
 	if bytes.Equal(ToolReqAAD(1, "exec", 1000), ToolReqAAD(1, "exec", 600000)) {
