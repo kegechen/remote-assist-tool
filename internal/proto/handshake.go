@@ -9,8 +9,17 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// ToolProtocolVersion 工具通道协议版本（首版）
-const ToolProtocolVersion = "1"
+// ToolProtocolVersion 工具通道协议版本。
+//
+// v2 相对 v1 的三处不兼容变更（都属于认证绑定，无法靠可选字段兼容）：
+//  1. AEAD 带 AAD：请求/响应/流帧的密文与外层明文字段绑定，见 aad.go。
+//  2. 握手后 args 必须是合法密文，空参数也要封一个 "{}"，不再有"没密文就跳过解密"的口子。
+//  3. 接收侧按调用 ID 做抗重放滑动窗口。
+//
+// 版本号同时是 HKDF 的 info（会话密钥与打洞密钥都用它做域分离），所以 v1/v2 之间
+// 密钥本就不同。握手第一步的版本比对会先一步把旧版挡下并回一句可读的
+// "unsupported tool protocol version"，不会退化成满屏 decrypt_failed。
+const ToolProtocolVersion = "2"
 
 // NoAuthCode 是 --no-auth 模式使用的固定协助码常量。
 // 使用固定 code 省去 code 交换步骤，但 AEAD 会话密钥仍由

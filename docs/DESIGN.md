@@ -90,6 +90,25 @@ remote-assist-tool/
 | P2PTestPacket | Bidirectional | P2P 打洞测试包（含协助码派生的 HMAC，见 `internal/proto/punch.go`）|
 | P2PConnected | Client → Relay | 报告 P2P 连接建立 |
 
+### 3.1.1 工具通道协议版本
+
+`proto.ToolProtocolVersion` 当前为 `"2"`，在 ToolHello/ToolHelloAck 中比对，不匹配直接拒绝握手。
+
+它同时是 HKDF 的 `info` 串（会话密钥 `rat-tool-v<版本>`、打洞密钥 `rat-p2p-punch-v<版本>`），
+因此抬版本号会自动让两代密钥互不相同 —— 不需要单独做能力协商。
+
+v2 相对 v1 的三处变更，都不向后兼容：
+
+1. **AAD**：`tool_req` / `tool_resp` / `tool_stream` 的 AEAD 带附加认证数据，把外层明文字段
+   （`tool`、`id`、`deadline_ms`、`seq`、`stream`）绑进密文，见 `internal/proto/aad.go`。
+   三个方向各有自己的标签，请求的密文也无法当成响应或流帧重放。
+2. **握手后 args 必须是密文**：包括无参调用（host 封 `{}`）。判据从「有 args 才解密」
+   改为「没有合法密文一律拒绝」，且拒绝发生在 `Registry.Dispatch` 之前。
+3. **抗重放**：接收侧按调用 ID 做 1024 位滑动窗口去重（`internal/agent/replay.go`），
+   窗口每把 key 一份 —— 重新握手（换 key）时重置，P2P 热升级（同 key 换通道）时保留。
+
+旧版接入时在握手阶段收到 `unsupported tool protocol version`，而不是逐条请求的 `decrypt_failed`。
+
 ### 3.2 协助码规则
 - 字符集: `ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789` (排除 I, i, L, l, O, o, 0, 1)
 - 长度: 10 位

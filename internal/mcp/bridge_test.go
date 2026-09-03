@@ -140,10 +140,10 @@ func TestBridgeSwapConnSwitchesKey(t *testing.T) {
 		var r proto.ToolReq
 		proto.DecodePayload(req, &r)
 		// 用新 key 应能解开请求参数；解不开就不应答，让 CallTool 超时把问题暴露出来。
-		if _, err := proto.AEADOpenJSON(&newKey, r.ArgsJSON); err != nil {
+		if _, err := proto.AEADOpenJSON(&newKey, r.ArgsJSON, proto.ToolReqAAD(r.ID, r.Tool, r.DeadlineMs)); err != nil {
 			return
 		}
-		sealed, _ := proto.AEADSealJSON(&newKey, json.RawMessage(`{"ok":2}`))
+		sealed, _ := proto.AEADSealJSON(&newKey, json.RawMessage(`{"ok":2}`), proto.ToolRespAAD(r.ID))
 		resp, _ := proto.NewMessage(proto.MsgToolResp, &proto.ToolResp{ID: r.ID, OK: true, ResultJSON: sealed})
 		br.HandleInbound(resp)
 	}()

@@ -101,6 +101,7 @@ type Daemon struct {
 	key        [32]byte
 	inbound    chan *proto.Message
 	cancels    sync.Map          // id -> context.CancelFunc
+	replay     replayGuard       // 按调用 ID 抗重放，每把 key 一份
 	OnActivity func(line string) // 可选钩子，每条工具调用完成时触发
 }
 
@@ -118,6 +119,9 @@ func (d *Daemon) RotateKey(key [32]byte) {
 	if same {
 		return // key 没变，在途请求依然有效，不该被打断
 	}
+	// 换 key ⟹ 新会话，抗重放窗口必须跟着重置：新会话的调用 ID 与旧会话无关，
+	// 留着旧位会把合法请求误判成重放。
+	d.replay.reset()
 	d.cancels.Range(func(k, v any) bool {
 		if cancel, ok := v.(context.CancelFunc); ok {
 			cancel()
@@ -202,6 +206,16 @@ func (d *Daemon) RunLoop(ctx context.Context) {
 	}
 }
 
+// isBlankArgs 判断 args 是否等于"什么都没给"。
+//
+// 不能只看 len == 0：ToolReq.ArgsJSON 的 tag 没有 omitempty，发送方把字段留空时线上
+// 传的是 args:null，解出来是 4 字节的 "null" 而非 nil。只看长度的话，这种请求会掉进
+// 解密分支报 decrypt_failed，把一次"根本没鉴权"说成"密文坏了"，排障时会指向错误的方向。
+func isBlankArgs(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "null"
+}
+
 func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	var req proto.ToolReq
 	if err := proto.DecodePayload(msg, &req); err != nil {
@@ -210,14 +224,30 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	// 整个请求用同一份 key 快照：解密入参与加密结果必须配对，中途若发生 SwapConn
 	// （P2P 升级/降级）也不能让一半用旧 key、一半用新 key。
 	key := d.currentKey()
-	// 解密 args（key 非零时才解密；密文以 JSON 字符串 base64 形式承载）
-	if key != [32]byte{} && len(req.ArgsJSON) > 0 {
-		plain, err := proto.AEADOpenJSON(&key, req.ArgsJSON)
+	// 握手完成后，args 必须是合法密文——包括"没有参数"的调用，host 也会封一个 "{}"。
+	//
+	// 以前的判据是 len(req.ArgsJSON) > 0，等于留了个后门：注入方发一条不带 args 的
+	// tool_req{tool:"process_list"} 就绕过全部解密直接触发远端 fork tasklist/ps，
+	// 全程不需要会话密钥。现在没有合法密文就一律拒绝，且拒绝发生在 Dispatch 之前。
+	if key != [32]byte{} {
+		if isBlankArgs(req.ArgsJSON) {
+			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "unauthenticated", ErrorMsg: "args must be AEAD-sealed after handshake"})
+			return
+		}
+		// AAD 绑定 id/tool/deadline_ms：把捕获的密文改挂到别的工具上会解密失败。
+		plain, err := proto.AEADOpenJSON(&key, req.ArgsJSON, proto.ToolReqAAD(req.ID, req.Tool, req.DeadlineMs))
 		if err != nil {
 			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
 			return
 		}
 		req.ArgsJSON = plain
+		// 抗重放：AAD 挡住了"改 ID 重挂"，但原样重放仍然成立（nonce 由发送方给），
+		// 只能靠接收侧去重。放在解密之后，避免未认证的 ID 污染窗口。
+		if !d.replay.accept(req.ID) {
+			log.Printf("daemon: rejected replayed tool_req id=%d tool=%s", req.ID, req.Tool)
+			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "replayed", ErrorMsg: "duplicate or out-of-window request id"})
+			return
+		}
 	}
 	// 兜底执行上限：host 通常不发 DeadlineMs；不加 deadline 时，阻塞型 I/O（FIFO /
 	// 特殊文件 / 卡死 syscall）会让工具永不返回、host 干等 2~10min 兜底且 goroutine 泄漏。
@@ -263,7 +293,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	}
 	// 加密 result（密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法）
 	if key != [32]byte{} && len(resp.ResultJSON) > 0 {
-		if wrapped, err := proto.AEADSealJSON(&key, resp.ResultJSON); err == nil {
+		if wrapped, err := proto.AEADSealJSON(&key, resp.ResultJSON, proto.ToolRespAAD(req.ID)); err == nil {
 			resp.ResultJSON = wrapped
 		}
 	}
@@ -294,15 +324,19 @@ type chunkSink struct {
 func (s *chunkSink) Send(stream string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	seq := s.seq
 	payload := data
+	// key 取当前值而非请求开始时的快照：接收侧（mcp.Bridge.HandleInbound）同样按
+	// 当前 key 解流帧，两边必须对称。换 key 会取消在途请求，所以这个窗口本就极短，
+	// 真撞上时接收侧记一个空洞并把整次调用判为 stream_incomplete。
 	if key := s.daemon.currentKey(); key != [32]byte{} {
-		ct, err := proto.AEADSeal(&key, data)
+		ct, err := proto.AEADSeal(&key, data, proto.StreamChunkAAD(s.id, seq, stream))
 		if err != nil {
 			return err
 		}
 		payload = ct
 	}
-	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: payload}
+	c := proto.StreamChunk{ID: s.id, Seq: seq, Stream: stream, Data: payload}
 	s.seq++
 	return s.daemon.sendMsg(proto.MsgToolStream, &c)
 }

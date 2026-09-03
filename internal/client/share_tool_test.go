@@ -304,13 +304,15 @@ func TestRelayHelloSwapsDaemonFromStaleP2PConn(t *testing.T) {
 		t.Fatalf("decode relay hello ack: %v", err)
 	}
 	key := proto.DeriveSessionKey(s.code, ack.NonceB64, hello.NonceB64)
-	args, err := proto.AEADSealJSON(&key, json.RawMessage(`{}`))
+	const probeID = 42
+	const probeTool = "relay_probe"
+	args, err := proto.AEADSealJSON(&key, json.RawMessage(`{}`), proto.ToolReqAAD(probeID, probeTool, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	reqMsg, err := proto.NewMessage(proto.MsgToolReq, &proto.ToolReq{
-		ID:       42,
-		Tool:     "relay_probe",
+		ID:       probeID,
+		Tool:     probeTool,
 		ArgsJSON: args,
 	})
 	if err != nil {

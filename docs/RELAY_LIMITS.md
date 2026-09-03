@@ -34,6 +34,7 @@ share/help 未显式设置 `--stun` 时，会先尝试 `Relay主机:3478`；失�
 - 只有确实需要自建 STUN/UDP relay，且已开放、防火墙和监控 UDP 3478 时，才配置 Relay `--stun=:3478`。
 - UDP relay 的准入要同时满足两条：会话数据面已就绪，且 UDP 包的**来源 IP 属于该会话两端之一**（STUN 反射得到的公网地址、对端自报的私网地址、或 relay 观测到的 TCP 源 IP）。只比 IP 不比端口，对称 NAT 换端口仍然可用。
 - 打洞包（`P2PTestPacket`）必须带协助码派生的 HMAC，且 MAC 绑定发送方是 share 还是 help。缺 MAC 或验不过一律丢弃并打一行日志。旧版客户端不发这个字段，因此与新版之间谈不成 P2P，`auto` 下回落 TCP relay。
+- 工具通道（`tool_req` / `tool_resp` / `tool_stream`）的 AEAD 带 AAD，绑定 `tool` / `id` / `deadline_ms` / `seq` / `stream` 这些外层明文字段；握手后 args 必须是合法密文；接收侧按调用 ID 做 1024 位滑动窗口抗重放。三者合起来构成工具通道协议 v2，与 v1 不互通，版本号在握手阶段就会把旧端挡掉。
 - relay 上完成工具握手之后，P2P 隧道上再来的 `ToolHello` 一律忽略：合法的新版 help 只在隧道上探活并复用已协商的 key，放行会让注入方用自己的 nonce 改写 session key，把整条会话打到 `decrypt_failed`。
 - 残留风险：与合法端共用同一出口 IP（同一 NAT 之后）的攻击者若掌握 sessionID，仍可能抢占槽位。彻底封堵需要控制面下发 relay-token 并改 relay 头部格式，属于后续协议改造。
 

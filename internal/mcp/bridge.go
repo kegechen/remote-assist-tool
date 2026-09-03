@@ -269,8 +269,15 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 	conn, key := b.snapshot()
 
 	encArgs := args
-	if key != [32]byte{} && len(args) > 0 {
-		wrapped, err := proto.AEADSealJSON(&key, args)
+	if key != [32]byte{} {
+		// 空参数也要封：远端把「args 是合法密文」当作硬前置条件，否则一条不带 args
+		// 的伪造请求就能绕过认证触发工具执行。封 "{}" 而不是空串，远端解出来能直接
+		// json.Unmarshal 成零值参数。
+		plain := args
+		if len(plain) == 0 {
+			plain = json.RawMessage("{}")
+		}
+		wrapped, err := proto.AEADSealJSON(&key, plain, proto.ToolReqAAD(id, name, 0))
 		if err != nil {
 			return nil, err
 		}
@@ -307,7 +314,7 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		}
 		result := resp.ResultJSON
 		if key != [32]byte{} && len(result) > 0 {
-			plain, err := proto.AEADOpenJSON(&key, result)
+			plain, err := proto.AEADOpenJSON(&key, result, proto.ToolRespAAD(id))
 			if err != nil {
 				return nil, err
 			}
@@ -346,7 +353,7 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 		recv.observe(c.Seq)
 		data := c.Data
 		if _, key := b.snapshot(); key != [32]byte{} && len(data) > 0 {
-			plain, err := proto.AEADOpen(&key, data)
+			plain, err := proto.AEADOpen(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream))
 			if err != nil {
 				// 帧损坏/换了 key：这一帧的内容没了，但后续帧与最终 ToolResp 不受影响。
 				// 记成一个空洞，由 callToolInner 在收尾时把整次调用判为不完整。

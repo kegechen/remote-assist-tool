@@ -321,7 +321,14 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 - relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。跳过校验时退化为 TOFU 指纹钉扎（`~/.remote_assist_known_hosts`），把中间人窗口从「永远」压到「仅首次连接」；回环地址不钉扎。
 - MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 仅转发密文，看不见也无法伪造工具内容。
-- P2P 打洞包带协助码派生的 HMAC，并绑定发送方身份：只知道 sessionID（打洞时会主动喷洒到对端公网 IP 的一批端口上，本就不是秘密）伪造不出打洞包，也无法把自己冒充成对端。**这会与 v0 旧版客户端不兼容**：旧版打洞包不带 MAC，一律被拒，`--p2p=auto` 下静默回落 TCP relay，`--p2p=required` 下直接失败。两端请一起升级。
+- 工具通道协议 v2 在 AEAD 之上补了三件事（**与 v1 不兼容**，见下）：
+  - **AAD 绑定明文字段**：`tool` / `id` / `deadline_ms` / 流帧的 `seq` / `stream` 都是外层明文。它们进 AAD 之后，把一条捕获的密文改挂到别的工具（比如把 `read_file` 的参数挂到 `write_file`，让远端把文件截断成 0 字节）、改 ID、改超时、把流帧重排或跨流投递，全部会解密失败。
+  - **握手后 args 必须是密文**：包括「没有参数」的调用，host 也封一个 `{}`。此前的判据是「有 args 才解密」，等于留了后门 —— 发一条不带 args 的 `tool_req{tool:"process_list"}` 就能绕过全部解密直接触发远端执行。现在没有合法密文一律在 Dispatch 之前拒掉。
+  - **抗重放**：nonce 由发送方给，AAD 挡得住改字段却挡不住原样重放。接收侧按调用 ID 做 1024 位滑动窗口去重（语义同 IPsec），重放返回 `replayed`。窗口每把 key 一份，重新握手时重置，P2P 热升级（不换 key）时保留。
+- P2P 打洞包带协助码派生的 HMAC，并绑定发送方身份：只知道 sessionID（打洞时会主动喷洒到对端公网 IP 的一批端口上，本就不是秘密）伪造不出打洞包，也无法把自己冒充成对端。
+- **兼容性：新旧版本必须一起升级。** 打洞包的 MAC 与工具通道 v2 都不向后兼容：
+  - 工具通道版本号已从 `1` 抬到 `2`（`proto.ToolProtocolVersion`）。旧版接入时在握手阶段就被拒，收到一条可读的 `unsupported tool protocol version`，而不是之后每条请求都莫名其妙 `decrypt_failed`。
+  - 旧版打洞包不带 MAC，一律被拒：`--p2p=auto` 下静默回落 TCP relay，`--p2p=required` 下直接失败。
 - 协助码：安全随机生成（54 字符集 × 10 位，去除易混淆字符），默认 30 分钟过期。
 - **信任边界是协助码**：share 由本机用户主动发起，码交给谁，就等于把这台机器交给谁。`--root` / exec 名单是防手滑的护栏，不是对抗恶意方的边界 —— exec 可跑任意程序，一句 `sh -c 'cp /etc/passwd <root>/'` 即可绕过 `--root`。需要真隔离请在进程外面套（容器 / 专用低权限账号）。
 - relay 服务端加固：全局 + 每 IP 连接数上限、读/写超时、单消息大小上限。
