@@ -83,6 +83,7 @@ func newFakeShareP2PManager(startGate <-chan struct{}) *fakeShareP2PManager {
 }
 
 func (*fakeShareP2PManager) SetRelayConn(p2p.RelayConn) {}
+func (*fakeShareP2PManager) SetAuthCode(string)         {}
 
 func (m *fakeShareP2PManager) Start(string, bool) (<-chan p2p.P2PResult, error) {
 	close(m.started)

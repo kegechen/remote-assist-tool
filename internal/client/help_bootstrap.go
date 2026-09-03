@@ -551,6 +551,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	// 探测（UDP 被封时要把三台外部 STUN 依次试完），放主路径会让 connect 干等十几秒，
 	// 与「连接立即可用、P2P 后台升级」的设计相悖。
 	mgr := p2p.NewP2PManager(mode, cfg.STUNServer, cfg.BindIP)
+	mgr.SetAuthCode(h.code)
 	mgr.SetRelayConn(h.client)
 	p2pMgrPtr.Store(mgr) // 登记给 teardown 回收
 	resultCh, startErr := mgr.Start(sessionID, false)

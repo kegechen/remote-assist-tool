@@ -26,6 +26,7 @@ var ErrPeerDisconnected = errors.New("peer disconnected")
 // 保持接口窄小，便于用可控 fake 覆盖 STUN 初始化阻塞与 helper 换代时序。
 type shareP2PManager interface {
 	SetRelayConn(p2p.RelayConn)
+	SetAuthCode(string)
 	Start(sessionID string, isShare bool) (<-chan p2p.P2PResult, error)
 	HandlePeerAddrReady(*proto.PeerAddrReady)
 	Close()
@@ -173,10 +174,16 @@ func (s *ShareMode) clearP2PAttempt(epoch uint64, closeRelay bool) bool {
 }
 
 func (s *ShareMode) makeP2PManager(mode p2p.P2PMode) shareP2PManager {
+	var mgr shareP2PManager
 	if s.newP2PManager != nil {
-		return s.newP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
+		mgr = s.newP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
+	} else {
+		mgr = p2p.NewP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
 	}
-	return p2p.NewP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
+	// 打洞包要用协助码签 MAC，必须在 Start 之前注入，否则本轮打洞全程发的都是
+	// 无 MAC 的包，对端一律丢弃。
+	mgr.SetAuthCode(s.code)
+	return mgr
 }
 
 // toolModeReady 报告工具握手是否已完成。help 端保证「先在 relay 上完成工具握手，
@@ -669,6 +676,17 @@ func (s *ShareMode) handleToolOverP2P(tunnel *p2p.UDPTunnel, epoch uint64) {
 			}
 		case proto.MsgToolHello:
 			// 向后兼容：旧版 help 会在 P2P 隧道上做完整工具握手（而非探活 + 复用 key）。
+			//
+			// 但只在「还没有会话密钥」时才允许，即确实是旧版那条先握手后用的路径。
+			// relay 上已经握过手之后再收到 ToolHello，合法的新版 help 不会发（它只探活
+			// 复用 key），所以只可能来自往隧道里注入帧的第三方——UDP relay 回退模式下
+			// tunnel 的来源判定是「等于 STUN 服务器地址」，任何经由 relay 转发进来的帧
+			// 都过得了这一关。走下去会 ensureDaemon 换掉 daemonKey，合法 help 此后
+			// 每条请求都 decrypt_failed，一条包即可打瘫整条会话。
+			if s.currentDaemonKey() != [32]byte{} {
+				log.Printf("P2P: ignoring ToolHello after relay handshake (would rotate the session key; likely injected)")
+				continue
+			}
 			var hello proto.Hello
 			proto.DecodePayload(msg, &hello)
 			ack, key := buildHelloAck(hello, s.code)

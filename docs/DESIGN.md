@@ -87,7 +87,7 @@ remote-assist-tool/
 | Heartbeat | Bidirectional | 心跳保活 |
 | PeerAddrAdvertise | Client → Relay | 通告 P2P 地址 |
 | PeerAddrReady | Relay → Client | 对等端地址就绪 |
-| P2PTestPacket | Bidirectional | P2P 打洞测试包 |
+| P2PTestPacket | Bidirectional | P2P 打洞测试包（含协助码派生的 HMAC，见 `internal/proto/punch.go`）|
 | P2PConnected | Client → Relay | 报告 P2P 连接建立 |
 
 ### 3.2 协助码规则

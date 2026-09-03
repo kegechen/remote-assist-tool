@@ -101,26 +101,28 @@ const (
 
 // PeerAddrAdvertise 对等端地址通告（发送给服务器）
 type PeerAddrAdvertise struct {
-	PublicAddr  string `json:"public_addr"`            // "ip:port"
-	PrivateAddr string `json:"private_addr"`           // "ip:port"
-	NATType     string `json:"nat_type,omitempty"`     // NAT 类型: "open", "cone", "symmetric"
+	PublicAddr  string `json:"public_addr"`        // "ip:port"
+	PrivateAddr string `json:"private_addr"`       // "ip:port"
+	NATType     string `json:"nat_type,omitempty"` // NAT 类型: "open", "cone", "symmetric"
 }
 
 // PeerAddrReady 对等端地址就绪（服务器转发给对方）
 type PeerAddrReady struct {
 	PeerPublicAddr  string `json:"peer_public_addr"`
 	PeerPrivateAddr string `json:"peer_private_addr"`
-	IsShare         bool   `json:"is_share"`                  // true if this is for the share side
-	SameNetwork     bool   `json:"same_network,omitempty"`    // 两端是否在同一网络
-	PeerNATType     string `json:"peer_nat_type,omitempty"`   // 对端 NAT 类型
+	IsShare         bool   `json:"is_share"`                // true if this is for the share side
+	SameNetwork     bool   `json:"same_network,omitempty"`  // 两端是否在同一网络
+	PeerNATType     string `json:"peer_nat_type,omitempty"` // 对端 NAT 类型
 }
 
 // P2PTestPacket P2P 测试包
 type P2PTestPacket struct {
 	SessionID string `json:"session_id"`
 	Random    string `json:"random"`
+	// MAC 以协助码派生密钥对 SessionID/Random/发送方身份做的 HMAC，见 punch.go。
+	// 空值只可能来自不认识这个字段的旧版本，一律按认证失败处理。
+	MAC string `json:"mac,omitempty"`
 }
-
 
 // NewMessage 创建消息
 func NewMessage(msgType MessageType, payload interface{}) (*Message, error) {

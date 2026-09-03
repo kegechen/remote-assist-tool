@@ -19,8 +19,8 @@ type P2PMode int
 
 const (
 	P2PModeDisabled P2PMode = iota
-	P2PModeAuto     // Try P2P first, fall back to relay
-	P2PModeRequired // Only use P2P, fail if not possible
+	P2PModeAuto             // Try P2P first, fall back to relay
+	P2PModeRequired         // Only use P2P, fail if not possible
 )
 
 // ParseP2PMode 将字符串转换为 P2PMode
@@ -49,25 +49,31 @@ type PeerInfo struct {
 
 // P2PManager manages P2P connection attempts
 type P2PManager struct {
-	mode         P2PMode
-	stunServer   string
-	stunAddr     *net.UDPAddr // resolved STUN server address for UDP relay
-	localConn    *net.UDPConn
-	localAddr    *net.UDPAddr
-	publicAddr   *net.UDPAddr
-	peerInfo     *PeerInfo
-	sessionID    string
-	isShare      bool
-	connected    bool
-	connectedMu  sync.RWMutex
-	relayConn    RelayConn
-	resultCh     chan P2PResult
-	stopChan     chan struct{}
-	closeOnce    sync.Once
-	sameNetwork    bool   // 是否检测到同网络
-	bindIP         string // 用户手动指定的绑定 IP
-	natType        string // 本端 NAT 类型
-	peerNATType    string // 对端 NAT 类型
+	mode       P2PMode
+	stunServer string
+	stunAddr   *net.UDPAddr // resolved STUN server address for UDP relay
+	localConn  *net.UDPConn
+	localAddr  *net.UDPAddr
+	publicAddr *net.UDPAddr
+	peerInfo   *PeerInfo
+	sessionID  string
+	isShare    bool
+
+	// authCode 协助码，用来给打洞包签 MAC / 验 MAC（见 proto/punch.go）。
+	// 为空时本端签不出 MAC、也验不过任何包，P2P 因此谈不成并回落 relay——
+	// 这是刻意的 fail-closed：宁可丢掉 P2P，也不要退回"谁都能冒充对端"。
+	authCode string
+
+	connected   bool
+	connectedMu sync.RWMutex
+	relayConn   RelayConn
+	resultCh    chan P2PResult
+	stopChan    chan struct{}
+	closeOnce   sync.Once
+	sameNetwork bool   // 是否检测到同网络
+	bindIP      string // 用户手动指定的绑定 IP
+	natType     string // 本端 NAT 类型
+	peerNATType string // 对端 NAT 类型
 	// backgroundMode 后台重试模式（仅记录日志，不创建 tunnel）。
 	// 必须是原子的：写在 backgroundRetry 的 goroutine 里，读在 receiveLoop / 生日攻击
 	// 的 goroutine 里（onP2PConnected），两者之间没有任何 happens-before 边，裸字段在
@@ -112,6 +118,35 @@ func NewP2PManager(mode P2PMode, stunServer string, bindIP string) *P2PManager {
 // SetRelayConn sets the relay connection for fallback and signaling
 func (p *P2PManager) SetRelayConn(conn RelayConn) {
 	p.relayConn = conn
+}
+
+// SetAuthCode 注入协助码，必须在 Start 之前调用。
+func (p *P2PManager) SetAuthCode(code string) {
+	p.authCode = code
+}
+
+// newTestPacket 造一个已签名的打洞包。所有发包路径都必须走它，漏签的包对端会直接丢弃。
+func (p *P2PManager) newTestPacket() *proto.P2PTestPacket {
+	pkt := &proto.P2PTestPacket{
+		SessionID: p.sessionID,
+		Random:    randomString(16),
+	}
+	proto.SignPunchPacket(pkt, p.authCode, p.isShare)
+	return pkt
+}
+
+// acceptPunch 判断收到的打洞包是否可信：会话对得上，且 MAC 用对端身份验得过。
+func (p *P2PManager) acceptPunch(pkt *proto.P2PTestPacket, from *net.UDPAddr) bool {
+	if pkt.SessionID != p.sessionID {
+		return false
+	}
+	if !proto.VerifyPunchPacket(pkt, p.authCode, !p.isShare) {
+		// 打日志而不是静默丢弃：对端版本过旧（不发 MAC）和真有人在冒充，现场表现
+		// 都是"P2P 谈不成、回落 relay"，不留一行根本无从区分。
+		log.Printf("P2P: dropped unauthenticated punch packet from %v (peer too old, or spoofed)", from)
+		return false
+	}
+	return true
 }
 
 // Start starts the P2P manager
@@ -365,10 +400,7 @@ func (p *P2PManager) startBirthdayAttack(peerAddr *net.UDPAddr) {
 		listenIP = physIP
 	}
 
-	testPacket := &proto.P2PTestPacket{
-		SessionID: p.sessionID,
-		Random:    randomString(16),
-	}
+	testPacket := p.newTestPacket()
 	data, _ := json.Marshal(testPacket)
 
 	// 创建额外 socket
@@ -400,7 +432,7 @@ func (p *P2PManager) startBirthdayAttack(peerAddr *net.UDPAddr) {
 					return
 				}
 				var pkt proto.P2PTestPacket
-				if json.Unmarshal(buf[:n], &pkt) == nil && pkt.SessionID == p.sessionID {
+				if json.Unmarshal(buf[:n], &pkt) == nil && p.acceptPunch(&pkt, addr) {
 					log.Printf("Birthday attack: received reply on extra socket from %v", addr)
 					p.onP2PConnected(addr)
 					return
@@ -444,10 +476,7 @@ cleanup:
 }
 
 func (p *P2PManager) sendTestPackets(addr *net.UDPAddr, interval time.Duration) {
-	testPacket := &proto.P2PTestPacket{
-		SessionID: p.sessionID,
-		Random:    randomString(16),
-	}
+	testPacket := p.newTestPacket()
 
 	data, _ := json.Marshal(testPacket)
 
@@ -466,10 +495,7 @@ func (p *P2PManager) sendTestPackets(addr *net.UDPAddr, interval time.Duration) 
 
 // sendRelayTestPackets 通过 STUN 服务器中继发送测试包
 func (p *P2PManager) sendRelayTestPackets(relayAddr *net.UDPAddr, interval time.Duration) {
-	testPacket := &proto.P2PTestPacket{
-		SessionID: p.sessionID,
-		Random:    randomString(16),
-	}
+	testPacket := p.newTestPacket()
 	testData, _ := json.Marshal(testPacket)
 
 	header := makeRelayHeader(p.sessionID)
@@ -492,10 +518,7 @@ func (p *P2PManager) sendRelayTestPackets(relayAddr *net.UDPAddr, interval time.
 
 // sendPortPredictionPackets 向基准端口附近的端口发送打洞包，应对对称型 NAT
 func (p *P2PManager) sendPortPredictionPackets(baseAddr *net.UDPAddr, portRange int, interval time.Duration) {
-	testPacket := &proto.P2PTestPacket{
-		SessionID: p.sessionID,
-		Random:    randomString(16),
-	}
+	testPacket := p.newTestPacket()
 	data, _ := json.Marshal(testPacket)
 
 	// 生成预测地址列表（排除精确端口，由 sendTestPackets 处理）
@@ -556,7 +579,7 @@ func (p *P2PManager) receiveLoop() {
 		// Try to parse as test packet
 		var testPacket proto.P2PTestPacket
 		if err := json.Unmarshal(buf[:n], &testPacket); err == nil {
-			if testPacket.SessionID == p.sessionID {
+			if p.acceptPunch(&testPacket, remoteAddr) {
 				log.Printf("Received P2P test packet from %v", remoteAddr)
 				p.onP2PConnected(remoteAddr)
 				return
@@ -584,10 +607,7 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 	}
 
 	// 回发确认包，帮助对方也检测到连接
-	confirmPacket := &proto.P2PTestPacket{
-		SessionID: p.sessionID,
-		Random:    randomString(16),
-	}
+	confirmPacket := p.newTestPacket()
 	confirmData, _ := json.Marshal(confirmPacket)
 	if isRelay {
 		header := makeRelayHeader(p.sessionID)
