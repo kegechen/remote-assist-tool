@@ -1,0 +1,12 @@
+# install.sh 是通过 raw.githubusercontent 直接 "curl ... | sh" 执行的，仓库里存成什么
+# 样，用户机器上就跑什么。一旦混进 CRLF，Linux/macOS 的 sh 会把行尾的 \r 当成命令的一
+# 部分，报一串莫名其妙的 "command not found"。目前它是 LF，但那只是因为大家的
+# core.autocrlf 恰好都是 true——换一个 autocrlf=false 的 Windows 贡献者就会破功。
+# 这里不依赖任何人的本地配置，直接把所有 shell 脚本钉死为 LF。
+*.sh text eol=lf
+
+# 同理：CI 里 shell: bash 跑的内联脚本、以及安装文档中给用户复制的命令，都不该带 \r
+*.yml text eol=lf
+
+# Windows 批处理反过来必须是 CRLF，否则某些 cmd.exe 版本解析 goto/label 会出错
+*.bat text eol=crlf

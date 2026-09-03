@@ -32,6 +32,19 @@ REMOTE_INSTALL_DIR=/usr/local/bin sh install.sh
 Linux/macOS 下载后会自动添加可执行权限；Windows 中 `curl` / `wget` 下载失败时会自动回退到
 系统 PowerShell。
 
+安装前脚本会拉取同一个 Release 的 `SHA256SUMS` 核对下载到的二进制，对不上就中止，不会留下
+任何文件。校验拿不到清单时同样中止 —— 需要绕开时显式设 `REMOTE_INSTALL_SKIP_CHECKSUM=1`。
+
+手工下载的话，可以自己核对：
+
+```bash
+curl -fLO https://github.com/kegechen/remote-assist-tool/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing   # macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+需要说明的是，`SHA256SUMS` 和二进制来自同一个 Release、走同一条 HTTPS，所以它挡的是"下到的
+东西不完整/被中途换掉"，而不是"Release 本身被换掉" —— 后者要靠签名，本项目暂未提供。
+
 ### 构建
 
 用仓库自带脚本，产物输出到 `bin/`（Windows 为 `.exe`）：

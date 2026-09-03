@@ -13,8 +13,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      # 与 release.yml 同理，钉 commit SHA 而非可变的 v4/v5 标签；由 dependabot 跟进。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.21'
       - name: Build binaries (for e2e)
@@ -30,6 +31,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: go test -race ./internal/... -timeout 180s
+      # install.sh 是 "curl | sh" 安装链上唯一一道校验，go 工具链看不到它
+      - name: install.sh checksum verification
+        shell: bash
+        run: bash tests/install/install_sh_test.sh
       - name: Benchmarks (ratelimit, observation only)
         if: matrix.os == 'ubuntu-latest'
         shell: bash

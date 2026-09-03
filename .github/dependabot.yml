@@ -1,0 +1,13 @@
+version: 2
+
+# 工作流里的 action 全部钉死在 commit SHA 上（见 release.yml 顶部的说明），好处是上游
+# 挪动 v4/v5 这类可变标签影响不到这里，代价是补丁版本不会自动跟进——安全修复得有人手动
+# 换 SHA，时间一长就没人换了。dependabot 把这件事变成每月一个 PR：它认得 SHA 后面的
+# "# v4.4.0" 注释，升级时会同时更新 SHA 和注释，评审时能直接看出版本变化。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
