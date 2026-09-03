@@ -71,7 +71,8 @@ func runUpgradeStage(args []string) error {
 		return err
 	}
 	cmd := exec.Command(exe, shareArgs...)
-	cmd.Env = replaceEnv(os.Environ(), "HOME", *home)
+	// 先存原值再改写：隔离只服务于握手期的 ClientID 独立，继任者抢到实例锁后会还原。
+	cmd.Env = replaceEnv(stashOrigHomeEnv(os.Environ(), "HOME"), "HOME", *home)
 	cmd.Stdin = nil
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut

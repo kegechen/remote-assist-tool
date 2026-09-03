@@ -392,6 +392,16 @@ func prepareRemoteUpgradeDir(ctx context.Context, client *MCPClient, remoteOS, d
 	return err
 }
 
+// removeRemoteUpgradeDir 递归删除远端升级暂存目录。仅在升级未 commit 时调用。
+func removeRemoteUpgradeDir(ctx context.Context, client *MCPClient, remoteOS, dir string) error {
+	if remoteOS == "windows" {
+		_, err := execRemote(ctx, client, []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsPowerShellArgScript(dir, "Remove-Item -LiteralPath $value -Recurse -Force -ErrorAction SilentlyContinue")})
+		return err
+	}
+	_, err := execRemote(ctx, client, []string{"rm", "-rf", dir})
+	return err
+}
+
 var buildVersionRE = regexp.MustCompile(`(?i)(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?(?:-dirty)?(?:\s|$)`)
 
 type buildVersion struct {
@@ -708,6 +718,24 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "创建远端升级目录失败: " + err.Error()})
 		return
 	}
+	defer func() {
+		// 升级没走到 commit 就返回时，把暂存目录收掉。此前所有失败路径都直接 return，
+		// 目录连同整个候选二进制永久留在远端的临时目录里，只能等 OS 老化清理——而
+		// "候选包版本不够新"（409）这条最常见的路径恰好排在上传之后，误传一次同版本包
+		// 就留一份完整二进制。注意版本校验本身没法提到上传之前：它要在远端跑
+		// `<candidate> --version`，二进制必须先落到对端。
+		//
+		// best-effort：请求 ctx 可能已随响应结束，用独立后台 ctx；失败只提示不影响结论。
+		// 各回滚分支已先 kill 掉 new share，此时目录里不再有活进程持有的文件。
+		if committed {
+			return
+		}
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanCancel()
+		if err := removeRemoteUpgradeDir(cleanCtx, client, probe.OS, upgradeDir); err != nil {
+			s.upgradeProgress("清理远端升级暂存目录失败（可手动删除 " + upgradeDir + "）: " + err.Error())
+		}
+	}()
 	s.upgradeProgress("正在分块上传 " + header.Filename)
 	var transfer struct {
 		Bytes int64 `json:"bytes"`

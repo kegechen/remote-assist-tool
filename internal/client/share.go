@@ -301,7 +301,9 @@ func (s *ShareMode) reconnectWithBackoff() {
 			// relay 中转 / P2P 转发」全程。relay 对每个 client 有 readIdleTimeout(2min)，
 			// 任一阶段静默不发消息都会被判掉线 → DisconnectClient 置 session.Share=nil →
 			// 协助端无法 join（standalone 下还会自连内嵌 relay 每 2min 断一次、刷屏重连）。
-			// 上一连接的心跳 goroutine 会在 Close() 后经 IsClosed() 退出，故每连接只多一个。
+			// 心跳循环绑定「这一代连接」（Client.hbStop），上一连接的那个已在本轮开头的
+			// Close() 里被叫停，故全程只有一个。早先这里靠 IsClosed() 收敛，但 Connect()
+			// 会立刻把 closed 复位，30s 的 tick 命不中那几微秒的窗口，旧循环全都活了下来。
 			s.client.StartHeartbeatLoop(30 * time.Second)
 			return
 		}

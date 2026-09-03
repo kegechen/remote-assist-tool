@@ -54,6 +54,13 @@ type Client struct {
 	enc    *json.Encoder
 	dec    *json.Decoder
 	closed bool
+	// hbStop 标识"当前这一代连接"，每次 Connect 换新、Close 时关闭。
+	// 心跳循环必须绑定它而不是 closed 标志：share 全程复用同一个 *Client，
+	// reconnectWithBackoff 每轮 Close() 后立刻 Connect()，而 Connect 第一行就把
+	// closed 复位成 false，两者之间只隔几微秒——30s 周期的 tick 几乎不可能命中
+	// 那个窗口，于是旧心跳 goroutine 检查 IsClosed() 得到 false，继续用新连接发
+	// 心跳，每次重连再叠一个，永不退出。
+	hbStop chan struct{}
 	mu     sync.Mutex
 }
 
@@ -70,6 +77,7 @@ func (c *Client) Connect() error {
 	defer c.mu.Unlock()
 
 	c.closed = false // 允许 Close 后重新连接
+	c.hbStop = make(chan struct{}) // 新一代连接：上一代的 hbStop 已在 Close 里关闭
 
 	var conn net.Conn
 	var err error
@@ -116,10 +124,18 @@ func (c *Client) Close() {
 	}
 	c.closed = true
 	conn := c.conn
+	hbStop := c.hbStop
 	c.conn = nil
 	c.enc = nil
 	c.dec = nil
+	c.hbStop = nil
 	c.mu.Unlock()
+
+	// 关掉这一代的心跳。置 nil 后本 goroutine 独占该 channel，锁外 close 是安全的；
+	// closeOnce 语义由上面的 c.closed 短路提供。
+	if hbStop != nil {
+		close(hbStop)
+	}
 
 	if conn != nil {
 		// Use recover to handle any panics from closing
@@ -208,17 +224,33 @@ func (c *Client) ResetDecoder() {
 	}
 }
 
-// StartHeartbeatLoop 启动心跳循环
+// StartHeartbeatLoop 启动心跳循环，绑定调用时的那一代连接。
+//
+// 循环在该代连接 Close 时立即退出，因此 share 的 reconnectWithBackoff 每轮重连
+// 起一个新循环不会叠加：旧的那个在 Close() 里就被 hbStop 叫停了，不会跟着新连接
+// 继续发心跳（IsClosed() 兜不住这一点，见 Client.hbStop 注释）。
 func (c *Client) StartHeartbeatLoop(interval time.Duration) {
+	c.mu.Lock()
+	stop := c.hbStop
+	c.mu.Unlock()
+	if stop == nil {
+		return // 未 Connect 或已 Close：没有可绑定的连接代次
+	}
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			if c.IsClosed() {
+		for {
+			select {
+			case <-stop:
 				return
+			case <-ticker.C:
+				if c.IsClosed() {
+					return
+				}
+				_ = c.SendHeartbeat()
 			}
-			_ = c.SendHeartbeat()
 		}
 	}()
 }

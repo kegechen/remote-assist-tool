@@ -104,7 +104,9 @@ func runUpgradeStage(args []string) error {
 		return fmt.Errorf("open log: %w", err)
 	}
 	cmd := exec.Command(*target, shareArgs...)
-	cmd.Env = replaceEnv(replaceEnv(os.Environ(), "HOME", *home), "USERPROFILE", *home)
+	// 先存原值再改写：隔离只服务于握手期的 ClientID 独立，继任者抢到实例锁后会还原。
+	stagedEnv := stashOrigHomeEnv(os.Environ(), "HOME", "USERPROFILE")
+	cmd.Env = replaceEnv(replaceEnv(stagedEnv, "HOME", *home), "USERPROFILE", *home)
 	if *cwd != "" {
 		cmd.Dir = *cwd
 	}

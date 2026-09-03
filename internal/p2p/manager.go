@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/remote-assist/tool/internal/proto"
@@ -67,7 +68,26 @@ type P2PManager struct {
 	bindIP         string // 用户手动指定的绑定 IP
 	natType        string // 本端 NAT 类型
 	peerNATType    string // 对端 NAT 类型
-	backgroundMode bool   // 后台重试模式（仅记录日志，不创建 tunnel）
+	// backgroundMode 后台重试模式（仅记录日志，不创建 tunnel）。
+	// 必须是原子的：写在 backgroundRetry 的 goroutine 里，读在 receiveLoop / 生日攻击
+	// 的 goroutine 里（onP2PConnected），两者之间没有任何 happens-before 边，裸字段在
+	// -race 下就是一条实打实的 data race。
+	backgroundMode atomic.Bool
+	// recvStop 让 receiveLoop 在隧道接管 localConn 之前就停下，避免两个 goroutine
+	// 并发读同一个 UDP socket（内核会把数据报随机派给其中一个）。
+	recvStop     chan struct{}
+	recvStopOnce sync.Once
+	// tunnelMu 保护隧道的交接：onP2PConnected 的「投递」与 Close 的「抽干 + 回收
+	// localConn」必须互斥，否则两者交错时仍会漏出孤儿隧道或反过来关掉在用的隧道。
+	tunnelMu sync.Mutex
+	// tunnelCreated 表示隧道已成功投递进 resultCh（由 tunnelMu 保护）。Close 用它区分
+	// 「隧道已被接手，localConn 归消费者管」与「从未建过隧道，localConn 无主」。
+	tunnelCreated bool
+}
+
+// stopReceiveLoop 幂等地叫停 receiveLoop。
+func (p *P2PManager) stopReceiveLoop() {
+	p.recvStopOnce.Do(func() { close(p.recvStop) })
 }
 
 // RelayConn is the interface for relay fallback communication
@@ -85,6 +105,7 @@ func NewP2PManager(mode P2PMode, stunServer string, bindIP string) *P2PManager {
 		stunServer: stunServer,
 		bindIP:     bindIP,
 		stopChan:   make(chan struct{}),
+		recvStop:   make(chan struct{}),
 	}
 }
 
@@ -510,13 +531,26 @@ func (p *P2PManager) receiveLoop() {
 		select {
 		case <-p.stopChan:
 			return
+		case <-p.recvStop:
+			// 隧道已接管 localConn（可能由生日攻击的额外 socket 触发，此时本循环
+			// 既没收到包也不知情）。必须退出：否则和隧道的 recvLoop 并发读同一个
+			// UDP socket，内核随机派发数据报，落到这里的隧道包会被直接丢弃。
+			return
 		default:
 		}
 
+		// 1s 读超时是刻意的：让循环有机会回到顶部复查停止信号。
 		p.localConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		n, remoteAddr, err := p.localConn.ReadFromUDP(buf)
 		if err != nil {
-			continue
+			// 只有超时才该重试。socket 已关时 ReadFromUDP 立即返回错误，continue
+			// 会退化成没有任何休眠的忙循环吃满一个核——help 的 downgradeToRelay 就是
+			// 这条路径：它 pc.Close()（连带关掉 localConn）却不调 mgr.Close()，
+			// stopChan 一直开着，忙循环能持续到整个会话 teardown。
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
 		}
 
 		// Try to parse as test packet
@@ -572,8 +606,10 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 	}
 
 	// 后台重试模式：仅记录日志，不创建 tunnel，不通知 relay
-	if p.backgroundMode {
+	if p.backgroundMode.Load() {
 		log.Printf("P2P background retry succeeded! Next connection will use P2P directly.")
+		// 这条路径没有隧道接管 localConn，socket 的回收全靠 Close 里的
+		// !tunnelCreated 分支——connected 已经置位了，别再指望它。
 		return
 	}
 
@@ -584,13 +620,41 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 		})
 	}
 
+	// 建隧道前先停 receiveLoop：隧道的 recvLoop 马上要读同一个 localConn，两个
+	// goroutine 并发读一个 UDP socket 会互相偷包。生日攻击路径下本调用来自额外
+	// socket 的 goroutine，receiveLoop 不会自己发现"已经连上了"。
+	//
+	// 只发信号不等它退出：本函数也可能就是从 receiveLoop 里调进来的（见 receiveLoop
+	// 收到测试包那一支），等自己退出会死锁。因此仍有 ≤1s（一个读超时周期）的重叠窗口，
+	// 期间可能被偷走个别数据报——UDP 本就允许丢包，隧道有 keepalive 兜底。这比改之前
+	// 好得多：那时 receiveLoop 压根不停，整场会话都在跟隧道抢包。
+	p.stopReceiveLoop()
+
 	var tunnel *UDPTunnel
 	if isRelay {
 		tunnel = NewUDPRelayTunnel(p.localConn, addr, p.sessionID)
 	} else {
 		tunnel = NewUDPTunnel(p.localConn, addr)
 	}
-	p.resultCh <- P2PResult{Tunnel: tunnel}
+	// 投递与 Close 的回收互斥，且用非阻塞发送：resultCh 满（消费者早已走别的路）
+	// 或 manager 已经 Close 时都不能把隧道就这么撂在那儿——localConn 与它的 3 个
+	// goroutine 会一直悬到 60s peerTimeout，对端仍在发 keepalive 时连这个都不生效。
+	p.tunnelMu.Lock()
+	delivered := false
+	select {
+	case <-p.stopChan:
+	default:
+		select {
+		case p.resultCh <- P2PResult{Tunnel: tunnel}:
+			p.tunnelCreated = true
+			delivered = true
+		default:
+		}
+	}
+	p.tunnelMu.Unlock()
+	if !delivered {
+		tunnel.Close()
+	}
 }
 
 func (p *P2PManager) p2pTimeout() {
@@ -611,6 +675,11 @@ func (p *P2PManager) p2pTimeout() {
 			log.Printf("P2P connection timed out")
 			if p.mode == P2PModeAuto {
 				log.Printf("Falling back to relay mode, will retry P2P in background")
+				// 先置位再推回退结果。反过来的话，从「消费者拿到回退结果并走 abandon」
+				// 到「backgroundMode 变为 true」之间有个窗口，此时若打洞包刚好到达，
+				// onP2PConnected 会读到 false 而照常建隧道并塞进 resultCh，但已经没有
+				// 人再读第二条结果了——隧道成为孤儿。
+				p.backgroundMode.Store(true)
 				p.resultCh <- P2PResult{}
 				go p.backgroundRetry()
 				return
@@ -624,7 +693,7 @@ func (p *P2PManager) p2pTimeout() {
 // backgroundRetry 在 relay 模式下后台重试 P2P 打洞
 // 成功后仅记录日志，不创建 tunnel（避免资源泄露）
 func (p *P2PManager) backgroundRetry() {
-	p.backgroundMode = true
+	p.backgroundMode.Store(true) // p2pTimeout 已置位，这里只是让本函数可被独立调用
 	retryIntervals := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second}
 
 	for i, interval := range retryIntervals {
@@ -664,10 +733,35 @@ func (p *P2PManager) IsConnected() bool {
 func (p *P2PManager) Close() {
 	p.closeOnce.Do(func() {
 		close(p.stopChan)
-		p.connectedMu.RLock()
-		connected := p.connected
-		p.connectedMu.RUnlock()
-		if !connected && p.localConn != nil {
+		p.stopReceiveLoop()
+
+		p.tunnelMu.Lock()
+		defer p.tunnelMu.Unlock()
+
+		// 抽干 resultCh，关掉投递了却没人接手的隧道。
+		//
+		// 上层（share.go / help_bootstrap.go）的 `select { case <-resultCh; case
+		// <-sessionDone }` 在会话已拆时会直接走 sessionDone 分支 → mgr.Close() → return，
+		// 此时 onP2PConnected 可能已经把隧道塞进了这个 buffer=2 的 channel。没人取，
+		// 也就没人 Close：UDP socket 加隧道的 3 个 goroutine 一起悬空，自愈只能等 60s
+		// peerTimeout，而对端若仍在发 keepalive 就连这个都指望不上。
+		for drained := false; !drained; {
+			select {
+			case res := <-p.resultCh:
+				if res.Tunnel != nil {
+					res.Tunnel.Close() // 幂等；内部会关掉 localConn
+				}
+			default:
+				drained = true
+			}
+		}
+
+		// 隧道已交接给消费者时由消费者负责关 localConn（UDPTunnel.Close 就是关的它），
+		// 这里再关一次会打断仍在使用中的隧道。反之——从未建过隧道——localConn 就是无主的，
+		// 必须由这里回收。注意不能用 connected 判断：backgroundRetry 成功时 connected
+		// 已置位却刻意不建隧道（见 onP2PConnected），旧代码那条 `!connected` 分支正好
+		// 漏掉这一种，socket 一直悬到进程退出。
+		if !p.tunnelCreated && p.localConn != nil {
 			p.localConn.Close()
 		}
 	})

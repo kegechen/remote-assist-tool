@@ -199,6 +199,9 @@ func runShare(args []string) {
 					log.Fatalf("Error: 接管 share 单实例锁失败: %v", result.Err)
 				}
 				acquired <- result.Lock
+				// 拿到标准锁 == old 已退出，HOME/USERPROFILE 的升级隔离到此结束，
+				// 还原成真实家目录，否则之后所有 exec 子进程的 ~ 都指向升级暂存目录。
+				announceRestoredUpgradeHome()
 			}()
 		} else {
 			instanceLock, err := client.AcquireShareInstanceLock()
@@ -207,6 +210,11 @@ func runShare(args []string) {
 			}
 			defer instanceLock.Close()
 		}
+	} else if isUpgradeSuccessor {
+		// --new-instance 的继任者不参与锁交接，没有那个还原点。它也不需要隔离：
+		// registrationClientID 在该模式下返回进程内随机 ID（share.go:374），与 HOME 无关，
+		// 所以启动即可还原，不会和仍在运行的 old 撞 ClientID。
+		announceRestoredUpgradeHome()
 	}
 
 	// Standalone (LAN) 模式：进程内启动 relay，share 连 loopback；
