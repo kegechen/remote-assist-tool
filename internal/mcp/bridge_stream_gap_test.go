@@ -26,6 +26,7 @@ func TestBridgeStreamGapFailsCall(t *testing.T) {
 		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "head"))
 		// seq 1 被丢掉（模拟 relay 限流丢帧）
 		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "tail"))
+		br.HandleInbound(sealFin(t, r.ID, 3))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 
@@ -38,6 +39,29 @@ func TestBridgeStreamGapFailsCall(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stream_incomplete") {
 		t.Fatalf("错误没指明是流不完整: %v", err)
+	}
+}
+
+// TestBridgeStreamMissingTerminatorFailsCall 最后一帧丢失且没有更高 Seq 时，单看
+// 已到达的帧无法发现空洞；显式终止符缺失必须让调用失败。
+func TestBridgeStreamMissingTerminatorFailsCall(t *testing.T) {
+	conn := &stubConn{sent: make(chan *proto.Message, 4)}
+	br := NewBridge(conn, streamKey)
+
+	go func() {
+		req := <-conn.sent
+		var r proto.ToolReq
+		proto.DecodePayload(req, &r)
+		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "only-frame"))
+		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := br.CallToolStream(ctx, "exec", json.RawMessage(`{"argv":["x"],"stream":true}`),
+		func(string, []byte) {})
+	if err == nil || !strings.Contains(err.Error(), "stream_incomplete") {
+		t.Fatalf("缺少终止帧的流应失败，实际: %v", err)
 	}
 }
 
@@ -55,6 +79,7 @@ func TestBridgeStreamUndecryptableChunkFailsCall(t *testing.T) {
 		bad, _ := proto.NewMessage(proto.MsgToolStream,
 			&proto.StreamChunk{ID: r.ID, Seq: 1, Stream: "stdout", Data: []byte("not-a-valid-aead-frame")})
 		br.HandleInbound(bad)
+		br.HandleInbound(sealFin(t, r.ID, 2))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 
@@ -80,6 +105,7 @@ func TestBridgeStreamNoGapStillSucceeds(t *testing.T) {
 		}
 		// 重复投递一帧（滞后帧）不应被算成缺失
 		br.HandleInbound(sealChunk(t, r.ID, 3, "stdout", ""))
+		br.HandleInbound(sealFin(t, r.ID, 5))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 
@@ -121,6 +147,7 @@ func TestBridgeStreamOutOfOrderIsNotAGap(t *testing.T) {
 		// 3 先于 2 到（P2P 那条读循环跑赢了还在 relay 上飞的那一帧）
 		br.HandleInbound(sealChunk(t, r.ID, 3, "stdout", "d"))
 		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "c"))
+		br.HandleInbound(sealFin(t, r.ID, 4))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 
@@ -154,6 +181,7 @@ func TestBridgeStreamLateChunkAfterRespIsNotAGap(t *testing.T) {
 		proto.DecodePayload(req, &r)
 		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "a"))
 		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "c"))
+		br.HandleInbound(sealFin(t, r.ID, 3))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 		time.Sleep(40 * time.Millisecond) // 尾帧还在旧通道上
 		br.HandleInbound(sealChunk(t, r.ID, 1, "stdout", "b"))

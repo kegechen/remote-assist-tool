@@ -105,6 +105,7 @@ type streamRecv struct {
 	missing  map[uint32]struct{} // 小于 next 但还没到过的 Seq
 	overflow int                 // 超出 maxTrackedGaps 后不再逐个登记，只累加
 	damaged  int                 // 帧到了但内容用不了（AEAD 解密失败）
+	finished bool                // 收到经过认证的 Fin=true 终止帧
 }
 
 // observe 记录一帧的 Seq。迟到帧会把先前登记的空洞补上；重复帧是空操作。
@@ -136,26 +137,45 @@ func (s *streamRecv) markDamaged() {
 	s.damaged++
 }
 
+func (s *streamRecv) markFinished() {
+	s.mu.Lock()
+	s.finished = true
+	s.mu.Unlock()
+}
+
 func (s *streamRecv) gapCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.missing) + s.overflow + s.damaged
 }
 
-// settledGapCount 在给迟到帧留出 streamGapSettle 的补齐窗口后返回最终的缺帧数。
-// 没有空洞时立即返回 0，不引入任何等待。
-func (s *streamRecv) settledGapCount() int {
-	n := s.gapCount()
-	if n == 0 {
-		return 0
+func (s *streamRecv) status() (gaps int, finished bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.missing) + s.overflow + s.damaged, s.finished
+}
+
+// settledStatus 在给迟到帧和终止帧留出 streamGapSettle 的补齐窗口后返回最终状态。
+// ToolResp 可能走另一条通道先到，因此不能只看响应到达瞬间是否已收到 Fin。
+func (s *streamRecv) settledStatus() (gaps int, finished bool) {
+	gaps, finished = s.status()
+	if gaps == 0 && finished {
+		return 0, true
 	}
 	deadline := time.Now().Add(streamGapSettle)
 	for time.Now().Before(deadline) {
 		time.Sleep(streamGapSettleStep)
-		if n = s.gapCount(); n == 0 {
-			return 0
+		if gaps, finished = s.status(); gaps == 0 && finished {
+			return 0, true
 		}
 	}
+	return gaps, finished
+}
+
+// settledGapCount 保留给只关心缺帧数的调用方；需要确认流完整结束时应使用
+// settledStatus，因为没有终止帧也必须判失败。
+func (s *streamRecv) settledGapCount() int {
+	n, _ := s.settledStatus()
 	return n
 }
 
@@ -342,7 +362,14 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		// 流式输出缺了帧就不能当成功返回：调用方（GUI 终端 / AI）没有别的办法察觉，
 		// 一份被挖空却标着 OK 的输出比一次明确的失败危险得多。
 		if recv != nil {
-			if n := recv.settledGapCount(); n > 0 {
+			n, finished := recv.settledStatus()
+			if !finished {
+				if n > 0 {
+					return nil, fmt.Errorf("stream_incomplete: 流式输出缺少结束帧，且缺失 %d 帧", n)
+				}
+				return nil, fmt.Errorf("stream_incomplete: 流式输出缺少结束帧，结果完整性无法确认")
+			}
+			if n > 0 {
 				return nil, fmt.Errorf("stream_incomplete: 流式输出缺失 %d 帧（relay 限流或隧道异常），结果不完整", n)
 			}
 		}
@@ -398,6 +425,9 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			data = plain
 		}
 		recv.observe(c.Seq)
+		if c.Fin {
+			recv.markFinished()
+		}
 		if len(data) > 0 {
 			recv.cb(c.Stream, data)
 		}

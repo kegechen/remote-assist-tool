@@ -27,6 +27,19 @@ func sealChunk(t *testing.T, id uint64, seq uint32, stream, text string) *proto.
 	return msg
 }
 
+func sealFin(t *testing.T, id uint64, seq uint32) *proto.Message {
+	t.Helper()
+	ct, err := proto.AEADSeal(&streamKey, nil, proto.StreamChunkAAD(id, seq, "", true))
+	if err != nil {
+		t.Fatalf("seal fin: %v", err)
+	}
+	msg, err := proto.NewMessage(proto.MsgToolStream, &proto.StreamChunk{ID: id, Seq: seq, Fin: true, Data: ct})
+	if err != nil {
+		t.Fatalf("new fin msg: %v", err)
+	}
+	return msg
+}
+
 func sealResp(t *testing.T, id uint64, result string) *proto.Message {
 	t.Helper()
 	wrapped, err := proto.AEADSealJSON(&streamKey, json.RawMessage(result), proto.ToolRespAAD(id, true, "", ""))
@@ -53,6 +66,7 @@ func TestBridgeCallToolStreamDecryptsAndOrdersChunks(t *testing.T) {
 		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "hel"))
 		br.HandleInbound(sealChunk(t, r.ID, 1, "stdout", "lo"))
 		br.HandleInbound(sealChunk(t, r.ID, 2, "stderr", "oops"))
+		br.HandleInbound(sealFin(t, r.ID, 3))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 
@@ -123,6 +137,7 @@ func TestBridgeDropsChunksAfterCallReturns(t *testing.T) {
 		var r proto.ToolReq
 		proto.DecodePayload(req, &r)
 		id = r.ID
+		br.HandleInbound(sealFin(t, r.ID, 0))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 

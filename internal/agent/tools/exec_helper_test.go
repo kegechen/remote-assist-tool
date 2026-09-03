@@ -42,6 +42,23 @@ func TestExecTreeHelper(t *testing.T) {
 		time.Sleep(time.Minute)
 		os.Exit(0)
 
+	case "spawn-exit":
+		// 父进程立即退出，孙进程继续持有 stdout/stderr 写端；这复现了
+		// streaming 路径里 cmd.Wait 已可返回、但两个读 pump 仍会等 EOF 的场景。
+		grand := exec.Command(os.Args[0], "-test.run=TestExecTreeHelper")
+		grand.Env = append(os.Environ(), helperModeEnv+"=pipehold")
+		grand.Stdout = os.Stdout
+		grand.Stderr = os.Stderr
+		if err := grand.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "spawn pipe holder:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+
+	case "pipehold":
+		time.Sleep(helperLingerDelay)
+		os.Exit(0)
+
 	case "linger":
 		time.Sleep(helperLingerDelay)
 		// 能走到这里就说明没被连坐杀掉。先落盘再说别的：stdout 此时多半已经关了，

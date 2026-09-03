@@ -146,6 +146,7 @@ func TestBridgeRejectsGapFillingEmptyChunk(t *testing.T) {
 		m, _ := proto.NewMessage(proto.MsgToolStream, &proto.StreamChunk{ID: r.ID, Seq: 1, Stream: "stdout"})
 		br.HandleInbound(m)
 		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "c"))
+		br.HandleInbound(sealFin(t, r.ID, 3))
 		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
 	}()
 

@@ -53,6 +53,60 @@ func TestDaemonRoutesToolReq(t *testing.T) {
 	}
 }
 
+type streamingFakeTool struct{}
+
+func (streamingFakeTool) Name() string { return "streaming" }
+func (streamingFakeTool) Run(ctx context.Context, in json.RawMessage, sink StreamSink) (json.RawMessage, error) {
+	if err := sink.Send("stdout", []byte("data")); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(`{"done":true}`), nil
+}
+
+func TestDaemonSendsStreamTerminatorBeforeResponse(t *testing.T) {
+	in := make(chan *proto.Message, 4)
+	out := make(chan *proto.Message, 4)
+	conn := &fakeConn{in: in, out: out}
+
+	r := NewRegistry()
+	r.Register(streamingFakeTool{})
+	d := NewDaemon(r, conn, [32]byte{})
+	go d.RunLoop(context.Background())
+
+	req := proto.ToolReq{ID: 10, Tool: "streaming", ArgsJSON: json.RawMessage(`{"stream":true}`)}
+	msg, _ := proto.NewMessage(proto.MsgToolReq, &req)
+	d.Inject(msg)
+
+	first := <-out
+	if first.Type != proto.MsgToolStream {
+		t.Fatalf("第一条响应应为流数据，得到 %s", first.Type)
+	}
+	var chunk proto.StreamChunk
+	if err := proto.DecodePayload(first, &chunk); err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Fin || chunk.Seq != 0 || string(chunk.Data) != "data" {
+		t.Fatalf("数据帧=%+v", chunk)
+	}
+
+	second := <-out
+	if second.Type != proto.MsgToolStream {
+		t.Fatalf("第二条响应应为流终止帧，得到 %s", second.Type)
+	}
+	var fin proto.StreamChunk
+	if err := proto.DecodePayload(second, &fin); err != nil {
+		t.Fatal(err)
+	}
+	if !fin.Fin || fin.Seq != 1 || len(fin.Data) != 0 {
+		t.Fatalf("终止帧=%+v", fin)
+	}
+
+	third := <-out
+	if third.Type != proto.MsgToolResp {
+		t.Fatalf("终止帧后应为 ToolResp，得到 %s", third.Type)
+	}
+}
+
 func TestDaemonRotateKeyCancelsInflight(t *testing.T) {
 	in := make(chan *proto.Message, 4)
 	out := make(chan *proto.Message, 16)

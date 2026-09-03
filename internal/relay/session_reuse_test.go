@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"net"
 	"testing"
 	"time"
 )
@@ -69,6 +70,38 @@ func TestReuseSessionWithHelpDetachesOldHelp(t *testing.T) {
 	}
 	if sm.ActivateDataPlane(session.ID, share2.ID, help.ID) {
 		t.Fatal("旧 Help 已解绑，不得重新激活")
+	}
+}
+
+func TestReuseSessionClearsStaleEndpointIdentity(t *testing.T) {
+	sm, session := newSessionWithAddrs(t, "203.0.113.10:5000", "198.51.100.20:6000")
+	sm.UpdatePeerAddr("share-src", "203.0.113.10:41001", "192.168.1.5:41001", "symmetric")
+	sm.UpdatePeerAddr("help-src", "198.51.100.20:41002", "192.168.1.6:41002", "cone")
+
+	newShare := &ClientConn{ID: "share-new", ClientID: "cid-src", Conn: &addrConn{addr: "198.51.100.77:7000"}}
+	if _, ok := sm.ReuseSessionByClientID("cid-src", newShare); !ok {
+		t.Fatal("复用应成功")
+	}
+	if !sm.MarkShareReady(session.ID, newShare.ID) {
+		t.Fatal("新 Share 发布失败")
+	}
+	newHelp := &ClientConn{ID: "help-new", Conn: &addrConn{addr: "198.51.100.88:8000"}}
+	if _, err := sm.JoinSession("SRCCODE", newHelp); err != nil {
+		t.Fatalf("新 Help 加入失败: %v", err)
+	}
+	if !sm.ActivateDataPlane(session.ID, newShare.ID, newHelp.ID) {
+		t.Fatal("新端点应可激活数据面")
+	}
+
+	for _, stale := range []string{"203.0.113.10", "192.168.1.5", "198.51.100.20", "192.168.1.6"} {
+		if sm.IsActiveDataSource(session.ID, net.ParseIP(stale)) {
+			t.Fatalf("复用后旧端点 %s 仍被当作 UDP 来源接受", stale)
+		}
+	}
+	for _, current := range []string{"198.51.100.77", "198.51.100.88"} {
+		if !sm.IsActiveDataSource(session.ID, net.ParseIP(current)) {
+			t.Fatalf("新端点 %s 应被接受", current)
+		}
 	}
 }
 

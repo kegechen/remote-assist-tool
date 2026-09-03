@@ -197,10 +197,23 @@ func (e *ExecTool) runStreaming(ctx context.Context, cancel context.CancelFunc, 
 	wg.Add(2)
 	go pump(stdout, "stdout", &wg)
 	go pump(stderr, "stderr", &wg)
+	// StdoutPipe/StderrPipe 由调用方直接读取，os/exec 不会为它们创建受 WaitDelay
+	// 管理的复制 goroutine。因此取消发生后，继承了写端的后代仍可能让 Read 永久等待；
+	// 独立关闭父进程持有的读端，确保 wg.Wait 能收口并继续执行 cmd.Wait。
+	stopPipeCloser := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stdout.Close()
+			_ = stderr.Close()
+		case <-stopPipeCloser:
+		}
+	}()
 	// 必须等两个 pump 读完再 cmd.Wait()：Wait 会关闭管道，先 Wait 会截断尚未读出的输出。
 	// 同样必须等它们发完再返回——Run 一返回 daemon 就发 ToolResp，而 ToolResp 是流的终止
 	// 信号，此后到达的 chunk 会被 bridge 当迟到帧丢弃。
 	wg.Wait()
+	close(stopPipeCloser)
 	werr := cmd.Wait()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("deadline_exceeded: exec timed out")

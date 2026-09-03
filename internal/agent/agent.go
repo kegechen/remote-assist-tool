@@ -271,7 +271,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
 		}
 	}()
-	sink := &chunkSink{daemon: d, id: req.ID}
+	sink := &chunkSink{daemon: d, id: req.ID, active: requestWantsStream(req.ArgsJSON)}
 	start := time.Now()
 	// Dispatch 放 goroutine 里 race 计时器：即便工具阻塞在不响应 ctx 的 I/O，也保证 host
 	// 在 deadline 内拿到响应（deadline_exceeded / cancelled），绝不让其永等。被遗弃的
@@ -306,6 +306,11 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if d.OnActivity != nil {
 		d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
 			time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
+	}
+	// 流式调用必须先发一个经过 AEAD 认证的结束帧，再发 ToolResp。结束帧携带最终
+	// Seq，使接收侧能够区分「真的没有更多输出」和「最后一帧刚好丢了」。
+	if err := sink.Finish(); err != nil {
+		log.Printf("tool | %s | stream terminator send failed: %v", req.Tool, err)
 	}
 	if err := d.sendResp(key, resp); err != nil {
 		log.Printf("tool | %s | response send failed: %v", req.Tool, err)
@@ -343,15 +348,21 @@ func (d *Daemon) sendResp(key [32]byte, resp proto.ToolResp) error {
 
 // chunkSink reserved for v2 streaming; v1 tools do not use sink
 type chunkSink struct {
-	daemon *Daemon
-	id     uint64
-	seq    uint32
-	mu     sync.Mutex
+	daemon   *Daemon
+	id       uint64
+	seq      uint32
+	active   bool
+	finished bool
+	mu       sync.Mutex
 }
 
 func (s *chunkSink) Send(stream string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.finished {
+		return nil
+	}
+	s.active = true
 	// 先把帧整体建好，AAD 直接取自它的字段——以后给 StreamChunk 添了新的明文字段
 	// （或真的用起 Fin），漏进 AAD 的话是编译期看得见的改动。
 	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: data}
@@ -367,6 +378,37 @@ func (s *chunkSink) Send(stream string, data []byte) error {
 	}
 	s.seq++
 	return s.daemon.sendMsg(proto.MsgToolStream, &c)
+}
+
+// Finish 发一条独立的、带 Fin=true 的空帧作为流终止符。它与数据帧共用 Seq 序列，
+// 因而终止符本身丢失、或它之前的最后一帧丢失，接收侧都能明确判定流不完整。
+func (s *chunkSink) Finish() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.active || s.finished {
+		return nil
+	}
+	s.finished = true
+	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Fin: true}
+	if key := s.daemon.currentKey(); key != [32]byte{} {
+		ct, err := proto.AEADSeal(&key, nil, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
+		if err != nil {
+			return err
+		}
+		c.Data = ct
+	}
+	s.seq++
+	return s.daemon.sendMsg(proto.MsgToolStream, &c)
+}
+
+// requestWantsStream covers the current stream=true request flag. Send also marks a sink
+// active, so stream-capable tools that do not expose this flag still get a terminator once
+// they produce output.
+func requestWantsStream(raw json.RawMessage) bool {
+	var flags struct {
+		Stream bool `json:"stream"`
+	}
+	return json.Unmarshal(raw, &flags) == nil && flags.Stream
 }
 
 // summarizeArgs 对各工具脱敏：read_file/write_file 只记 path+size；exec 记 argv[0]+argc

@@ -269,6 +269,14 @@ func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *Clie
 	session.Help = nil
 	session.pendingHelpID = ""
 	session.Share = newShare
+	// 端点地址是上一代连接通过 STUN/PeerAddrAdvertise 发布的身份凭据，不能跨
+	// 网络复用到新 Share。否则旧端点可以在新会话重新激活前抢先注册 UDP relay。
+	session.SharePublicAddr = ""
+	session.SharePrivateAddr = ""
+	session.ShareNATType = ""
+	session.HelpPublicAddr = ""
+	session.HelpPrivateAddr = ""
+	session.HelpNATType = ""
 	session.shareReady = false
 	session.dataPlaneReady = false
 	sm.byConnID[newShare.ID] = session

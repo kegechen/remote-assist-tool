@@ -67,6 +67,30 @@ func TestExecKillsWholeProcessTree(t *testing.T) {
 	}
 }
 
+func TestExecStreamingClosesInheritedPipesOnTimeout(t *testing.T) {
+	args, _ := json.Marshal(map[string]any{
+		"argv":       treeHelperArgv(),
+		"env":        treeHelperEnv("spawn-exit"),
+		"timeout_ms": 100,
+		"stream":     true,
+	})
+
+	tool := NewExec(nil)
+	start := time.Now()
+	var err error
+	runWithin(t, 2*time.Second, "streaming exec", func() {
+		_, err = tool.Run(context.Background(), args, &timedSink{})
+	})
+	if err == nil {
+		t.Fatal("期望超时错误")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("继承输出管道的孙进程不应让 streaming exec 卡住: %v", elapsed)
+	}
+	// pipe holder 会自行退出，避免测试留下外部进程。
+	time.Sleep(helperLingerDelay + 200*time.Millisecond)
+}
+
 // TestExecTruncatesLargeOutputCrossPlatform 与 exec_bounded_test.go 里那条同名用例
 // 覆盖同一件事，但用 helper 进程产出输出，因此 Windows 上也真的会跑。
 func TestExecTruncatesLargeOutputCrossPlatform(t *testing.T) {

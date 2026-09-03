@@ -81,10 +81,7 @@ func ToolRespAAD(id uint64, ok bool, errorCode, errorMsg string) []byte {
 }
 
 // StreamChunkAAD 绑定流帧的全部明文字段。Seq 进 AAD 意味着重排或重放某一帧都会
-// 解密失败，接收侧据此判定这次调用的输出不完整。
-//
-// fin 目前全链路恒为 false（字段留着没用起来），一并绑上是为了将来真启用时
-// 「漏进 AAD」是编译期看得见的改动，而不是上线后一片解密失败。
+// 解密失败，接收侧据此判定这次调用的输出不完整；Fin 也必须认证，避免伪造结束帧。
 func StreamChunkAAD(id uint64, seq uint32, stream string, fin bool) []byte {
 	return newAADBuilder(aadTagStreamChunk).addUint64(id).addUint32(seq).addString(stream).addBool(fin).buf
 }
