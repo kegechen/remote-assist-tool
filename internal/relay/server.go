@@ -154,6 +154,7 @@ type Server struct {
 	toolLimiterGlobal        *ratelimit.Bucket       // 全局工具通道限流（KiB/s）
 	logSampleCtr             uint64                  // TCP 高频拒绝日志采样计数
 	p2pSampleCtr             uint64                  // P2P 协商信息独立采样，避免污染拒绝计数
+	toolThrottleSampleCtr    uint64                  // 工具通道节流独立采样：节流是背压不是拒绝，同样不该污染拒绝计数
 	limits                   Limits
 }
 
@@ -321,6 +322,17 @@ func (s *Server) logP2PSampled(format string, args ...interface{}) {
 	}
 }
 
+// logToolThrottleSampled 与 logP2PSampled 同理：工具通道节流是正常的背压（帧一条没丢，
+// 只是慢了一拍），不是拒绝。混进 logSampleCtr 会让 sample_total 的差值不再等于"期间被拒
+// 绝的消息数"，运维按文档去推算就会推错。
+func (s *Server) logToolThrottleSampled(format string, args ...interface{}) {
+	n := atomic.AddUint64(&s.toolThrottleSampleCtr, 1)
+	if sampleHit(n, s.limits.RejectAuditSampleEvery) {
+		args = append(args, n, s.limits.RejectAuditSampleEvery)
+		log.Printf(format+" (tool_throttle_sample_total=%d, sample_every=%d)", args...)
+	}
+}
+
 func sampleHit(n, every uint64) bool {
 	return every <= 1 || (n-1)%every == 0
 }
@@ -349,23 +361,28 @@ func (s *Server) allowDataMessage(client *ClientConn) bool {
 // 按默认限额这条路走不到：单帧最大 4 MiB，16 MiB/s 补满只需 250ms。它是配置离谱时的兜底，
 // 保证读循环不会真的卡死。
 //
-// 先扣 per-conn 再扣 global：真正会触发节流的几乎总是单连接那只桶，这个顺序下常见路径
-// 不会白扣全局额度。反过来（全局满了）重试时会对 per-conn 多计几十 KiB，量级可忽略。
+// 每只桶一帧只扣一次：per-conn 扣成功后用 perConnPaid 记住，后面即使还在等 global 也不再
+// 重扣。否则全局被别人打满时，本连接每 20ms 重试一次就白扣一次自己的额度——等 global 恢复，
+// 自己的桶反倒先空了，成了"被别人的流量拖垮"。这类跨连接的放大效应正是 per-conn 桶要防的。
 func (s *Server) allowToolMessage(client *ClientConn, payloadBytes int) bool {
 	cost := float64((payloadBytes + 1023) / 1024)
 	if cost < toolMinFrameCostKiB {
 		cost = toolMinFrameCostKiB
 	}
 	deadline := time.Now().Add(toolThrottleMaxWait)
+	perConnPaid := s.toolLimiterPerConn == nil
 	throttled := false
 	for {
-		if s.chargeToolTokens(client, cost) {
+		if !perConnPaid {
+			perConnPaid = s.toolLimiterPerConn.AllowN(client.ID, cost)
+		}
+		if perConnPaid && (s.toolLimiterGlobal == nil || s.toolLimiterGlobal.AllowN(cost)) {
 			return true
 		}
 		if !throttled {
-			// 每次调用只记一条：节流是正常的背压，不是拒绝，不该按重试次数灌爆采样计数器。
+			// 每次调用只记一条：按重试次数记会让采样计数器随睡眠粒度浮动，失去可比性。
 			throttled = true
-			s.logSampled("Tool channel throttled from %s", client.ID)
+			s.logToolThrottleSampled("Tool channel throttled from %s", client.ID)
 		}
 		if !time.Now().Before(deadline) {
 			s.logSampled("Tool channel rate limit exceeded past throttle window from %s", client.ID)
@@ -373,16 +390,6 @@ func (s *Server) allowToolMessage(client *ClientConn, payloadBytes int) bool {
 		}
 		time.Sleep(toolThrottleStep)
 	}
-}
-
-func (s *Server) chargeToolTokens(client *ClientConn, cost float64) bool {
-	if s.toolLimiterPerConn != nil && !s.toolLimiterPerConn.AllowN(client.ID, cost) {
-		return false
-	}
-	if s.toolLimiterGlobal != nil && !s.toolLimiterGlobal.AllowN(cost) {
-		return false
-	}
-	return true
 }
 
 func (s *Server) allowControlMessage(client *ClientConn) bool {

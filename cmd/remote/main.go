@@ -424,15 +424,6 @@ func runHelp(args []string) {
 	fmt.Println("\nSession ended.")
 }
 
-// resolveTLSVerify 调和 --insecure 与 --ca。
-//
-// --insecure 默认 true 是为了让自签证书的内置/standalone relay 开箱即用（见 0dac99c），
-// 这个默认值本身要保留：relay 自动生成的自签证书 SAN 只含 localhost/127.0.0.1，而客户端
-// 默认连的是裸 IP，翻转默认值会让工具开箱即坏。
-//
-// 但用户显式传了 --ca 就已经明确表达"我要校验"，此时继续沿用 insecure 的默认值会让
-// RootCAs 被 InsecureSkipVerify 静默架空。这里按意图调和：未显式传 --insecure 时自动
-// 开启校验；显式传了 --insecure=true 又给 --ca 属自相矛盾，报错而不是二选一地静默忽略。
 // rejectPositionalArgs 在解析后拦下任何多余的位置参数。
 //
 // Go 的 flag 在第一个非旗标处停止解析，剩下的全落进 fs.Args()，默认被静默忽略——
@@ -452,6 +443,15 @@ func rejectPositionalArgs(fs *flag.FlagSet, mode string) {
 	os.Exit(2)
 }
 
+// resolveTLSVerify 调和 --insecure 与 --ca。
+//
+// --insecure 默认 true 是为了让自签证书的内置/standalone relay 开箱即用（见 0dac99c），
+// 这个默认值本身要保留：relay 自动生成的自签证书 SAN 只含 localhost/127.0.0.1，而客户端
+// 默认连的是裸 IP，翻转默认值会让工具开箱即坏。
+//
+// 但用户显式传了 --ca 就已经明确表达"我要校验"，此时继续沿用 insecure 的默认值会让
+// RootCAs 被 InsecureSkipVerify 静默架空。这里按意图调和：未显式传 --insecure 时自动
+// 开启校验；显式传了 --insecure=true 又给 --ca 属自相矛盾，报错而不是二选一地静默忽略。
 func resolveTLSVerify(fs *flag.FlagSet, insecure *bool, caFile string) {
 	if caFile == "" {
 		return

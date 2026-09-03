@@ -104,10 +104,10 @@ rate 单位为每秒事件数，burst 为令牌桶瞬时容量。
 
 - **按字节而非条数**：`exec stream=true` 是管道读到多少发多少（单帧上限 32 KiB），`cat` 一个大日志轻松超过 100 帧/秒。按条数限流会把一次完全正常的输出判成洪水。每帧另有 16 KiB 的最低计费，把帧率一并压住（16 MiB/s ÷ 16 KiB ≈ 1024 帧/秒）。
 - **超限是节流，不是丢帧**：relay 读一条转一条，超速时读循环让路，TCP 窗口自然把发送端压慢，一个字节都不丢。工具通道的帧丢不起——payload 是 AEAD 的、每帧独立 nonce，少掉一帧不影响后续解密，两端谁都发现不了，用户拿到的是一份被悄悄挖空却仍标着成功的输出。
-- **burst 必须装得下最大的单条消息**（4 MiB，来自 `read_file` 分块），否则每帧都等不到额度；`ValidateLimits` 会直接拒绝这种配置。
+- **burst 必须装得下最大的单条消息**（4 MiB，relay 读循环的硬上限 `maxMessageSize`），否则这条帧永远等不到额度；`ValidateLimits` 会直接拒绝这种配置。
 - 只有等待超过 2 秒仍拿不到额度才回 `RATE_LIMITED` 并断连。按默认限额走不到这条路，它是配置离谱时的兜底。
 
-日志里 `Tool channel throttled` 每次调用只记一条（不按重试次数记），`Tool channel rate limit exceeded past throttle window` 出现即说明限额配置有问题。
+日志里 `Tool channel throttled` 每次调用只记一条（不按重试次数记），走独立的 `tool_throttle_sample_total`；`Tool channel rate limit exceeded past throttle window` 才是真正的拒绝，计入 `sample_total`，出现即说明限额配置有问题。
 
 ## 5. UDP 默认值与依据
 
@@ -136,7 +136,7 @@ rate 单位为每秒事件数，burst 为令牌桶瞬时容量。
 sample_total=<该计数器启动后的累计拒绝数>, sample_every=<当前采样间隔>
 ```
 
-拒绝计数器分为三组：Join 审计拒绝、TCP 高频消息拒绝、UDP 无效/限流丢包。相邻两条同组日志的 `sample_total` 差值可估算期间拒绝总量；最后不足一个采样间隔的尾数不会立即写日志。P2P 协商信息使用独立的 `p2p_sample_total`，不计入拒绝量。
+拒绝计数器分为三组：Join 审计拒绝、TCP 高频消息拒绝、UDP 无效/限流丢包。相邻两条同组日志的 `sample_total` 差值可估算期间拒绝总量；最后不足一个采样间隔的尾数不会立即写日志。P2P 协商信息使用独立的 `p2p_sample_total`，工具通道节流使用独立的 `tool_throttle_sample_total`，两者都不计入拒绝量——节流只是把发送端压慢，一帧都没丢，混进拒绝计数会让上面那个差值算错。
 
 建议上线流程：
 

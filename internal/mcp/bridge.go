@@ -62,46 +62,90 @@ type Bridge struct {
 	closeMu   sync.Mutex  // 串行化 Disconnect，避免重复广播
 }
 
-// streamRecv 一次流式调用的接收状态：回调 + Seq 连续性。
+// maxTrackedGaps 限制 missing 集合的规模。正常的乱序只发生在 relay⇄P2P 热切换那一瞬，
+// 在途帧不过几个；真出现巨大的空洞说明是成片丢帧（或对端 Seq 乱来），此时没必要再逐个
+// 登记等它补齐——结论已经确定是"这次调用不完整"，记个数就够。
+const maxTrackedGaps = 4096
+
+// streamGapSettle 发现空洞后允许迟到帧补齐的宽限期。
+//
+// help 端在 P2P 升级后同时跑两条读循环（relay 的那条按设计不会停，见 help_bootstrap.go
+// 「始终投递」），share 端换出口也不是原子的，所以最终 ToolResp 可能走 P2P 先到，而同一
+// 次调用的最后几帧还在 relay 上飞。不给宽限就会把一次完全正常的调用判成 stream_incomplete。
+// 只在真的检测到空洞时才付这点等待，正常路径零开销。
+const (
+	streamGapSettle     = 300 * time.Millisecond
+	streamGapSettleStep = 20 * time.Millisecond
+)
+
+// streamRecv 一次流式调用的接收状态：回调 + Seq 完整性。
 //
 // StreamChunk.Seq 以前是只写不读的：share 端每帧递增，help 端从来不看。于是任何一处丢帧
 // （relay 限流丢弃、AEAD 解密失败）都表现为"输出中间静静少了几 KB，最终 ToolResp 仍然
 // OK"——调用方拿到一份看起来完整、实际被挖空的结果。这里补上校验：一旦发现空洞就记下，
 // 调用结束时把整次调用判为失败，宁可报错也不交出残缺输出。
+//
+// 注意这里必须容忍乱序，不能简单地"Seq != 期望值就算丢"：见 streamGapSettle 的说明。
 type streamRecv struct {
 	cb func(stream string, data []byte)
 
-	mu   sync.Mutex
-	next uint32 // 期望的下一个 Seq（share 端 chunkSink 从 0 开始）
-	gaps int    // 累计缺失的帧数
+	mu       sync.Mutex
+	next     uint32              // 已见过的最大 Seq + 1
+	missing  map[uint32]struct{} // 小于 next 但还没到过的 Seq
+	overflow int                 // 超出 maxTrackedGaps 后不再逐个登记，只累加
+	damaged  int                 // 帧到了但内容用不了（AEAD 解密失败）
 }
 
-// observe 记录一帧的 Seq 并返回是否发现空洞。乱序不会发生（同一条隧道的读循环单线程
-// 投递，P2P 与 relay 之间的切换也是原子换连接），所以 Seq != next 即视为丢帧。
-// 小于 next 的（重复/滞后帧）不计入缺失，也不回退期望值。
+// observe 记录一帧的 Seq。迟到帧会把先前登记的空洞补上；重复帧是空操作。
 func (s *streamRecv) observe(seq uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if seq < s.next {
+		delete(s.missing, seq)
 		return
 	}
-	if seq > s.next {
-		s.gaps += int(seq - s.next)
+	for h := s.next; h < seq; h++ {
+		if len(s.missing) >= maxTrackedGaps {
+			s.overflow += int(seq - h)
+			break
+		}
+		if s.missing == nil {
+			s.missing = make(map[uint32]struct{})
+		}
+		s.missing[h] = struct{}{}
 	}
 	s.next = seq + 1
 }
 
-// markGap 用于"帧到了但内容用不了"的情况（AEAD 解密失败）：Seq 是连续的，但数据丢了。
-func (s *streamRecv) markGap() {
+// markDamaged 用于"帧到了但内容用不了"（AEAD 解密失败）：Seq 是连续的，数据却丢了。
+// 这种损坏不会被迟到帧补上，直接计数。
+func (s *streamRecv) markDamaged() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.gaps++
+	s.damaged++
 }
 
 func (s *streamRecv) gapCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.gaps
+	return len(s.missing) + s.overflow + s.damaged
+}
+
+// settledGapCount 在给迟到帧留出 streamGapSettle 的补齐窗口后返回最终的缺帧数。
+// 没有空洞时立即返回 0，不引入任何等待。
+func (s *streamRecv) settledGapCount() int {
+	n := s.gapCount()
+	if n == 0 {
+		return 0
+	}
+	deadline := time.Now().Add(streamGapSettle)
+	for time.Now().Before(deadline) {
+		time.Sleep(streamGapSettleStep)
+		if n = s.gapCount(); n == 0 {
+			return 0
+		}
+	}
+	return n
 }
 
 func NewBridge(c MsgConn, key [32]byte) *Bridge {
@@ -257,7 +301,7 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		// 流式输出缺了帧就不能当成功返回：调用方（GUI 终端 / AI）没有别的办法察觉，
 		// 一份被挖空却标着 OK 的输出比一次明确的失败危险得多。
 		if recv != nil {
-			if n := recv.gapCount(); n > 0 {
+			if n := recv.settledGapCount(); n > 0 {
 				return nil, fmt.Errorf("stream_incomplete: 流式输出缺失 %d 帧（relay 限流或隧道异常），结果不完整", n)
 			}
 		}
@@ -306,7 +350,7 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			if err != nil {
 				// 帧损坏/换了 key：这一帧的内容没了，但后续帧与最终 ToolResp 不受影响。
 				// 记成一个空洞，由 callToolInner 在收尾时把整次调用判为不完整。
-				recv.markGap()
+				recv.markDamaged()
 				return
 			}
 			data = plain

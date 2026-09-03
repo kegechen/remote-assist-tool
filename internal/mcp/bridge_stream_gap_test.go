@@ -102,6 +102,71 @@ func TestBridgeStreamNoGapStillSucceeds(t *testing.T) {
 	}
 }
 
+// TestBridgeStreamOutOfOrderIsNotAGap 乱序到达不是丢帧。
+//
+// help 端在 P2P 升级后同时跑两条读循环——relay 那条按设计不会停（help_bootstrap.go
+// 「始终投递」），share 端换出口也不是原子的。于是同一次调用的帧可能一部分从 relay 来、
+// 一部分从 P2P 来，两条 goroutine 之间没有任何顺序保证。把"Seq 不等于期望值"直接判成丢帧
+// 会把一次完全正常的调用打成 stream_incomplete。
+func TestBridgeStreamOutOfOrderIsNotAGap(t *testing.T) {
+	conn := &stubConn{sent: make(chan *proto.Message, 4)}
+	br := NewBridge(conn, streamKey)
+
+	go func() {
+		req := <-conn.sent
+		var r proto.ToolReq
+		proto.DecodePayload(req, &r)
+		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "a"))
+		br.HandleInbound(sealChunk(t, r.ID, 1, "stdout", "b"))
+		// 3 先于 2 到（P2P 那条读循环跑赢了还在 relay 上飞的那一帧）
+		br.HandleInbound(sealChunk(t, r.ID, 3, "stdout", "d"))
+		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "c"))
+		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
+	}()
+
+	var mu sync.Mutex
+	got := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := br.CallToolStream(ctx, "exec", json.RawMessage(`{"argv":["x"],"stream":true}`),
+		func(string, []byte) { mu.Lock(); got++; mu.Unlock() }); err != nil {
+		t.Fatalf("乱序到达被误判为丢帧: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got != 4 {
+		t.Fatalf("回调 %d 次，想要 4", got)
+	}
+}
+
+// TestBridgeStreamLateChunkAfterRespIsNotAGap 最终 ToolResp 抢在最后一帧前面到达，
+// 同样不能判成丢帧。
+//
+// 这正是 relay⇄P2P 热切换的典型时序：resp 走新通道先到，尾帧还在旧通道上飞。收尾时看一眼
+// 就下结论会误杀，所以发现空洞后要留一个补齐窗口（streamGapSettle）。
+func TestBridgeStreamLateChunkAfterRespIsNotAGap(t *testing.T) {
+	conn := &stubConn{sent: make(chan *proto.Message, 4)}
+	br := NewBridge(conn, streamKey)
+
+	go func() {
+		req := <-conn.sent
+		var r proto.ToolReq
+		proto.DecodePayload(req, &r)
+		br.HandleInbound(sealChunk(t, r.ID, 0, "stdout", "a"))
+		br.HandleInbound(sealChunk(t, r.ID, 2, "stdout", "c"))
+		br.HandleInbound(sealResp(t, r.ID, `{"exit_code":0}`))
+		time.Sleep(40 * time.Millisecond) // 尾帧还在旧通道上
+		br.HandleInbound(sealChunk(t, r.ID, 1, "stdout", "b"))
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := br.CallToolStream(ctx, "exec", json.RawMessage(`{"argv":["x"],"stream":true}`),
+		func(string, []byte) {}); err != nil {
+		t.Fatalf("迟到的尾帧在补齐窗口内到了，却仍被判为不完整: %v", err)
+	}
+}
+
 // TestBridgeRequestIDsDifferAcrossConnects 每次 connect 新建的 Bridge 不能都从同一个 ID
 // 开始数。
 //

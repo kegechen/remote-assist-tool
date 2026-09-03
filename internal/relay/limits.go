@@ -235,7 +235,7 @@ func ValidateLimits(l Limits) error {
 		}
 	}
 	// 工具通道超限先节流、等不到额度才断连，所以 burst 必须装得下最大的单条消息
-	// （maxMessageSize，来自 read_file 的 1 MiB 分块）。装不下的话每一帧都永远等不到额度，
+	// （maxMessageSize = 4 MiB，读循环的硬上限）。装不下的话这条帧永远等不到额度，
 	// 等于配置一生效工具通道就用不了，且现象是莫名其妙的反复断线。
 	maxFrameKiB := float64(maxMessageSize) / 1024
 	for _, check := range []struct {
