@@ -50,6 +50,7 @@ type MsgConn interface {
 
 // Bridge MCP server <-> 隧道工具消息
 type Bridge struct {
+	connMu    sync.RWMutex // 保护 conn/key：P2P 热升级会在读循环外并发替换二者
 	conn      MsgConn
 	key       [32]byte
 	nextID    uint64
@@ -60,6 +61,27 @@ type Bridge struct {
 }
 
 func NewBridge(c MsgConn, key [32]byte) *Bridge { return &Bridge{conn: c, key: key} }
+
+// SwapConn 原子替换工具消息的出口连接与会话密钥，用于 relay ⇄ P2P 热切换：
+// 连接先在 relay 上完成握手并可用，P2P 打洞成功且双向证实后再切到隧道；
+// P2P 隧道中途断掉时再切回 relay。对端由 agent.Daemon.SwapConn 做对称切换。
+//
+// P2P 升级复用 relay 握手协商出的同一把 key（key 由 code+双方 nonce 派生，与传输
+// 通道无关），此时传入原 key 即可；只有重新握手（降级回 relay）才会换 key。
+func (b *Bridge) SwapConn(c MsgConn, key [32]byte) {
+	b.connMu.Lock()
+	b.conn = c
+	b.key = key
+	b.connMu.Unlock()
+}
+
+// snapshot 取当前 conn/key 的一致快照。单次 CallTool 全程用同一份快照，保证请求的
+// 加密 key、发送通道、响应解密 key 三者配对，不会被中途的 SwapConn 撕裂。
+func (b *Bridge) snapshot() (MsgConn, [32]byte) {
+	b.connMu.RLock()
+	defer b.connMu.RUnlock()
+	return b.conn, b.key
+}
 
 // Disconnect 标记隧道已断开，并唤醒所有在途 CallTool 立即返回 err。
 //
@@ -133,15 +155,18 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		defer cancel()
 	}
 
+	// 全程用同一份 conn/key 快照，避免中途 SwapConn 导致「用旧 key 加密、却按新 key 解密」。
+	conn, key := b.snapshot()
+
 	encArgs := args
-	if b.key != [32]byte{} && len(args) > 0 {
-		wrapped, err := proto.AEADSealJSON(&b.key, args)
+	if key != [32]byte{} && len(args) > 0 {
+		wrapped, err := proto.AEADSealJSON(&key, args)
 		if err != nil {
 			return nil, err
 		}
 		encArgs = wrapped
 	}
-	if err := b.conn.SendMessage(proto.MsgToolReq, &proto.ToolReq{ID: id, Tool: name, ArgsJSON: encArgs}); err != nil {
+	if err := conn.SendMessage(proto.MsgToolReq, &proto.ToolReq{ID: id, Tool: name, ArgsJSON: encArgs}); err != nil {
 		return nil, err
 	}
 	select {
@@ -151,7 +176,10 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			reason = "deadline_exceeded"
 		}
-		b.conn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: reason})
+		// cancel 是后发的，要走**当前**活跃通道：请求发出后若已切到 P2P，
+		// 往旧 relay conn 发 cancel share 端收不到。
+		curConn, _ := b.snapshot()
+		curConn.SendMessage(proto.MsgToolCancel, &proto.Cancel{ID: id, Reason: reason})
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("tunnel_lost: no response within deadline")
 		}
@@ -161,8 +189,8 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 			return nil, fmt.Errorf("%s: %s", resp.ErrorCode, resp.ErrorMsg)
 		}
 		result := resp.ResultJSON
-		if b.key != [32]byte{} && len(result) > 0 {
-			plain, err := proto.AEADOpenJSON(&b.key, result)
+		if key != [32]byte{} && len(result) > 0 {
+			plain, err := proto.AEADOpenJSON(&key, result)
 			if err != nil {
 				return nil, err
 			}
@@ -198,8 +226,8 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			return
 		}
 		data := c.Data
-		if b.key != [32]byte{} && len(data) > 0 {
-			plain, err := proto.AEADOpen(&b.key, data)
+		if _, key := b.snapshot(); key != [32]byte{} && len(data) > 0 {
+			plain, err := proto.AEADOpen(&key, data)
 			if err != nil {
 				return // 帧损坏/换了 key：丢这一帧，不影响后续帧与最终 ToolResp
 			}

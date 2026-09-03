@@ -111,21 +111,37 @@ func NewDaemon(reg *Registry, conn MsgConn, key [32]byte) *Daemon {
 // RotateKey 用新的 session_key 替换；用于同一 share 服务多个 help 端续连。
 // 取消所有 in-flight 请求（旧 key 加密的不再有意义）。
 func (d *Daemon) RotateKey(key [32]byte) {
+	d.connMu.Lock()
+	same := d.key == key
+	d.key = key
+	d.connMu.Unlock()
+	if same {
+		return // key 没变，在途请求依然有效，不该被打断
+	}
 	d.cancels.Range(func(k, v any) bool {
 		if cancel, ok := v.(context.CancelFunc); ok {
 			cancel()
 		}
 		return true
 	})
-	d.key = key
 }
 
-// SwapConn atomically replaces the outbound connection (e.g. relay → P2P)
-// and rotates the session key, so subsequent tool responses go over the new
-// conn encrypted with the new key. In-flight requests are NOT cancelled — the
-// swap happens during the tool handshake window when no tool request is
-// normally in flight; a rare relay request still in flight would have its
-// response sent over P2P (the help side ignores unknown response IDs).
+// currentKey 取当前会话密钥快照。与 conn 同锁保护：P2P 热升级会在工具调用飞行途中
+// 并发替换二者，裸读会构成数据竞态。
+func (d *Daemon) currentKey() [32]byte {
+	d.connMu.RLock()
+	defer d.connMu.RUnlock()
+	return d.key
+}
+
+// SwapConn 原子替换出站连接（relay ⇄ P2P），并按需轮换会话密钥。
+//
+// key 与当前相同时**不取消在途请求**：P2P 热升级复用 relay 握手协商出的同一把 key，
+// 换的只是传输通道，正在跑的工具调用不该因此被打断。升级发生在会话中途（connect
+// 之后几秒），很可能正压在用户的第一个 exec 上——这里若无条件 RotateKey，那个调用
+// 会直接以 cancelled 收场。
+// key 确实变了（重新握手，如 P2P 断开后降级回 relay）才轮换并取消在途请求，
+// 因为旧 key 加密的请求已经没有意义。
 func (d *Daemon) SwapConn(conn MsgConn, key [32]byte) {
 	d.connMu.Lock()
 	d.conn = conn
@@ -191,9 +207,12 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if err := proto.DecodePayload(msg, &req); err != nil {
 		return
 	}
+	// 整个请求用同一份 key 快照：解密入参与加密结果必须配对，中途若发生 SwapConn
+	// （P2P 升级/降级）也不能让一半用旧 key、一半用新 key。
+	key := d.currentKey()
 	// 解密 args（key 非零时才解密；密文以 JSON 字符串 base64 形式承载）
-	if d.key != [32]byte{} && len(req.ArgsJSON) > 0 {
-		plain, err := proto.AEADOpenJSON(&d.key, req.ArgsJSON)
+	if key != [32]byte{} && len(req.ArgsJSON) > 0 {
+		plain, err := proto.AEADOpenJSON(&key, req.ArgsJSON)
 		if err != nil {
 			d.sendMsg(proto.MsgToolResp, &proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
 			return
@@ -243,8 +262,8 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		resp = proto.ToolResp{ID: req.ID, OK: false, ErrorCode: code, ErrorMsg: fmt.Sprintf("tool %s: %s (limit %s)", req.Tool, code, timeout)}
 	}
 	// 加密 result（密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法）
-	if d.key != [32]byte{} && len(resp.ResultJSON) > 0 {
-		if wrapped, err := proto.AEADSealJSON(&d.key, resp.ResultJSON); err == nil {
+	if key != [32]byte{} && len(resp.ResultJSON) > 0 {
+		if wrapped, err := proto.AEADSealJSON(&key, resp.ResultJSON); err == nil {
 			resp.ResultJSON = wrapped
 		}
 	}
@@ -276,8 +295,8 @@ func (s *chunkSink) Send(stream string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	payload := data
-	if s.daemon.key != [32]byte{} {
-		ct, err := proto.AEADSeal(&s.daemon.key, data)
+	if key := s.daemon.currentKey(); key != [32]byte{} {
+		ct, err := proto.AEADSeal(&key, data)
 		if err != nil {
 			return err
 		}

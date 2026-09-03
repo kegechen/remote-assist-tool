@@ -3,6 +3,7 @@ package client
 import (
 	"net"
 	"testing"
+	"time"
 
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
@@ -132,6 +133,85 @@ func TestP2PConnModeHeader(t *testing.T) {
 	}
 	if !toolMode {
 		t.Fatal("expected tool mode, got SSH mode")
+	}
+}
+
+// TestReadModeHeaderTimeoutFires 验证 mode header 读超时会按时返回，而不是干等到隧道
+// 的 60s peerTimeout。share 端正是靠这个超时，才能在 P2P 只单向可达时把工具流量退回
+// relay —— 否则它会一直阻塞、期间根本不读 relay，help 的 ToolHello 就无人应答。
+func TestReadModeHeaderTimeoutFires(t *testing.T) {
+	t1, t2 := createTestTunnelPair(t)
+	defer t1.Close()
+	defer t2.Close()
+
+	// t1 端一个字节都不发，t2 端必须靠超时脱身。
+	start := time.Now()
+	_, _, err := ReadModeHeaderTimeout(t2, 300*time.Millisecond)
+	if err == nil {
+		t.Fatal("期望超时错误，得到 nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("超时未生效，耗时 %v（疑似退化为等 peerTimeout）", elapsed)
+	}
+}
+
+// TestReadModeHeaderTimeoutReadsHeader 正常收到 header 时不受超时影响。
+func TestReadModeHeaderTimeoutReadsHeader(t *testing.T) {
+	t1, t2 := createTestTunnelPair(t)
+	defer t1.Close()
+	defer t2.Close()
+
+	sender := NewP2PConn(t1)
+	if err := sender.WriteModeHeader(); err != nil {
+		t.Fatalf("WriteModeHeader failed: %v", err)
+	}
+	toolMode, _, err := ReadModeHeaderTimeout(t2, 5*time.Second)
+	if err != nil {
+		t.Fatalf("ReadModeHeaderTimeout failed: %v", err)
+	}
+	if !toolMode {
+		t.Fatal("expected tool mode")
+	}
+}
+
+// TestProbeBidirectionalSucceedsOnPong 对端回 pong 时探活通过 —— 这是把工具流量切到
+// P2P 的前置条件。
+func TestProbeBidirectionalSucceedsOnPong(t *testing.T) {
+	t1, t2 := createTestTunnelPair(t)
+	defer t1.Close()
+	defer t2.Close()
+
+	helpSide := NewP2PConn(t1)
+	shareSide := NewP2PConn(t2)
+
+	go func() {
+		msg, err := shareSide.ReadMessage()
+		if err != nil || msg.Type != proto.MsgHeartbeat {
+			return
+		}
+		shareSide.SendMessage(proto.MsgHeartbeat, &proto.Heartbeat{Timestamp: 1})
+	}()
+
+	if err := helpSide.ProbeBidirectional(5 * time.Second); err != nil {
+		t.Fatalf("探活应当通过：%v", err)
+	}
+}
+
+// TestProbeBidirectionalTimesOutWithoutPong 对端不回 pong（打洞只单向通，或对端是
+// 不认识探活的旧版本）时，探活必须超时失败，好让调用方留在 relay，而不是把会话切到
+// 一条只出不进的死隧道上。
+func TestProbeBidirectionalTimesOutWithoutPong(t *testing.T) {
+	t1, t2 := createTestTunnelPair(t)
+	defer t1.Close()
+	defer t2.Close()
+
+	helpSide := NewP2PConn(t1)
+	start := time.Now()
+	if err := helpSide.ProbeBidirectional(300 * time.Millisecond); err == nil {
+		t.Fatal("对端不回 pong 时期望探活失败，得到 nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("探活超时未生效，耗时 %v", elapsed)
 	}
 }
 

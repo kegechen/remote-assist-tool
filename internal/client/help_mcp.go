@@ -31,6 +31,18 @@ func dispatchHelpToolMessage(msg *proto.Message, b inboundSink) bool {
 // 等待 HelloAck 期间会跳过非相关消息（PeerAddrReady、Heartbeat 等），
 // 防止 relay 主动推的 P2P 寻址通知抢先到达打断握手。
 func (h *HelpMode) handshakeTool() ([32]byte, error) {
+	return h.handshakeToolCapturing(nil)
+}
+
+// handshakeToolCapturing 同 handshakeTool，但把握手窗口内到达的 PeerAddrReady 交给
+// capture 而不是丢弃。
+//
+// 这条消息**绝不能丢**：relay 对每次 PeerAddrAdvertise 只推送一次，且只推给对端
+// （server.go handlePeerAddrAdvertise → UpdatePeerAddr → sendPeerAddrReady(update.Peer)）。
+// share 会在收到 help 的 ToolHello 之前就完成 advertise，所以对端地址正好落在这个
+// 握手窗口里；丢了它 help 就永远拿不到对端地址，startHolePunching 因 peerInfo == nil
+// 直接返回，P2P 静默失效——只有 LAN / 全锥形 NAT 下靠 share 的单向包才碰巧能通。
+func (h *HelpMode) handshakeToolCapturing(capture func(*proto.PeerAddrReady)) ([32]byte, error) {
 	hello := proto.NewHello()
 	if err := h.client.SendMessage(proto.MsgToolHello, &hello); err != nil {
 		return [32]byte{}, err
@@ -50,7 +62,15 @@ func (h *HelpMode) handshakeTool() ([32]byte, error) {
 				return [32]byte{}, fmt.Errorf("share rejected tool channel: %s", ack.ErrorMsg)
 			}
 			return proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64), nil
-		case proto.MsgHeartbeat, proto.MsgPeerAddrReady, proto.MsgError:
+		case proto.MsgPeerAddrReady:
+			if capture != nil {
+				var ready proto.PeerAddrReady
+				if err := proto.DecodePayload(msg, &ready); err == nil {
+					capture(&ready)
+				}
+			}
+			continue
+		case proto.MsgHeartbeat, proto.MsgError:
 			// 跳过 relay 在 Join 之后主动推送的消息，继续等 Ack
 			continue
 		default:
