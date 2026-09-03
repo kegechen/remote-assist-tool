@@ -50,6 +50,10 @@ func (h *HelpMode) join() (*proto.JoinResponse, error) {
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return nil, err
 	}
+	// relay 收下 JoinRequest 却不应答（进程假死、被中间盒吞掉）时，裸 ReadMessage 会
+	// 永久阻塞。MCP 里这一步在 connectMu 之内，一次挂死就让后续所有 connect 排队卡住。
+	h.client.SetReadDeadline(time.Now().Add(joinTimeout))
+	defer h.client.SetReadDeadline(time.Time{})
 	msg, err := h.client.ReadMessage()
 	if err != nil {
 		return nil, err

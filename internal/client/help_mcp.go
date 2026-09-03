@@ -15,6 +15,28 @@ type inboundSink interface {
 	HandleInbound(msg *proto.Message)
 }
 
+// peerGoneError 把 relay 推来的 MsgError 翻译成「本次会话已经没了」的错误；不属于这
+// 一类时返回 nil，调用方按普通日志处理即可。
+//
+// help 端两条读循环过去都只是把 MsgError 打条日志就接着读。可这两个码之后，这条 relay
+// 连接上再也不会有工具响应了——PEER_RECONNECTED 之后 relay 会立刻关连接，
+// PEER_DISCONNECTED 之后被协助端已经不在。不拆会话的代价是 doConnect 里的
+// b.activeTarget 还留着，下一次同参数 connect 命中幂等分支、返回一个指向死会话的
+// connected=true，此后每个工具调用都只能干等超时，且永远自愈不了。
+func peerGoneError(msg *proto.Message) error {
+	var errMsg proto.ErrorMessage
+	if err := proto.DecodePayload(msg, &errMsg); err != nil {
+		return nil
+	}
+	switch errMsg.Code {
+	case proto.ErrCodePeerDisconnected:
+		return fmt.Errorf("peer_gone: 被协助端已断开连接，请重新 connect")
+	case proto.ErrCodePeerReconnected:
+		return fmt.Errorf("peer_gone: 被协助端连接已更新（重启或热升级），请重新 connect")
+	}
+	return nil
+}
+
 // dispatchHelpToolMessage 工具消息分流；返回 true 表示已消费
 func dispatchHelpToolMessage(msg *proto.Message, b inboundSink) bool {
 	switch msg.Type {
@@ -103,6 +125,15 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 				// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
 				bridge.Disconnect(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
 				return
+			}
+			if msg.Type == proto.MsgError {
+				if gone := peerGoneError(msg); gone != nil {
+					// 对端没了，这条连接不会再有工具响应：唤醒在途调用并关掉 relay，
+					// 否则要干等 75s 读超时才发现，且 relay 端 Help 槽也一直占着。
+					bridge.Disconnect(gone)
+					h.client.Close()
+					return
+				}
 			}
 			dispatchHelpToolMessage(msg, bridge)
 		}

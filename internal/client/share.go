@@ -343,7 +343,12 @@ func (s *ShareMode) register() error {
 		return err
 	}
 
+	// 同 HelpMode.join：relay 收下请求却不应答时，裸 ReadMessage 会永久阻塞。share 的
+	// reconnectWithBackoff 靠 register 返回 error 才会进下一轮重试，卡在这里就等于整个
+	// 重连循环停摆，协助码再也不刷新。
+	s.client.SetReadDeadline(time.Now().Add(joinTimeout))
 	msg, err := s.client.ReadMessage()
+	s.client.SetReadDeadline(time.Time{})
 	if err != nil {
 		return err
 	}
@@ -578,6 +583,11 @@ func (s *ShareMode) upgradeToP2P(mgr shareP2PManager, resultCh <-chan p2p.P2PRes
 
 // waitSessionReady 等待会话就绪
 func (s *ShareMode) waitSessionReady() (string, error) {
+	// 清掉上一轮 handleTunnel 留下的 2 分钟读 deadline。等新协助端本来就是无限期的
+	// （首次注册后进到这里时同样没有 deadline），不清的话「协助端断开→协助码仍有效→
+	// 回来等新协助端」这条路会在两分钟后被残留 deadline 打断，白白丢掉一个还没过期的
+	// 协助码去做整轮重连。relay 掉线仍由 30s 心跳的写失败 + TCP keepalive 兜住。
+	s.client.SetReadDeadline(time.Time{})
 	for {
 		msg, err := s.client.ReadMessage()
 		if err != nil {
@@ -932,7 +942,7 @@ func (s *ShareMode) handleTunnel() error {
 			var errMsg proto.ErrorMessage
 			proto.DecodePayload(msg, &errMsg)
 			closeSSH()
-			if errMsg.Code == "PEER_DISCONNECTED" {
+			if errMsg.Code == proto.ErrCodePeerDisconnected {
 				return ErrPeerDisconnected
 			}
 			return fmt.Errorf("server error: %s - %s", errMsg.Code, errMsg.Message)

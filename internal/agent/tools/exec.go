@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,13 +16,13 @@ import (
 )
 
 type ExecArgs struct {
-	Argv          []string          `json:"argv"`
-	Cwd           string            `json:"cwd,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	TimeoutMs     uint32            `json:"timeout_ms,omitempty"`
-	MaxOutputBytes int              `json:"max_output_bytes,omitempty"`
-	Stream        bool              `json:"stream,omitempty"`
-	StdinBytes    []byte            `json:"stdin,omitempty"`
+	Argv           []string          `json:"argv"`
+	Cwd            string            `json:"cwd,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TimeoutMs      uint32            `json:"timeout_ms,omitempty"`
+	MaxOutputBytes int               `json:"max_output_bytes,omitempty"`
+	Stream         bool              `json:"stream,omitempty"`
+	StdinBytes     []byte            `json:"stdin,omitempty"`
 }
 
 type ExecResult struct {
@@ -46,6 +47,17 @@ func (e *ExecTool) Name() string          { return "exec" }
 
 const defaultExecTimeout = 5 * time.Minute
 
+// execWaitDelay 取消命令之后，最多再给 I/O 管道多少时间自行收尾。
+//
+// 只杀进程还不够：孙子进程继承了 stdout/stderr 的写端，只要还有一个活着，管道就读不到
+// EOF，cmd.Wait 会无限期挂着——工具调用既不返回结果也不返回错误，daemon 那一侧的槽位
+// 就此漏掉。configureProcessGroup 已经尽量把整棵树杀干净，WaitDelay 是它漏杀时的兜底：
+// 时间一到 Go 会强制关掉管道，Wait 带 exec.ErrWaitDelay 返回。
+//
+// 取 2s 而不是更短，是留给「被杀的子进程正在被内核回收、缓冲里还有最后几 KB」的正常
+// 收尾；这段时间只在命令已经被取消之后才会发生，不影响正常路径。
+const execWaitDelay = 2 * time.Second
+
 func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.StreamSink) (json.RawMessage, error) {
 	var a ExecArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -67,6 +79,11 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, a.Argv[0], a.Argv[1:]...)
+	// 超时/取消时连同孙子进程一起杀，并给管道收尾兜个底。两者缺一不可：
+	// 只杀树而没有 WaitDelay，漏网的孙子仍能把 Wait 吊死；只有 WaitDelay 而不杀树，
+	// 孤儿进程会继续在被协助端的机器上跑下去。
+	configureProcessGroup(cmd)
+	cmd.WaitDelay = execWaitDelay
 	if a.Cwd != "" {
 		cmd.Dir = a.Cwd
 	}
@@ -85,28 +102,43 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 		return e.runStreaming(runCtx, cancel, cmd, sink)
 	}
 
-	out, err := cmd.Output()
-	stderr := capturedStderr(err)
-	exitCode := exitCodeOf(err)
+	maxOut := resolveMaxOutput(a.MaxOutputBytes)
+	// 自己接管两条流，而不是用 cmd.Output()：后者先把全部输出攒进 bytes.Buffer，再交给
+	// 截断函数，于是内存峰值由命令决定而不是由 max_output_bytes 决定——一条 `find /`
+	// 就能把被协助端撑爆，而攒下来的东西 99% 马上就要被扔掉。
+	outBuf := newBoundedStream(maxOut)
+	errBuf := newBoundedStream(maxOut)
+	cmd.Stdout = outBuf
+	cmd.Stderr = errBuf
+
+	err := cmd.Run()
 	if runCtx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("deadline_exceeded: exec timed out")
+	}
+
+	exitCode := exitCodeOf(err)
+	// WaitDelay 到期时 err 是 exec.ErrWaitDelay 而非 *ExitError，但进程本身已经被回收，
+	// ProcessState 里的退出码是真的，不该退化成 -1。
+	if exitCode == -1 && cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
 	}
 
 	// 命令没能启动（找不到可执行文件、权限拒绝、cwd 不存在等）时 err 不是 *exec.ExitError，
 	// stderr 为空、exitCode=-1。必须把原因单独带出去，否则调用方只看到 exit -1。
 	var startErr string
 	if err != nil {
-		if _, isExit := err.(*exec.ExitError); !isExit {
-			startErr = err.Error()
+		switch {
+		case errors.Is(err, exec.ErrWaitDelay):
+			startErr = fmt.Sprintf("命令已退出，但仍有后台子进程占着输出管道；等待 %s 后强制收尾，尾部输出可能不完整", execWaitDelay)
+		default:
+			if _, isExit := err.(*exec.ExitError); !isExit {
+				startErr = err.Error()
+			}
 		}
 	}
 
-	maxOut := execDefaultMaxOutput
-	if a.MaxOutputBytes > 0 {
-		maxOut = a.MaxOutputBytes
-	}
-	stdout, stdoutTrunc := truncateStream(out, maxOut)
-	stderrB, stderrTrunc := truncateStream(stderr, maxOut)
+	stdout, stdoutTrunc := outBuf.result()
+	stderrB, stderrTrunc := errBuf.result()
 	return json.Marshal(ExecResult{
 		ExitCode:        exitCode,
 		Stdout:          stdout,
@@ -184,22 +216,4 @@ func exitCodeOf(err error) int {
 		return ee.ExitCode()
 	}
 	return -1
-}
-
-func capturedStderr(err error) []byte {
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.Stderr
-	}
-	return nil
-}
-
-// truncateStream 截断 exec 的一条输出流：保留头尾、省略中间。
-// 编译错误、panic 堆栈、测试失败摘要几乎总在输出末尾，只保开头会把定位问题最需要的
-// 信息丢掉，所以这里不能用简单的 s[:max]。
-func truncateStream(data []byte, max int) ([]byte, bool) {
-	if len(data) <= max {
-		return data, false
-	}
-	s, truncated := TruncateMiddle(string(data), max)
-	return []byte(s), truncated
 }

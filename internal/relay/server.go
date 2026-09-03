@@ -155,7 +155,7 @@ func NewServer(cfg *Config) (*Server, error) {
 	cfg.Limits = limits
 	limiterIdleDuration := time.Duration(limits.LimiterIdleSeconds) * time.Second
 
-	return &Server{
+	srv := &Server{
 		config:                   cfg,
 		sessions:                 NewSessionManager(),
 		codes:                    NewCodeManager(cfg.CodeLength),
@@ -172,7 +172,19 @@ func NewServer(cfg *Config) (*Server, error) {
 		controlLimiterPerConn:    ratelimit.NewKeyedLimiter(limits.ControlRatePerConnection, limits.ControlBurstPerConnection, limits.LimiterMaxKeys, limiterIdleDuration),
 		controlLimiterGlobal:     ratelimit.NewBucket(limits.ControlRateGlobal, limits.ControlBurstGlobal),
 		limits:                   limits,
-	}, nil
+	}
+	// Help 去抖计时器真正清掉 Help 槽时，把 share 从「等隧道数据」里叫醒。
+	// 复用既有的 PEER_DISCONNECTED 码：share 端 waitAndHandleTunnel 已经认它
+	// （share.go 的 MsgError 分支 → ErrPeerDisconnected → Run 打印「协助码仍有效」
+	// 并等待新协助端），只是此前 relay 从不在 Help 断连时发，那条路径一直是死代码。
+	// 在 Start 之前装好，之后只读不写，无并发。
+	srv.sessions.onHelpCleared = srv.notifyShareHelpGone
+	return srv, nil
+}
+
+// notifyShareHelpGone 在 SessionManager 解锁后被调用，可安全做同步网络写。
+func (s *Server) notifyShareHelpGone(share *ClientConn) {
+	s.sendError(share, proto.ErrCodePeerDisconnected, "协助端已断开连接")
 }
 
 // Start starts the server (backward compatible)
@@ -386,7 +398,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				s.stunServer.InvalidateRelaySession(result.SessionID)
 			}
 			if result.PeerToNotify != nil {
-				s.sendError(result.PeerToNotify, "PEER_DISCONNECTED", "被协助端已断开连接")
+				s.sendError(result.PeerToNotify, proto.ErrCodePeerDisconnected, "被协助端已断开连接")
 			}
 		}
 		conn.Close()
@@ -606,7 +618,7 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	if reuseResult != nil && reuseResult.OldHelp != nil && reuseResult.OldHelp.Conn != nil {
 		// 现有 Help 客户端无法在已建立的 relay/P2P 流程中处理换代通知。
 		// 注册响应发布后再要求其重新 Join，避免 SessionReady 抢在 RegisterResponse 前到达。
-		s.sendError(reuseResult.OldHelp, "PEER_RECONNECTED", "被协助端连接已更新，请重新加入")
+		s.sendError(reuseResult.OldHelp, proto.ErrCodePeerReconnected, "被协助端连接已更新，请重新加入")
 		reuseResult.OldHelp.Conn.Close()
 	}
 

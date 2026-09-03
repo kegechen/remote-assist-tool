@@ -18,6 +18,11 @@ var (
 	ErrSessionHasHelper = errors.New("session already has helper")
 )
 
+// helpDisconnectDebounce Help 断连去抖窗口：这段时间内重连回来的算网络抖动，不清 Help
+// 槽也不惊动 share。窗口过完还没回来才判定为真断开。
+// 用 var 而非 const 只为让测试调到毫秒级；运行期不改。
+var helpDisconnectDebounce = 5 * time.Second
+
 // Conn 连接接口
 type Conn interface {
 	io.ReadWriteCloser
@@ -89,6 +94,11 @@ type SessionManager struct {
 
 	// 活跃会话计数：防单 IP 或全局会话耗尽。仅在 CreateSession/CloseSession/CleanupExpired 修改。
 	sessionCountPerIP map[string]int // 每 IP 当前活跃会话数（仅 Share 端 IP 计数）
+
+	// onHelpCleared 在 Help 去抖计时器真正清空 Help 槽后回调，参数是同会话的 share
+	// （可能为 nil 时不调）。回调一律在 sm.mu 之外执行，实现里可以做网络写。
+	// 由 NewServer 在 Start 前一次性装配，此后只读。
+	onHelpCleared func(share *ClientConn)
 }
 
 // NewSessionManager 创建会话管理器
@@ -475,16 +485,25 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 		session.dataPlaneReady = false
 		// Help 断连去抖：延迟 5 秒再清除，防止网络抖动导致不必要的重连
 		session.pendingHelpID = clientID
-		session.helpDisconnectTimer = time.AfterFunc(5*time.Second, func() {
+		session.helpDisconnectTimer = time.AfterFunc(helpDisconnectDebounce, func() {
 			sm.mu.Lock()
-			defer sm.mu.Unlock()
+			var share *ClientConn
 			if session.Help != nil && session.Help.ID == session.pendingHelpID {
 				session.Help = nil
 				session.pendingHelpID = ""
+				// 去抖窗口过完仍没等回协助端，这才是真断开：把 share 从「等隧道数据」
+				// 里叫醒，否则它会一直挂在读上，直到 2 分钟读超时或会话过期才回过神。
+				share = session.Share
 				log.Printf("Cleared helper from session %s (after debounce)", session.ID)
 			}
+			sm.mu.Unlock()
+			// 通知必须在锁外：sendMsg 是带 30s 超时的同步网络写，攥着 sm.mu 写等于
+			// 让一个慢读客户端冻住整张会话表。
+			if share != nil && sm.onHelpCleared != nil {
+				sm.onHelpCleared(share)
+			}
 		})
-		log.Printf("Help disconnect debounce started for session %s (5s)", session.ID)
+		log.Printf("Help disconnect debounce started for session %s (%s)", session.ID, helpDisconnectDebounce)
 		return &DisconnectResult{SessionID: session.ID, ResetDataPlane: true}
 	}
 	if session.Share != nil && session.Share.ID == clientID {

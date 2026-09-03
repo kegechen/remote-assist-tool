@@ -88,6 +88,17 @@ type ErrorMessage struct {
 	Message string `json:"message"`
 }
 
+// ErrorMessage.Code 里对两端都有语义的几个值。收发两侧原先各写各的字符串字面量，
+// 改一处漏一处就退化成「只打日志」的静默失联，因此收拢到协议包里。
+const (
+	// ErrCodePeerDisconnected 对端已断开：发给 help 时指 share 掉线，发给 share 时
+	// 指 help 掉线且已过去抖窗口。两侧收到后都应视为当前会话结束。
+	ErrCodePeerDisconnected = "PEER_DISCONNECTED"
+	// ErrCodePeerReconnected share 换了新连接（热升级 / 重注册），旧 help 必须重新 Join。
+	// relay 发完这条会立刻关掉旧 help 的连接。
+	ErrCodePeerReconnected = "PEER_RECONNECTED"
+)
+
 // PeerAddrAdvertise 对等端地址通告（发送给服务器）
 type PeerAddrAdvertise struct {
 	PublicAddr  string `json:"public_addr"`            // "ip:port"

@@ -463,6 +463,13 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 					}
 				}
 			case proto.MsgError:
+				// 对端消失类错误必须拆会话，不能只打日志：此后这条 relay 上不会再有
+				// 工具响应，而 b.activeTarget 还留着，下一次同参数 connect 会命中幂等
+				// 分支拿到指向死会话的 connected=true，永远自愈不了（见 peerGoneError）。
+				if gone := peerGoneError(msg); gone != nil {
+					teardown(gone)
+					return
+				}
 				var errMsg proto.ErrorMessage
 				proto.DecodePayload(msg, &errMsg)
 				log.Printf("MCP relay error: %s", errMsg.Message)

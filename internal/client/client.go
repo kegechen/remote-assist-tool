@@ -19,6 +19,23 @@ import (
 // 失败返回，触发上层断线处理。对齐 relay 侧同名 writeTimeout。
 const writeTimeout = 30 * time.Second
 
+// dialTimeout 建连（含 TLS 握手）超时。
+//
+// 裸 net.Dial / tls.Dial 不带任何超时，交给内核的 TCP 重传退避——Linux 上是 ~130s，
+// 而黑洞 relay（SYN 有回应、TLS 握手不回）根本等不到内核放弃，会永久挂死。这一条在
+// MCP 里格外要命：doConnect 入口就持有 connectMu，一个卡住的 connect 会让之后所有
+// connect 排队等它，整个 MCP server 只能重启。
+//
+// tls.DialWithDialer 会把这个 timeout 同时用作握手 deadline，两段都盖住。
+var dialTimeout = 20 * time.Second
+
+// joinTimeout 等待 relay 回 JoinResponse / RegisterResponse 的超时。TCP 连上、TLS 也
+// 握完，但 relay 迟迟不回应答的情况（进程假死、被中间盒吞掉）同样会让 ReadMessage
+// 永久阻塞，光有 dialTimeout 盖不住。
+//
+// dialTimeout/joinTimeout 用 var 而非 const，仅为让测试能调小到毫秒级；运行期不改。
+var joinTimeout = 15 * time.Second
+
 // Config 客户端配置
 type Config struct {
 	ServerAddr   string
@@ -82,15 +99,16 @@ func (c *Client) Connect() error {
 	var conn net.Conn
 	var err error
 
+	dialer := &net.Dialer{Timeout: dialTimeout}
 	if c.config.UseTLS {
 		var tlsConfig *tls.Config
 		tlsConfig, err = crypto.NewTLSClientConfig(c.config.InsecureSkip, c.config.CAFile)
 		if err != nil {
 			return fmt.Errorf("failed to create TLS config: %w", err)
 		}
-		conn, err = tls.Dial("tcp", c.config.ServerAddr, tlsConfig)
+		conn, err = tls.DialWithDialer(dialer, "tcp", c.config.ServerAddr, tlsConfig)
 	} else {
-		conn, err = net.Dial("tcp", c.config.ServerAddr)
+		conn, err = dialer.Dial("tcp", c.config.ServerAddr)
 	}
 
 	if err != nil {
