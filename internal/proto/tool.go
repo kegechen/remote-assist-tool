@@ -35,14 +35,22 @@ type Cancel struct {
 }
 
 // Hello / HelloAck 工具通道版本与能力协商
+//
+// Version 与 Versions 的分工（见 handshake.go NewHello 的注释）：Version 是给 0.0.x 看的
+// 兼容锚点——那些版本做的是严格相等比对，只认得这一个字段；Versions 才是真正的协商依据。
+// 旧版本会忽略它不认识的 Versions 字段，所以加这个字段本身不破坏任何东西。
 type Hello struct {
 	Version      string   `json:"version"`
+	Versions     []string `json:"versions,omitempty"` // 本端支持的全部版本，降序；空表示对端是 0.0.x
 	Capabilities []string `json:"capabilities"`
 	NonceB64     string   `json:"nonce_b64"` // base64(16 random bytes)
 }
 
+// HelloAck 的 Version 承载**协商选定**的版本，而不是应答方支持的最高版本。
+// 0.0.x 的 share 在这里填的是它自己的常量 "1"，语义恰好一致，不需要特判。
 type HelloAck struct {
 	Version      string   `json:"version"`
+	Versions     []string `json:"versions,omitempty"` // 应答方支持的全部版本，供发起方核对
 	Capabilities []string `json:"capabilities"`
 	NonceB64     string   `json:"nonce_b64"`
 	Accept       bool     `json:"accept"`

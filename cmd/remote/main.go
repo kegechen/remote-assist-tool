@@ -136,6 +136,7 @@ func runShare(args []string) {
 	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
 	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
 	codeFileMirror := fs.String("code-file-mirror", "", "Internal (make-before-break upgrade): additionally mirror the assist code JSON here, so a prior --code-file path keeps refreshing after an in-channel upgrade")
+	minProto := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Share mode - allow others to assist you\n\n")
@@ -164,6 +165,8 @@ func runShare(args []string) {
 
 	fs.Parse(args)
 	rejectPositionalArgs(fs, "share")
+	// 参数校验紧跟 parse：非法取值要在任何启动输出和副作用之前就退出。
+	*minProto = normalizeMinProto(*minProto)
 
 	resolveTLSVerify(fs, insecure, *caFile)
 
@@ -347,6 +350,7 @@ func runShare(args []string) {
 		STUNServer:   *stunServer,
 		BindIP:       *bindIP,
 		TrustNewCert: *trustNewCert,
+		MinProto:     *minProto,
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
@@ -371,6 +375,7 @@ func runHelp(args []string) {
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
 	noAuthHelp := fs.Bool("no-auth", false, "Connect without an assist code (use with --no-auth share/relay). DANGER: any device that can reach the relay can connect. Use ONLY on a fully trusted private LAN.")
+	minProtoHelp := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 	mcpStdio := fs.Bool("mcp-stdio", false, "Run as MCP stdio server for Claude Code")
 	legacySSH := fs.Bool("legacy-ssh", false, "Force original SSH tunnel mode (default if --mcp-stdio not set)")
 
@@ -384,6 +389,7 @@ func runHelp(args []string) {
 	}
 	fs.Parse(args)
 	rejectPositionalArgs(fs, "help")
+	*minProtoHelp = normalizeMinProto(*minProtoHelp)
 
 	resolveTLSVerify(fs, insecure, *caFile)
 
@@ -431,6 +437,7 @@ func runHelp(args []string) {
 		STUNServer:   *stunServer,
 		BindIP:       *bindIP,
 		TrustNewCert: *trustNewCert,
+		MinProto:     *minProtoHelp,
 	}
 
 	if *mcpStdio {
@@ -545,4 +552,17 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  --version - Show version information\n")
 	fmt.Fprintf(os.Stderr, "\nUse '%s <command> -h' for more info about a command\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "\n")
+}
+
+// normalizeMinProto 校验 --min-proto，非法取值直接退出。
+//
+// 早退而不是回落到默认值：把 --min-proto=3 之类的手误静默当成默认值处理，用户会以为
+// 自己设了什么，实际什么都没生效——而这个旗标控制的恰好是一道安全闸。
+func normalizeMinProto(v string) string {
+	normalized, err := proto.NormalizeMinProto(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --min-proto %v\n", err)
+		os.Exit(2)
+	}
+	return normalized
 }

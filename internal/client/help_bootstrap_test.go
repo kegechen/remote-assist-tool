@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/remote-assist/tool/internal/mcp"
+	"github.com/remote-assist/tool/internal/proto"
 )
 
 func TestBootstrapCallToolNotConnectedError(t *testing.T) {
@@ -38,7 +39,7 @@ func TestBootstrapConnectReusesMatchingActiveSession(t *testing.T) {
 		HelpVersion: "help-version",
 	}
 	b.help = &HelpMode{client: activeClient}
-	b.bridge = mcp.NewBridge(nil, [32]byte{})
+	b.bridge = mcp.NewBridge(nil, proto.Session{})
 	b.activeTarget = connectTarget{Code: "ABCDEF", Server: "relay.example:8443"}
 	b.activeResult = want
 

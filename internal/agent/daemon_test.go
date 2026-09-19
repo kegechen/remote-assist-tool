@@ -30,7 +30,7 @@ func TestDaemonRoutesToolReq(t *testing.T) {
 
 	r := NewRegistry()
 	r.Register(&fakeTool{name: "ping"})
-	d := NewDaemon(r, conn, [32]byte{})
+	d := NewDaemon(r, conn, proto.Session{})
 
 	go d.RunLoop(context.Background())
 
@@ -70,7 +70,7 @@ func TestDaemonSendsStreamTerminatorBeforeResponse(t *testing.T) {
 
 	r := NewRegistry()
 	r.Register(streamingFakeTool{})
-	d := NewDaemon(r, conn, [32]byte{})
+	d := NewDaemon(r, conn, proto.Session{})
 	go d.RunLoop(context.Background())
 
 	req := proto.ToolReq{ID: 10, Tool: "streaming", ArgsJSON: json.RawMessage(`{"stream":true}`)}
@@ -114,14 +114,14 @@ func TestDaemonRotateKeyCancelsInflight(t *testing.T) {
 
 	r := NewRegistry()
 	r.Register(&fakeTool{name: "ping"})
-	d := NewDaemon(r, conn, [32]byte{1})
+	d := NewDaemon(r, conn, proto.Session{Key: [32]byte{1}})
 	go d.RunLoop(context.Background())
 
 	// rotate 不应该 panic，cancel 空 in-flight 是 no-op
-	d.RotateKey([32]byte{2})
+	d.RotateSession(proto.Session{Key: [32]byte{2}})
 
 	// 经访问器读：key 现在由 connMu 保护，裸读会和 SwapConn 构成竞态（-race 会报）。
-	if got := d.currentKey(); got != [32]byte{2} {
+	if got := d.currentSession().Key; got != [32]byte{2} {
 		t.Fatalf("key not rotated: got %v", got)
 	}
 }
@@ -137,18 +137,18 @@ func TestDaemonRotateKeySameKeyKeepsInflight(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&fakeTool{name: "ping"})
 	key := [32]byte{7}
-	d := NewDaemon(r, conn, key)
+	d := NewDaemon(r, conn, proto.Session{Key: key})
 
 	cancelled := false
 	d.cancels.Store(uint64(1), context.CancelFunc(func() { cancelled = true }))
 	defer d.cancels.Delete(uint64(1))
 
-	d.SwapConn(&fakeConn{in: in, out: out}, key) // 同一把 key，仅换通道
+	d.SwapConn(&fakeConn{in: in, out: out}, proto.Session{Key: key}) // 同一把 key，仅换通道
 	if cancelled {
 		t.Fatal("key 未变时不应取消在途请求（P2P 热升级会误杀用户正在跑的工具调用）")
 	}
 
-	d.SwapConn(conn, [32]byte{8}) // key 变了：重新握手，旧 key 的在途请求确实该取消
+	d.SwapConn(conn, proto.Session{Key: [32]byte{8}}) // key 变了：重新握手，旧 key 的在途请求确实该取消
 	if !cancelled {
 		t.Fatal("key 变更时应取消在途请求")
 	}

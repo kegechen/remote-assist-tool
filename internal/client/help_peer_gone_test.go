@@ -51,7 +51,7 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 			case proto.MsgToolHello:
 				var hello proto.Hello
 				proto.DecodePayload(&msg, &hello)
-				peer := proto.NewHello()
+				peer := proto.NewHello("")
 				ack, _ := proto.NewMessage(proto.MsgToolHelloAck, &proto.HelloAck{
 					Version:      proto.ToolProtocolVersion,
 					Capabilities: peer.Capabilities,

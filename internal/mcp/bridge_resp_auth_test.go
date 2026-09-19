@@ -28,7 +28,7 @@ func respAs(t *testing.T, id uint64, result string, sealOK bool, sealCode, sealM
 func callWith(t *testing.T, reply func(br *Bridge, id uint64)) (json.RawMessage, error) {
 	t.Helper()
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 	go func() {
 		req := <-conn.sent
 		var r proto.ToolReq
@@ -124,7 +124,7 @@ func TestBridgeAcceptsSealedSuccess(t *testing.T) {
 // 「响应未加封（对端过旧，或响应被篡改）」——把一次普通掉线说成被人动了手脚。
 func TestBridgeDisconnectKeepsRealReasonWhenSealed(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey) // 非零 key：走响应认证那条路
+	br := NewBridge(conn, proto.Session{Key: streamKey}) // 非零 key：走响应认证那条路
 
 	done := make(chan error, 1)
 	go func() {

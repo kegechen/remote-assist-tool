@@ -23,6 +23,7 @@ type HelpMode struct {
 	code       string
 	listenAddr string
 	mcpStdio   bool
+	minProto   string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
 }
 
 // NewHelpMode 创建协助模式
@@ -31,6 +32,7 @@ func NewHelpMode(cfg *Config, code, listenAddr string) *HelpMode {
 		client:     NewClient(cfg),
 		code:       normalizeCode(code),
 		listenAddr: listenAddr,
+		minProto:   cfg.MinProto,
 	}
 }
 
@@ -40,6 +42,7 @@ func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
 		client:   NewClient(cfg),
 		code:     normalizeCode(code),
 		mcpStdio: true,
+		minProto: cfg.MinProto,
 	}
 }
 

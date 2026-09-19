@@ -32,7 +32,7 @@ func sealChunkAs(t *testing.T, id uint64, sealSeq uint32, sealStream string, seq
 // 由 markDamaged 记成空洞，收尾时整次调用被判为不完整。
 func TestBridgeRejectsReorderedChunk(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -65,7 +65,7 @@ func TestBridgeRejectsReorderedChunk(t *testing.T) {
 // 输出伪装成正常输出。
 func TestBridgeRejectsCrossStreamChunk(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -97,7 +97,7 @@ func TestBridgeRejectsCrossStreamChunk(t *testing.T) {
 // unauthenticated 判据会把合法的无参调用全部打掉。
 func TestBridgeAlwaysSealsArgs(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -135,7 +135,7 @@ func TestBridgeAlwaysSealsArgs(t *testing.T) {
 // 加封侧对空 data 也会产出非空密文，所以握手后线上不存在合法的空帧：解不开就算损坏。
 func TestBridgeRejectsGapFillingEmptyChunk(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent

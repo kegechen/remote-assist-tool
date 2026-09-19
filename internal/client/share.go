@@ -43,6 +43,7 @@ type ShareMode struct {
 	code           string
 	expiresAt      time.Time
 	sbCfg          agent.SandboxConfig
+	minProto       string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
 	daemon         *agent.Daemon
 	daemonOnce     sync.Once
 
@@ -53,13 +54,13 @@ type ShareMode struct {
 	p2pPending    *proto.PeerAddrReady // manager 初始化期间提前到达的对端地址
 	p2pEpoch      uint64               // 会话轮次，用于让上一轮的升级 goroutine 失效
 	p2pDone       chan struct{}        // 本轮会话终止信号，唤醒阻塞在 resultCh 上的升级 goroutine
-	daemonKey     [32]byte             // 最近一次工具握手派生的会话密钥，P2P 升级时沿用
+	daemonSess    proto.Session        // 最近一次工具握手的结果（密钥+协商版本），P2P 升级时沿用
 	newP2PManager func(p2p.P2PMode, string, string) shareP2PManager
 }
 
 // beginP2PSession 开启新一轮会话的 P2P 状态，返回本轮 epoch 与终止信号。
 //
-// daemonKey 也要清：ShareMode 跨会话复用同一对象，上一轮的 key 留着会让
+// daemonSess 也要清：ShareMode 跨会话复用同一对象，上一轮的会话留着会让
 // toolModeReady() 在整个进程生命周期内恒为真，把之后的纯 SSH 会话也误判成工具模式。
 func (s *ShareMode) beginP2PSession() (uint64, chan struct{}) {
 	s.p2pMu.Lock()
@@ -68,7 +69,7 @@ func (s *ShareMode) beginP2PSession() (uint64, chan struct{}) {
 	s.p2pMgr = nil
 	s.p2pTunnel = nil
 	s.p2pPending = nil
-	s.daemonKey = [32]byte{}
+	s.daemonSess = proto.Session{}
 	s.p2pDone = make(chan struct{})
 	epoch, done := s.p2pEpoch, s.p2pDone
 	s.p2pMu.Unlock()
@@ -189,14 +190,14 @@ func (s *ShareMode) makeP2PManager(mode p2p.P2PMode) shareP2PManager {
 // toolModeReady 报告工具握手是否已完成。help 端保证「先在 relay 上完成工具握手，
 // 才开始 P2P 协商」，所以拿到隧道时它为真即说明这是工具通道而非 SSH 隧道。
 func (s *ShareMode) toolModeReady() bool {
-	return s.currentDaemonKey() != [32]byte{}
+	return s.currentDaemonSess().Active()
 }
 
-// currentDaemonKey 取当前会话密钥（P2P 升级沿用 relay 握手协商出的同一把）。
-func (s *ShareMode) currentDaemonKey() [32]byte {
+// currentDaemonSess 取当前工具会话（P2P 升级沿用 relay 握手协商出的同一个）。
+func (s *ShareMode) currentDaemonSess() proto.Session {
 	s.p2pMu.Lock()
 	defer s.p2pMu.Unlock()
-	return s.daemonKey
+	return s.daemonSess
 }
 
 // currentDaemon 取 daemon 引用。relay 主循环与后台 P2P 升级 goroutine 现在是并发跑的
@@ -220,6 +221,7 @@ func NewShareMode(cfg *Config, sshAddr string, newInstance bool, sbCfg agent.San
 		codeFile:       codeFile,
 		mirrorCodeFile: mirrorCodeFile,
 		sbCfg:          sbCfg,
+		minProto:       cfg.MinProto,
 	}
 	if newInstance {
 		share.clientID, _ = generateClientID()
@@ -441,7 +443,7 @@ func writeCodeFileTo(path string, data []byte) {
 // 无人应答 → MCP connect 报 "handshake failed: i/o timeout"。
 // 现在 relay 永远有人读，P2P 成不成都不影响会话可用。
 func (s *ShareMode) waitAndHandleTunnel() error {
-	// 必须在 waitSessionReady 之前开新一轮：ShareMode 对象跨会话复用，daemonKey 不清
+	// 必须在 waitSessionReady 之前开新一轮：ShareMode 对象跨会话复用，daemonSess 不清
 	// 就会永久为真，之后每个纯 SSH 会话都被误判成工具模式、走 8s mode header 超时，
 	// 而 SSH 的首字节要等用户真正开连接（可能几分钟）——直连被白白掐掉，
 	// --p2p required 下更会每 8s 拆一次健康会话。
@@ -461,12 +463,41 @@ func (s *ShareMode) waitAndHandleTunnel() error {
 	return s.handleTunnel()
 }
 
+// refuseP2PForLegacyPeer 协商到 v1 之后停掉本轮 P2P。停止打洞的理由见 handleRelayToolHello。
+//
+// 这里**不**处理 --p2p required：那种组合在握手阶段就被拒了（handleRelayToolHello 回
+// Accept:false 并附理由），根本走不到这里，会话也就不存在"要不要拆掉中转"的问题。
+// 早先这里有一段 required 就 Close 的收尾，在握手级拒绝落地之后成了死代码 —— 留着
+// 只会让人以为 share 还有第二条兜底路径，实际永远不执行。
+//
+// 能走到这里的只有 auto：没有 P2P 只是功能降级，会话继续走中转。
+func (s *ShareMode) refuseP2PForLegacyPeer() {
+	if p2p.ParseP2PMode(s.client.config.P2PMode) == p2p.P2PModeDisabled {
+		return
+	}
+	s.endP2PSession()
+	log.Printf("对端为旧版本（工具协议 v1），已停止 P2P 尝试，本次会话全程使用中转")
+}
+
 // launchP2PUpgrade 只负责启动后台任务，绝不在 relay 读循环的关键路径里执行 Start。
 // Start 包含多轮 STUN/NAT 探测，UDP 被限制时可能耗时数十秒；同步执行会让 share 无法
 // 读取紧随 SessionReady 到达的 ToolHello，最终撞上 help 端 15 秒握手超时。
 func (s *ShareMode) launchP2PUpgrade(sessionID string, epoch uint64, sessionDone <-chan struct{}) {
 	mode := p2p.ParseP2PMode(s.client.config.P2PMode)
 	if mode == p2p.P2PModeDisabled {
+		return
+	}
+	// 工具握手若已在 waitSessionReady 的重同步窗口里完成，且谈成的是 v1，这里就别启动了
+	// —— 能省下一轮 STUN 探测和一组 UDP 端口。
+	//
+	// 注意这条路径是少数派：正常时序下 ToolHello 在 SessionReady 之后才到，本函数先跑，
+	// 此时会话还没版本可言，守卫不会触发。真正的收尾在 handleRelayToolHello →
+	// refuseP2PForLegacyPeer，那里也说明了为什么地址通告已经拦不住。
+	if s.currentDaemonSess().Legacy() {
+		// 与 handleRelayToolHello 里走同一条收尾逻辑：两条路径只是握手早到还是晚到的
+		// 区别，用户看到的结果不该因此不同（尤其 required 模式下是否拆掉 relay）。
+		// 正常时序下握手在本函数之前完成，那边已经收过尾，这里是晚到路径的兜底。
+		s.refuseP2PForLegacyPeer()
 		return
 	}
 
@@ -681,18 +712,22 @@ func (s *ShareMode) handleToolOverP2P(tunnel *p2p.UDPTunnel, epoch uint64) {
 			// relay 上已经握过手之后再收到 ToolHello，合法的新版 help 不会发（它只探活
 			// 复用 key），所以只可能来自往隧道里注入帧的第三方——UDP relay 回退模式下
 			// tunnel 的来源判定是「等于 STUN 服务器地址」，任何经由 relay 转发进来的帧
-			// 都过得了这一关。走下去会 ensureDaemon 换掉 daemonKey，合法 help 此后
+			// 都过得了这一关。走下去会 ensureDaemon 换掉 daemonSess，合法 help 此后
 			// 每条请求都 decrypt_failed，一条包即可打瘫整条会话。
-			if s.currentDaemonKey() != [32]byte{} {
+			if s.currentDaemonSess().Active() {
 				log.Printf("P2P: ignoring ToolHello after relay handshake (would rotate the session key; likely injected)")
 				continue
 			}
 			var hello proto.Hello
 			proto.DecodePayload(msg, &hello)
-			ack, key := buildHelloAck(hello, s.code)
+			ack, sess, negErr := buildHelloAck(hello, s.code, s.minProto)
+			if negErr != nil {
+				reportToolHandshakeErr(negErr)
+			}
 			pc.SendMessage(proto.MsgToolHelloAck, &ack)
 			if ack.Accept {
-				s.ensureDaemon(key) // 已在锁内把 daemonKey 设为 key
+				logNegotiatedVersion(sess)
+				s.ensureDaemon(sess) // 已在锁内把 daemonSess 设为 sess
 				if s.swapDaemonTo(pc, epoch) {
 					swapped = true
 				}
@@ -733,10 +768,10 @@ func (s *ShareMode) swapDaemonToRelay(epoch uint64) {
 func (s *ShareMode) swapDaemonTo(conn agent.MsgConn, epoch uint64) bool {
 	s.p2pMu.Lock()
 	defer s.p2pMu.Unlock()
-	if s.daemon == nil || s.daemonKey == [32]byte{} || s.p2pEpoch != epoch {
+	if s.daemon == nil || !s.daemonSess.Active() || s.p2pEpoch != epoch {
 		return false
 	}
-	s.daemon.SwapConn(conn, s.daemonKey)
+	s.daemon.SwapConn(conn, s.daemonSess)
 	return true
 }
 
@@ -1003,23 +1038,68 @@ func dispatchToolMessage(msg *proto.Message, d daemonSink) bool {
 	return false
 }
 
-// buildHelloAck share 端对 Hello 的应答 + 派生 session_key
-func buildHelloAck(hello proto.Hello, code string) (proto.HelloAck, [32]byte) {
-	if hello.Version != proto.ToolProtocolVersion {
+// buildHelloAck share 端对 Hello 的应答：协商版本 + 派生 session_key。
+//
+// 第三个返回值是协商失败的原因，调用方负责把它打到**本机**终端上——share 是拒绝方，
+// 也就是唯一能加 --min-proto=1 的那一端（旧版 help 根本没有这个参数）。只把理由塞进
+// ErrorMsg 发走的话，本机会一声不吭地拒掉一个又一个连接，用户在这台机器上完全看不出
+// 发生了什么。
+func buildHelloAck(hello proto.Hello, code, minProto string) (proto.HelloAck, proto.Session, error) {
+	version, err := proto.NegotiateToolVersion(hello.Version, hello.Versions, minProto, proto.SideShare, proto.SideHelp)
+	if err != nil {
+		msg := err.Error()
+		var incompat *proto.IncompatibleVersionError
+		if errors.As(err, &incompat) {
+			// 发给对端的那份要用角色名指路，读者在另一台机器前。0.0.x 的 help 会把它
+			// 原样打印出来，所以旧客户端不用改代码也能看到这条提示。
+			msg = incompat.Message()
+		}
 		return proto.HelloAck{
 			Version:  proto.ToolProtocolVersion,
+			Versions: proto.SupportedVersionsDownTo(minProto),
 			Accept:   false,
-			ErrorMsg: "unsupported tool protocol version: " + hello.Version,
-		}, [32]byte{}
+			ErrorMsg: msg,
+		}, proto.Session{}, err
 	}
 	ack := proto.HelloAck{
-		Version:      proto.ToolProtocolVersion,
-		Capabilities: []string{"exec", "read_file", "write_file", "list_dir", "stat", "glob", "grep", "process_list", "tail_log"},
-		NonceB64:     proto.NewHello().NonceB64,
+		Version:      version, // 协商选定的版本，不是本端最高版本
+		Versions:     proto.SupportedVersionsDownTo(minProto),
+		Capabilities: proto.ToolCapabilities(),
+		NonceB64:     proto.NewNonceB64(),
 		Accept:       true,
 	}
-	key := proto.DeriveSessionKey(code, ack.NonceB64, hello.NonceB64)
-	return ack, key
+	// 密钥派生必须吃协商结果：降级到 v1 时两端都要用 "rat-tool-v1" 做 HKDF info，
+	// 否则握手放行了、密钥却对不上，表现为此后每条请求都 decrypt_failed。
+	sess := proto.Session{
+		Key:     proto.DeriveSessionKey(code, ack.NonceB64, hello.NonceB64, version),
+		Version: version,
+	}
+	return ack, sess, nil
+}
+
+// logNegotiatedVersion 握手成功后记录协商结果。
+//
+// 降级到 v1 必须打得醒目：那意味着 AAD 绑定、强制密文参数、抗重放三项一起关掉了，
+// 这条通道的成色和用户以为的不一样。这行日志同时是一道观测——用户没主动开兼容模式
+// 却看到它，说明协商结果被人动过手脚。
+func logNegotiatedVersion(sess proto.Session) {
+	if sess.Legacy() {
+		log.Printf("[警告] 工具通道已降级到 v%s 兼容模式（对端为旧版本）："+
+			"AAD 绑定、强制密文参数、抗重放均已关闭，仅应在可信网络中使用",
+			proto.ToolProtocolVersionV1)
+		return
+	}
+	log.Printf("工具通道协议：v%s", sess.Version)
+}
+
+// reportToolHandshakeErr 把版本协商失败打到本机终端。
+func reportToolHandshakeErr(err error) {
+	var incompat *proto.IncompatibleVersionError
+	if errors.As(err, &incompat) {
+		log.Printf("拒绝工具通道握手：%s", incompat.LocalHint())
+		return
+	}
+	log.Printf("拒绝工具通道握手：%v", err)
 }
 
 // handleRelayToolHello 在 relay 通道完成工具握手，并明确把 daemon 的响应出口切回
@@ -1030,22 +1110,66 @@ func (s *ShareMode) handleRelayToolHello(msg *proto.Message) error {
 	if err := proto.DecodePayload(msg, &hello); err != nil {
 		return fmt.Errorf("decode relay tool hello: %w", err)
 	}
-	ack, key := buildHelloAck(hello, s.code)
+	ack, sess, negErr := buildHelloAck(hello, s.code, s.minProto)
+	if negErr != nil {
+		reportToolHandshakeErr(negErr)
+	}
+	// --p2p required 遇上 v1 对端：在**握手阶段**就拒掉，别先 Accept 再掐断连接。
+	//
+	// P2P 与 v1 对端注定谈不成（它的打洞包不带认证，我们一律拒收），而用户已经明确
+	// 表示不接受中转，所以这个会话从一开始就不可能成立。先回 Accept:true 再在
+	// refuseP2PForLegacyPeer 里关掉 relay 的话，对端看到的是"握手成功 → tunnel_lost →
+	// 重连"的无理由循环，真正的原因只印在本机控制台上。
+	// 回一条带理由的 Accept:false 才能把话送到对端终端——0.0.x 会把 ErrorMsg 原样打印。
+	if ack.Accept && sess.Legacy() && p2p.ParseP2PMode(s.client.config.P2PMode) == p2p.P2PModeRequired {
+		reason := "对端为旧版本（工具协议 v1），其打洞包不带认证，P2P 无法建立；" +
+			"被协助端以 --p2p required 启动，不接受中转。请升级协助端，或在被协助端改用 --p2p auto"
+		log.Printf("拒绝工具通道握手：%s", reason)
+		ack = proto.HelloAck{
+			Version:  ack.Version,
+			Versions: proto.SupportedVersionsDownTo(s.minProto),
+			Accept:   false,
+			ErrorMsg: reason,
+		}
+		sess = proto.Session{}
+	}
 	if err := s.client.SendMessage(proto.MsgToolHelloAck, &ack); err != nil {
 		return fmt.Errorf("send relay tool hello ack: %w", err)
 	}
 	if ack.Accept {
-		s.ensureDaemon(key)
+		logNegotiatedVersion(sess)
+		// 对端是 0.0.x 时停掉本轮 P2P：打洞认证是**单向**生效的。我们会拒绝它不带 MAC
+		// 的包，但它只比对 sessionID、压根不认识 `mac` 字段，于是会接受我们的包并单方面
+		// 认定 P2P 已通，把工具流量往一条我们这边根本没建起来的隧道上送——那比"没有
+		// P2P"糟得多，是静默的黑洞。
+		//
+		// 只改 help 端不够：那边管的是「新 help + 旧 share」，而这里是反过来的
+		// 「新 share + 旧 help」，对端的打洞逻辑我们改不动，只能自己不发包。
+		//
+		// 能保证的是本端此后不发任何打洞包、也不会把 daemon 切到隧道上：endP2PSession
+		// 递增 epoch 后，在途的 attachP2PMgr 会失配并 mgr.Close()，随后到达的
+		// PeerAddrReady 只会落进被清空的 p2pPending。黑洞因此不会发生。
+		//
+		// 但**地址通告可能已经发出去了**：launchP2PUpgrade 在 SessionReady 之后、
+		// ToolHello 之前就跑了，而 advertiseAddr 是在 mgr.Start() 内部调的，那时
+		// p2pMgr 还没 attach、这里也就无从关闭。结果是旧对端仍会收到 PeerAddrReady
+		// 并自行打洞，直到它自己超时——那份浪费在对端，我们改不动它的代码。
+		// 想彻底免掉就得推迟 P2P 启动，但握手到达前分不清这是工具会话还是 SSH 会话，
+		// 推迟会让 SSH 的 P2P 一起失效，代价更大。
+		if sess.Legacy() {
+			s.refuseP2PForLegacyPeer()
+		}
+		s.ensureDaemon(sess)
 		if d := s.currentDaemon(); d != nil {
-			d.SwapConn(s.client, key)
+			d.SwapConn(s.client, sess)
 		}
 	}
 	return nil
 }
 
-// ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅 rotate key。
-// sync.Once 保证 reg/goroutine 只初始化一次；每次 hello 后都用最新 key 覆盖。
-func (s *ShareMode) ensureDaemon(key [32]byte) {
+// ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅轮换会话。
+// sync.Once 保证 reg/goroutine 只初始化一次；每次 hello 后都用最新会话覆盖。
+func (s *ShareMode) ensureDaemon(sess proto.Session) {
 	s.daemonOnce.Do(func() {
 		reg := agent.NewRegistry()
 		sb := agent.NewSandbox(s.sbCfg)
@@ -1059,21 +1183,21 @@ func (s *ShareMode) ensureDaemon(key [32]byte) {
 		reg.Register(tools.NewGrep(sb))
 		reg.Register(tools.NewProcessList())
 		reg.Register(tools.NewTailLog(sb))
-		d := agent.NewDaemon(reg, s.client, key)
+		d := agent.NewDaemon(reg, s.client, sess)
 		d.OnActivity = func(line string) { fmt.Println(line) }
 		s.p2pMu.Lock()
 		s.daemon = d
 		s.p2pMu.Unlock()
 		go d.RunLoop(context.Background())
 	})
-	// 不管是首次还是续连，都用最新 key 覆盖（首次 RotateKey 等同于设置已有 key，无害）
+	// 不管是首次还是续连，都用最新会话覆盖（首次轮换等同于设置已有值，无害）
 	d := s.currentDaemon()
 	if d == nil {
 		return
 	}
-	d.RotateKey(key)
-	// 记下当前会话密钥：P2P 升级时沿用它，无需在隧道上再握一次手。
+	d.RotateSession(sess)
+	// 记下当前会话：P2P 升级时沿用它，无需在隧道上再握一次手。
 	s.p2pMu.Lock()
-	s.daemonKey = key
+	s.daemonSess = sess
 	s.p2pMu.Unlock()
 }

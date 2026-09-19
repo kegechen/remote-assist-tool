@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -52,7 +53,7 @@ func dispatchHelpToolMessage(msg *proto.Message, b inboundSink) bool {
 // handshakeTool 工具通道握手；返回 session_key 与失败原因。
 // 等待 HelloAck 期间会跳过非相关消息（PeerAddrReady、Heartbeat 等），
 // 防止 relay 主动推的 P2P 寻址通知抢先到达打断握手。
-func (h *HelpMode) handshakeTool() ([32]byte, error) {
+func (h *HelpMode) handshakeTool() (proto.Session, error) {
 	return h.handshakeToolCapturing(nil)
 }
 
@@ -64,26 +65,47 @@ func (h *HelpMode) handshakeTool() ([32]byte, error) {
 // share 会在收到 help 的 ToolHello 之前就完成 advertise，所以对端地址正好落在这个
 // 握手窗口里；丢了它 help 就永远拿不到对端地址，startHolePunching 因 peerInfo == nil
 // 直接返回，P2P 静默失效——只有 LAN / 全锥形 NAT 下靠 share 的单向包才碰巧能通。
-func (h *HelpMode) handshakeToolCapturing(capture func(*proto.PeerAddrReady)) ([32]byte, error) {
-	hello := proto.NewHello()
+func (h *HelpMode) handshakeToolCapturing(capture func(*proto.PeerAddrReady)) (proto.Session, error) {
+	hello := proto.NewHello(h.minProto)
+	ack, err := h.sendHelloAwaitAck(hello, capture)
+	if err != nil {
+		return proto.Session{}, err
+	}
+	// 被拒 + 开了兼容模式 ⟹ 对端可能是 0.0.x：它只认 Version 字段的严格相等（要求 "1"），
+	// 看不懂我们通告的 Versions。换成兼容锚点再试一轮。
+	//
+	// 两轮的顺序不能反：已发布的 1.0.0 同样只认严格相等，但要求 "2"，也没有 Versions
+	// 字段。先发 "1" 会把 1.0.0 挡在门外——那等于让一个放宽兼容的开关打断当前版本。
+	if proto.ShouldRetryWithFallbackAnchor(ack, h.minProto) {
+		hello = proto.NewFallbackHello(h.minProto)
+		if ack, err = h.sendHelloAwaitAck(hello, capture); err != nil {
+			return proto.Session{}, err
+		}
+	}
+	// hello 必须是**成功那一轮**的：会话密钥由双方 nonce 派生，用错轮次的 nonce
+	// 会握手成功却密钥不符，之后每条请求 decrypt_failed。
+	return h.sessionFromAck(ack, hello)
+}
+
+// sendHelloAwaitAck 发一条 Hello 并等它的 HelloAck。
+// 等待期间跳过非相关消息（PeerAddrReady、Heartbeat 等），防止 relay 主动推的 P2P
+// 寻址通知抢先到达打断握手。
+func (h *HelpMode) sendHelloAwaitAck(hello proto.Hello, capture func(*proto.PeerAddrReady)) (proto.HelloAck, error) {
 	if err := h.client.SendMessage(proto.MsgToolHello, &hello); err != nil {
-		return [32]byte{}, err
+		return proto.HelloAck{}, err
 	}
 	h.client.SetReadDeadline(time.Now().Add(15 * time.Second))
 	defer h.client.SetReadDeadline(time.Time{})
 	for {
 		msg, err := h.client.ReadMessage()
 		if err != nil {
-			return [32]byte{}, err
+			return proto.HelloAck{}, err
 		}
 		switch msg.Type {
 		case proto.MsgToolHelloAck:
 			var ack proto.HelloAck
 			proto.DecodePayload(msg, &ack)
-			if !ack.Accept {
-				return [32]byte{}, fmt.Errorf("share rejected tool channel: %s", ack.ErrorMsg)
-			}
-			return proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64), nil
+			return ack, nil
 		case proto.MsgPeerAddrReady:
 			if capture != nil {
 				var ready proto.PeerAddrReady
@@ -144,4 +166,31 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 		return fmt.Errorf("mcp serve: %w", err)
 	}
 	return nil
+}
+
+// sessionFromAck 校验 share 的应答并派生本次会话。
+//
+// 两件事都不能省：
+//   - 对端拒绝时，若它能给的最高版本低于本端底线，要翻译成可操作的提示。能加
+//     --min-proto=1 的是**本端**——旧版 share 根本没有这个参数，所以提示指向本机。
+//   - 对端接受时，它选定的版本同样要过本端的 minProto 闸（见 proto.InterpretHelloAck），
+//     否则一条伪造的 Accept + Version:"1" 就能单方面把本端拽进无认证的 v1 会话。
+func (h *HelpMode) sessionFromAck(ack proto.HelloAck, hello proto.Hello) (proto.Session, error) {
+	version, err := proto.InterpretHelloAck(ack, h.minProto, proto.SideHelp, proto.SideShare)
+	if err != nil {
+		var incompat *proto.IncompatibleVersionError
+		if errors.As(err, &incompat) {
+			return proto.Session{}, errors.New(incompat.LocalHint())
+		}
+		return proto.Session{}, err
+	}
+	if version == proto.ToolProtocolVersionV1 {
+		fmt.Fprintf(os.Stderr, "[警告] 工具通道已降级到 v%s 兼容模式（对端为旧版本）："+
+			"AAD 绑定、强制密文参数、抗重放均已关闭，仅应在可信网络中使用\n",
+			proto.ToolProtocolVersionV1)
+	}
+	return proto.Session{
+		Key:     proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64, version),
+		Version: version,
+	}, nil
 }

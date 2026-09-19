@@ -94,7 +94,7 @@ func TestPunchMACVariesPerPacket(t *testing.T) {
 // 针对会话密钥的预言机。
 func TestPunchKeyIsDomainSeparated(t *testing.T) {
 	punchKey := derivePunchKey(testPunchCode)
-	sessionKey := DeriveSessionKey(testPunchCode, "n1", "n2")
+	sessionKey := DeriveSessionKey(testPunchCode, "n1", "n2", ToolProtocolVersion)
 	if len(punchKey) != len(sessionKey) {
 		t.Fatalf("长度不一致: %d vs %d", len(punchKey), len(sessionKey))
 	}

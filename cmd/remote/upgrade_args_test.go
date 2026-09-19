@@ -83,3 +83,27 @@ func TestUpgradedShareArgsRejectsInvalidExplicitBool(t *testing.T) {
 		t.Fatal("expected invalid boolean value to be rejected")
 	}
 }
+
+// TestUpgradedShareArgsPreservesMinProto 热升级必须原样带上 --min-proto。
+//
+// 丢了它的后果正是本次兼容改动要避免的那个场景：用户为了迁就旧 help 才开了兼容模式，
+// share 一次热升级之后悄悄回到默认的"拒绝 v1"，于是"升级完就连不上了"。
+// 目前它是靠 upgradedShareArgs 的默认分支透传的——没有任何一行代码显式提到它，
+// 所以用测试钉住，免得将来有人收紧透传规则时顺手把它滤掉。
+func TestUpgradedShareArgsPreservesMinProto(t *testing.T) {
+	for _, form := range [][]string{
+		{"--min-proto", "1"},
+		{"--min-proto=1"},
+	} {
+		args := append([]string{"remote", "share"}, form...)
+		got, err := upgradedShareArgs(args, "relay:8443", "/tmp/code.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := append(append([]string{"share"}, form...),
+			"--server", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("form %v: got %#v, want %#v", form, got, want)
+		}
+	}
+}

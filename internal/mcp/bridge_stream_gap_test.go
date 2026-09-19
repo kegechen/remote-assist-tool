@@ -17,7 +17,7 @@ import (
 // "中间被挖掉几 KB、最终 ToolResp 仍然 OK" 的输出——没有任何办法察觉。
 func TestBridgeStreamGapFailsCall(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -46,7 +46,7 @@ func TestBridgeStreamGapFailsCall(t *testing.T) {
 // 已到达的帧无法发现空洞；显式终止符缺失必须让调用失败。
 func TestBridgeStreamMissingTerminatorFailsCall(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -69,7 +69,7 @@ func TestBridgeStreamMissingTerminatorFailsCall(t *testing.T) {
 // 内容却没了。以前这里是 return 静默丢弃。
 func TestBridgeStreamUndecryptableChunkFailsCall(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -94,7 +94,7 @@ func TestBridgeStreamUndecryptableChunkFailsCall(t *testing.T) {
 // TestBridgeStreamNoGapStillSucceeds 正常连续的流不能被误判。
 func TestBridgeStreamNoGapStillSucceeds(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -136,7 +136,7 @@ func TestBridgeStreamNoGapStillSucceeds(t *testing.T) {
 // 会把一次完全正常的调用打成 stream_incomplete。
 func TestBridgeStreamOutOfOrderIsNotAGap(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -173,7 +173,7 @@ func TestBridgeStreamOutOfOrderIsNotAGap(t *testing.T) {
 // 就下结论会误杀，所以发现空洞后要留一个补齐窗口（streamGapSettle）。
 func TestBridgeStreamLateChunkAfterRespIsNotAGap(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -205,7 +205,7 @@ func TestBridgeStreamLateChunkAfterRespIsNotAGap(t *testing.T) {
 func TestBridgeRequestIDsDifferAcrossConnects(t *testing.T) {
 	firstID := func() uint64 {
 		conn := &stubConn{sent: make(chan *proto.Message, 1)}
-		br := NewBridge(conn, [32]byte{})
+		br := NewBridge(conn, proto.Session{})
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		go br.CallTool(ctx, "ping", json.RawMessage(`{}`))

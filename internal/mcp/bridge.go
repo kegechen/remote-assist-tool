@@ -52,9 +52,10 @@ type MsgConn interface {
 
 // Bridge MCP server <-> 隧道工具消息
 type Bridge struct {
-	connMu    sync.RWMutex // 保护 conn/key：P2P 热升级会在读循环外并发替换二者
-	conn      MsgConn
-	key       [32]byte
+	connMu sync.RWMutex // 保护 conn/sess：P2P 热升级会在读循环外并发替换二者
+	conn   MsgConn
+	// sess 会话密钥 + 协商出的协议版本。二者必须一起替换，理由见 proto.Session。
+	sess      proto.Session
 	nextID    uint64
 	pending   sync.Map    // id -> chan toolReply
 	streamCbs sync.Map    // id -> *streamRecv，仅流式调用登记
@@ -157,16 +158,20 @@ func (s *streamRecv) status() (gaps int, finished bool) {
 
 // settledStatus 在给迟到帧和终止帧留出 streamGapSettle 的补齐窗口后返回最终状态。
 // ToolResp 可能走另一条通道先到，因此不能只看响应到达瞬间是否已收到 Fin。
-func (s *streamRecv) settledStatus() (gaps int, finished bool) {
+//
+// requireTerminator 为 false 时（v1 对端，它根本不发 Fin）只等缺帧补齐，不等终止帧，
+// 否则每次流式调用都要白等满一个补齐窗口才发现「它永远不会来」。
+func (s *streamRecv) settledStatus(requireTerminator bool) (gaps int, finished bool) {
+	settled := func(g int, f bool) bool { return g == 0 && (f || !requireTerminator) }
 	gaps, finished = s.status()
-	if gaps == 0 && finished {
-		return 0, true
+	if settled(gaps, finished) {
+		return gaps, finished
 	}
 	deadline := time.Now().Add(streamGapSettle)
 	for time.Now().Before(deadline) {
 		time.Sleep(streamGapSettleStep)
-		if gaps, finished = s.status(); gaps == 0 && finished {
-			return 0, true
+		if gaps, finished = s.status(); settled(gaps, finished) {
+			return gaps, finished
 		}
 	}
 	return gaps, finished
@@ -175,12 +180,12 @@ func (s *streamRecv) settledStatus() (gaps int, finished bool) {
 // settledGapCount 保留给只关心缺帧数的调用方；需要确认流完整结束时应使用
 // settledStatus，因为没有终止帧也必须判失败。
 func (s *streamRecv) settledGapCount() int {
-	n, _ := s.settledStatus()
+	n, _ := s.settledStatus(true)
 	return n
 }
 
-func NewBridge(c MsgConn, key [32]byte) *Bridge {
-	return &Bridge{conn: c, key: key, nextID: newIDEpoch()}
+func NewBridge(c MsgConn, sess proto.Session) *Bridge {
+	return &Bridge{conn: c, sess: sess, nextID: newIDEpoch()}
 }
 
 // newIDEpoch 给每个 Bridge 实例的请求 ID 取一个随机高位起点。
@@ -205,21 +210,22 @@ func newIDEpoch() uint64 {
 // 连接先在 relay 上完成握手并可用，P2P 打洞成功且双向证实后再切到隧道；
 // P2P 隧道中途断掉时再切回 relay。对端由 agent.Daemon.SwapConn 做对称切换。
 //
-// P2P 升级复用 relay 握手协商出的同一把 key（key 由 code+双方 nonce 派生，与传输
-// 通道无关），此时传入原 key 即可；只有重新握手（降级回 relay）才会换 key。
-func (b *Bridge) SwapConn(c MsgConn, key [32]byte) {
+// P2P 升级复用 relay 握手协商出的同一个会话（key 由 code+双方 nonce+协商版本派生，与
+// 传输通道无关），此时传入原会话即可；只有重新握手（降级回 relay）才会换。
+func (b *Bridge) SwapConn(c MsgConn, sess proto.Session) {
 	b.connMu.Lock()
 	b.conn = c
-	b.key = key
+	b.sess = sess
 	b.connMu.Unlock()
 }
 
-// snapshot 取当前 conn/key 的一致快照。单次 CallTool 全程用同一份快照，保证请求的
-// 加密 key、发送通道、响应解密 key 三者配对，不会被中途的 SwapConn 撕裂。
-func (b *Bridge) snapshot() (MsgConn, [32]byte) {
+// snapshot 取当前 conn/会话的一致快照。单次 CallTool 全程用同一份快照，保证请求的
+// 加密 key、发送通道、响应解密 key、以及决定 AAD 形态的协议版本四者配对，不会被中途的
+// SwapConn 撕裂。
+func (b *Bridge) snapshot() (MsgConn, proto.Session) {
 	b.connMu.RLock()
 	defer b.connMu.RUnlock()
-	return b.conn, b.key
+	return b.conn, b.sess
 }
 
 // Disconnect 标记隧道已断开，并唤醒所有在途 CallTool 立即返回 err。
@@ -296,22 +302,29 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		defer cancel()
 	}
 
-	// 全程用同一份 conn/key 快照，避免中途 SwapConn 导致「用旧 key 加密、却按新 key 解密」。
-	conn, key := b.snapshot()
+	// 全程用同一份 conn/会话快照，避免中途 SwapConn 导致「用旧 key 加密、却按新 key 解密」。
+	conn, sess := b.snapshot()
 
 	// 先把请求整体建好，AAD 直接取自它的字段——这样以后给 ToolReq 添了新的明文字段
 	// （比如真的开始下发 DeadlineMs），漏进 AAD 的话是编译期看得见的改动，而不是
 	// 上线后远端每条请求都 decrypt_failed。
 	req := proto.ToolReq{ID: id, Tool: name, ArgsJSON: args}
-	if key != [32]byte{} {
-		// 空参数也要封：远端把「args 是合法密文」当作硬前置条件，否则一条不带 args
-		// 的伪造请求就能绕过认证触发工具执行。封 "{}" 而不是空串，远端解出来能直接
-		// json.Unmarshal 成零值参数。
+	if sess.Active() {
+		// 空参数也要封，**两个版本都封**。v2 把「args 是合法密文」当作硬前置条件，否则
+		// 一条不带 args 的伪造请求就能绕过认证触发工具执行；封 "{}" 而不是空串，远端
+		// 解出来能直接 json.Unmarshal 成零值参数。
+		//
+		// v1 这边刻意不去复刻 0.0.x 的原样行为——那个行为本身是坏的：它的发送侧对空
+		// 参数发 args:null 不加封（`len(args) > 0` 才封），而它的接收侧判据同样是
+		// len > 0，于是收到 4 字节的 "null" 会去解密并回 decrypt_failed。也就是说
+		// v1↔v1 之间的无参调用本来就失败。真实 0.0.x 的接收侧完全能解开我们封的
+		// "{}"（len > 0 → 用 nil AAD 解密），所以照常封是严格更好且完全兼容的。
+		// 发送从严、接收严格对齐旧行为，两边各自取更稳的一侧。
 		plain := args
 		if len(plain) == 0 {
 			plain = json.RawMessage("{}")
 		}
-		wrapped, err := proto.AEADSealJSON(&key, plain, proto.ToolReqAAD(req.ID, req.Tool, req.DeadlineMs))
+		wrapped, err := proto.AEADSealJSON(&sess.Key, plain, sess.ReqAAD(req.ID, req.Tool, req.DeadlineMs))
 		if err != nil {
 			return nil, err
 		}
@@ -346,11 +359,11 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		// 把一次成功的 read_file 改成 ok:true + result 清空，调用方拿到的是"空结果 +
 		// 成功"，而它没有任何别的办法察觉。
 		result := resp.ResultJSON
-		if key != [32]byte{} {
-			if len(result) == 0 {
-				return nil, fmt.Errorf("unauthenticated: 响应未加封（对端过旧，或响应被篡改）")
-			}
-			plain, err := proto.AEADOpenJSON(&key, result, proto.ToolRespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg))
+		if sess.Active() && len(result) == 0 && sess.RequireSealedResp() {
+			return nil, fmt.Errorf("unauthenticated: 响应未加封（对端过旧，或响应被篡改）")
+		}
+		if sess.Active() && len(result) > 0 {
+			plain, err := proto.AEADOpenJSON(&sess.Key, result, sess.RespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg))
 			if err != nil {
 				return nil, fmt.Errorf("unauthenticated: 响应校验失败: %w", err)
 			}
@@ -362,8 +375,10 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		// 流式输出缺了帧就不能当成功返回：调用方（GUI 终端 / AI）没有别的办法察觉，
 		// 一份被挖空却标着 OK 的输出比一次明确的失败危险得多。
 		if recv != nil {
-			n, finished := recv.settledStatus()
-			if !finished {
+			// v1 对端不发终止帧，只能按「缺帧数」判完整性；缺帧检测本身两个版本都有效。
+			needFin := sess.RequireStreamTerminator()
+			n, finished := recv.settledStatus(needFin)
+			if !finished && needFin {
 				if n > 0 {
 					return nil, fmt.Errorf("stream_incomplete: 流式输出缺少结束帧，且缺失 %d 帧", n)
 				}
@@ -404,7 +419,13 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 		}
 		recv := v.(*streamRecv)
 		data := c.Data
-		if _, key := b.snapshot(); key != [32]byte{} {
+		_, sess := b.snapshot()
+		// 空 Data 两个版本都按损坏处理，没有 v1 豁免：0.0.x 的 chunkSink.Send 在 key
+		// 非零时是**无条件**加封的（`AEADSeal(&key, data)`，空 data 也产出至少带
+		// nonce+tag 的非空密文），而且它从不发 Fin 帧，所以 v1 线上同样不存在合法的空
+		// Data 帧。放行它等于把丢帧检测交给攻击者：丢掉真帧 N、补一条 {seq:N, data:""}，
+		// observe 就会把登记好的空洞抹平，一份被挖空的输出以 OK 返回。
+		if sess.Active() {
 			// 必须先验真再 observe。observe 会把 Seq 记成"这一帧到了"，还会把先前
 			// 登记的空洞删掉——放一条未经认证的帧进去，等于把丢帧检测交给攻击者：
 			// 丢掉真帧 N、补一条 {seq:N, data:空} 的伪造帧，空洞就被抹平，一份被挖空
@@ -413,7 +434,7 @@ func (b *Bridge) HandleInbound(msg *proto.Message) {
 			// 空 Data 同样按损坏处理，不能像以前那样"len>0 才解密"直接放行：
 			// 加封侧对空 data 也会产出非空密文（AEADSeal 至少带 nonce+tag），
 			// 所以握手后线上不存在合法的空帧。
-			plain, err := proto.AEADOpen(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
+			plain, err := proto.AEADOpen(&sess.Key, data, sess.StreamAAD(c.ID, c.Seq, c.Stream, c.Fin))
 			if err != nil {
 				// 帧损坏/换了 key/伪造：这一帧的内容没了，但后续帧与最终 ToolResp 不受
 				// 影响。仍然 observe（否则同一个 Seq 之后会被再算成一个空洞，重复计数），

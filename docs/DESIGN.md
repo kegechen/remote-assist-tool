@@ -92,12 +92,59 @@ remote-assist-tool/
 
 ### 3.1.1 工具通道协议版本
 
-`proto.ToolProtocolVersion` 当前为 `"2"`，在 ToolHello/ToolHelloAck 中比对，不匹配直接拒绝握手。
+`proto.ToolProtocolVersion` 当前为 `"2"`，`SupportedToolVersions` 为 `["2", "1"]`（降序）。
+已发布版本的分界线：`0.0.1`~`0.0.9` 是 v1，`1.0.0` 起是 v2。
 
-它同时是 HKDF 的 `info` 串（会话密钥 `rat-tool-v<版本>`、打洞密钥 `rat-p2p-punch-v<版本>`），
-因此抬版本号会自动让两代密钥互不相同 —— 不需要单独做能力协商。
+**协商而非比对。** ToolHello 带两个版本字段：
 
-v2 相对 v1 的三处变更，都不向后兼容：
+- `versions`：本端支持的全部版本，真正的协商依据。旧版不认识它，会忽略。
+- `version`：兼容锚点。0.0.x 的 share 只看这个字段且做严格相等比对，所以开了兼容模式时
+  这里填 `"1"` 骗过它的比对，默认则填 `"2"` 让它明确拒绝。同 TLS 1.3 的 `legacy_version` 手法。
+
+`HelloAck.version` 承载**选定**的版本（0.0.x 恰好填的就是它唯一支持的 `"1"`，语义一致）。
+发起方不能照单全收这个选择：`proto.InterpretHelloAck` 会再用本端的 `--min-proto` 校验一遍，
+否则一条伪造的 `accept:true + version:"1"` 就能单方面把发起方拽进 v1 会话。
+
+版本同时是会话密钥 HKDF 的 `info` 串（`rat-tool-v<协商版本>`），所以**必须在派生密钥之前
+定下来**，事后改不了。打洞密钥的 `info` 则是与工具协议解耦的固定串 `rat-p2p-punch-v2`
+（`proto.punchKeyInfo`）：打洞发生在工具握手之前，那时拿不到协商结果。
+
+**协商到 v1 时两端都主动停掉 P2P**（share 侧 `handleRelayToolHello` →
+`refuseP2PForLegacyPeer`，help 侧 `help_bootstrap.go` 不启动 `upgradeToP2P`）。
+不能只改一端：两个方向各对应一种新旧组合。原因是打洞认证**单向生效** —— 本端会拒绝
+0.0.x 不带 MAC 的包，但 0.0.x 只比对 `session_id`、不认识 `mac` 字段，会接受本端的包并
+单方面认定 P2P 已通，把流量送进一条本端没建起来的隧道，形成只有它以为成立的状态。
+这比"没有 P2P"糟得多，是静默黑洞。不发包才能让两端状态一致。
+
+保证的边界要说准：新端此后不发任何打洞包、也不会把 daemon 切到隧道，所以黑洞不会发生。
+但 share 侧的**地址通告可能已经发出去了** —— `launchP2PUpgrade` 在 `SessionReady` 之后、
+`ToolHello` 之前就跑了，而 `advertiseAddr` 是在 `mgr.Start()` 内部调的，那时 `p2pMgr` 还没
+attach，`endP2PSession` 也就无从关闭。旧对端因此仍会收到 `PeerAddrReady` 并自行打洞，
+直到它自己超时。想彻底免掉就得推迟 P2P 启动，但握手到达前分不清这是工具会话还是 SSH
+会话，推迟会让 SSH 的 P2P 一起失效，代价更大。
+
+`--p2p=required` 下"对端太旧"按 P2P 失败处理，且在**握手阶段**就拒绝（`handleRelayToolHello`
+回 `Accept:false` 并附理由），而不是先 Accept 再关连接：后者在对端那里只表现为
+"握手成功 → tunnel_lost → 重连"的无理由循环，真正的原因只印在 share 本机。回一条带理由的
+拒绝才能把话送到对端终端——0.0.x 会把 `ErrorMsg` 原样打印。两端对 `--p2p required` 的
+承诺因此一致：help 硬失败，share 拒绝握手。
+
+`InterpretHelloAck` 还多守一道：应答方的 `Versions` 是它「我支持什么」的证词。若其中存在
+双方都支持、且比 `Version` 更新的版本，说明这次降级没有正当理由——发起方的提议很可能
+被中间人改写过（把 `{"version":"1"}` 塞进去并删掉 `versions`，应答方就会「合法地」谈出 v1）。
+这堵的是 `--min-proto=1` 打开后剩下的最后一条降级路径；真正的 0.0.x 不发 `Versions`，
+不受影响。
+
+**默认不降级**（`DefaultMinProto == ToolProtocolVersion`）。允许自动降级的话，不可信的
+relay 只要删掉 `versions` 字段就能把两个 v2 端打回 v1，而降级成功后双方都不再做
+transcript 绑定，事后无从察觉。放宽必须由用户显式指定 `--min-proto=1`，且**只能加在新版本
+那一端**（旧版没有这个旗标）——拒绝方恰好就是那一端，所以提示直接指向本机。
+
+v1/v2 的行为差异集中在 `proto.Session` 上（密钥 + 协商版本一起传递、一起原子替换）。
+它的零值是 fail-safe 的：`Version == ""` 按最高版本解释，因此漏传版本的后果是"连不上"，
+而不是"静默按无认证的 v1 跑"。
+
+v2 相对 v1 的三处变更：
 
 1. **AAD**：`tool_req` / `tool_resp` / `tool_stream` 的 AEAD 带附加认证数据，把外层明文字段
    （`tool`、`id`、`deadline_ms`、`ok`、`error_code`、`error_msg`、`seq`、`stream`、`fin`）
@@ -112,7 +159,13 @@ v2 相对 v1 的三处变更，都不向后兼容：
 3. **抗重放**：接收侧按调用 ID 做 1024 位滑动窗口去重（`internal/agent/replay.go`），
    窗口每把 key 一份 —— 重新握手（换 key）时重置，P2P 热升级（同 key 换通道）时保留。
 
-旧版接入时在握手阶段收到 `unsupported tool protocol version`，而不是逐条请求的 `decrypt_failed`。
+与 v1 对端通话时（`--min-proto=1`），以上三项都要按 v1 的规矩关掉，且**收发两侧必须对称**：
+AAD 传 `nil`、空 args 不加封、空 result 不加封、不做抗重放。任一侧记错，协商照样成功，
+然后每条请求以 `decrypt_failed` 收场 —— 正是版本协商本该避免的失败形态。这些分支由
+`tests/proto_compat_test.go`（Bridge 与 Daemon 真实对接）和 `internal/agent/legacy_v1_test.go`
+成对钉住（每条 v1 断言都配一条 v2 反向断言，防止"顺手统一"掉某个分支时测试仍然全绿）。
+
+版本不匹配时在握手阶段就收到带升级指引的拒绝，而不是逐条请求的 `decrypt_failed`。
 
 ### 3.2 协助码规则
 - 字符集: `ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789` (排除 I, i, L, l, O, o, 0, 1)

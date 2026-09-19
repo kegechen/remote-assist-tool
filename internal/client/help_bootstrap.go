@@ -344,12 +344,12 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	// 握手窗口内到达的 PeerAddrReady 必须接住（见 peerAddrRelay 注释）：share 在收到
 	// ToolHello 之前就已 advertise，relay 只推这一次，丢了 P2P 就彻底起不来。
 	addrRelay := &peerAddrRelay{}
-	key, hsErr := h.handshakeToolCapturing(addrRelay.deliver)
+	sess, hsErr := h.handshakeToolCapturing(addrRelay.deliver)
 	if hsErr != nil {
 		h.client.Close()
 		return nil, fmt.Errorf("handshake failed: %w", hsErr)
 	}
-	bridge := mcp.NewBridge(h.client, key)
+	bridge := mcp.NewBridge(h.client, sess)
 
 	// 心跳保活：每 30s 发 Heartbeat，relay 回 echo，避免 ReadMessage 2-min deadline
 	// 因为空闲被触发，导致后台 goroutine 退出 → MCP 工具调用全部失效。
@@ -487,8 +487,29 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		}
 	}()
 
-	if p2pMode != p2p.P2PModeDisabled {
-		go b.upgradeToP2P(h, bridge, key, &effectiveCfg, resp.SessionID, p2pMode, addrRelay,
+	// 协商到 v1（对端是 0.0.x）时根本不发起 P2P：谈不成，而且中途状态是不对称的。
+	//
+	// 打洞认证是单向生效的 —— 我们会拒绝对端不带 MAC 的包，但 0.0.x 只比对 sessionID、
+	// 压根不认识 `mac` 字段，于是它会**接受**我们的包，单方面认定 P2P 已通并把流量往
+	// 隧道上送，而我们这边根本没建隧道。与其让对端进入这种只有它以为成立的状态，
+	// 不如干脆不发起：不 advertise 地址，relay 就不会给对端推 PeerAddrReady，
+	// 对端的 startHolePunching 因 peerInfo == nil 直接返回，两边都确定地留在中转上。
+	//
+	// 注意这不能靠放宽打洞校验来解决：认证要是能被"自称是旧版"绕过，它就等于不存在。
+	// 兼容模式下的 P2P 是功能降级，认证不降级。
+	if p2pMode != p2p.P2PModeDisabled && sess.Legacy() {
+		// required 下这是硬失败，且必须**当场**给出真正的原因：不启动升级的话，下面那段
+		// 同步等待会干等满 60s 再报一句"协商超时"，把"对端太旧"说成"网络没打通"，
+		// 排障方向整个指错。
+		if p2pMode == p2p.P2PModeRequired {
+			teardown(errors.New("P2P required but peer speaks legacy v1"))
+			return nil, fmt.Errorf("P2P required but failed: 对端为旧版本（工具协议 v1），" +
+				"其打洞包不带认证、本端一律拒绝，P2P 无法建立。请升级对端，或改用 --p2p auto 经中转连接")
+		}
+		fmt.Fprintln(os.Stderr, "MCP: 对端为旧版本（工具协议 v1），P2P 直连不可用，全程使用中转")
+	}
+	if p2pMode != p2p.P2PModeDisabled && !sess.Legacy() {
+		go b.upgradeToP2P(h, bridge, sess, &effectiveCfg, resp.SessionID, p2pMode, addrRelay,
 			&p2pConnPtr, &p2pMgrPtr, helloAckCh, teardown, upgradeDone, sessionDone)
 	}
 
@@ -525,7 +546,7 @@ const p2pRequiredWaitTimeout = 60 * time.Second
 func (b *HelpMCPBootstrap) upgradeToP2P(
 	h *HelpMode,
 	bridge *mcp.Bridge,
-	key [32]byte,
+	sess proto.Session,
 	cfg *Config,
 	sessionID string,
 	mode p2p.P2PMode,
@@ -618,7 +639,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	// （key 由 code+双方 nonce 派生，与传输通道无关），不必在 P2P 上再握一次手，
 	// 也就不存在新旧 key 的解密竞态。
 	p2pConnPtr.Store(pc)
-	bridge.SwapConn(pc, key)
+	bridge.SwapConn(pc, sess)
 	fmt.Fprintln(os.Stderr, "MCP: 已切换到 P2P 直连")
 
 	b.mu.Lock()
@@ -690,26 +711,51 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 	default:
 	}
 
-	hello := proto.NewHello()
-	if err := h.client.SendMessage(proto.MsgToolHello, &hello); err != nil {
+	// 与首次握手同样走「先试最高版本、被拒再用兼容锚点重试一轮」，否则开了 --min-proto=1
+	// 的 help 在降级回中转时会拿不到与首次握手一致的结果（理由见 proto.NewHello）。
+	hello := proto.NewHello(h.minProto)
+	ack, err := sendToolHelloAwait(h.client, hello, helloAckCh)
+	if err != nil {
 		teardown(fmt.Errorf("tunnel_lost: P2P 中断后切回中转失败（%w），请重新 connect", err))
 		return
 	}
-	select {
-	case ack := <-helloAckCh:
-		if !ack.Accept {
-			teardown(fmt.Errorf("tunnel_lost: P2P 中断后对端拒绝重新握手（%s），请重新 connect", ack.ErrorMsg))
+	if proto.ShouldRetryWithFallbackAnchor(ack, h.minProto) {
+		hello = proto.NewFallbackHello(h.minProto)
+		if ack, err = sendToolHelloAwait(h.client, hello, helloAckCh); err != nil {
+			teardown(fmt.Errorf("tunnel_lost: P2P 中断后切回中转失败（%w），请重新 connect", err))
 			return
 		}
-		bridge.SwapConn(h.client, proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64))
+	}
+	{
+		// 重新走一遍完整的应答校验，而不是只看 Accept：降级回中转是重新握手，对端
+		// （或中间人）在这里同样可能塞一个 Version:"1" 进来，绕过本端的 minProto 底线。
+		newSess, err := h.sessionFromAck(ack, hello)
+		if err != nil {
+			teardown(fmt.Errorf("tunnel_lost: P2P 中断后重新握手失败（%w），请重新 connect", err))
+			return
+		}
+		bridge.SwapConn(h.client, newSess)
 		b.mu.Lock()
 		if b.bridge == bridge {
 			b.activeResult.P2P = false
 		}
 		b.mu.Unlock()
 		fmt.Fprintln(os.Stderr, "MCP: 已切回中转模式，连接继续可用")
+	}
+	return
+}
+
+// sendToolHelloAwait 发一条 ToolHello 并等读循环把对应的 HelloAck 投过来。
+// 超时按握手失败处理，由调用方决定怎么收场。
+func sendToolHelloAwait(c *Client, hello proto.Hello, helloAckCh <-chan proto.HelloAck) (proto.HelloAck, error) {
+	if err := c.SendMessage(proto.MsgToolHello, &hello); err != nil {
+		return proto.HelloAck{}, err
+	}
+	select {
+	case ack := <-helloAckCh:
+		return ack, nil
 	case <-time.After(15 * time.Second):
-		teardown(fmt.Errorf("tunnel_lost: P2P 中断后切回中转超时，请重新 connect"))
+		return proto.HelloAck{}, errors.New("等待 ToolHelloAck 超时")
 	}
 }
 

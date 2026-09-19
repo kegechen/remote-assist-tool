@@ -49,6 +49,10 @@ type Config struct {
 	// TrustNewCert 对应 --trust-new-cert：relay 证书指纹与首次连接时不一致也接受，
 	// 并覆盖记录。只在 InsecureSkip（默认）路径下有意义，见 crypto/tofu.go。
 	TrustNewCert bool
+
+	// MinProto 对应 --min-proto：可接受的最低工具协议版本。空串视作
+	// proto.DefaultMinProto，即不降级。放宽到 "1" 才会与 0.0.x 的旧客户端互通。
+	MinProto string
 	// trustStore 仅供测试注入自定义指纹表位置；零值走 ~/.remote_assist_known_hosts。
 	trustStore *crypto.TrustStore
 }

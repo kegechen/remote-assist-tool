@@ -106,8 +106,8 @@ func TestDaemonReplayWindowResetOnRekey(t *testing.T) {
 		t.Fatalf("第一次应成功，得到 %+v", resp)
 	}
 
-	newKey := proto.DeriveSessionKey("ABCD-2345", "nonceC", "nonceD")
-	f.d.RotateKey(newKey)
+	newKey := proto.DeriveSessionKey("ABCD-2345", "nonceC", "nonceD", proto.ToolProtocolVersion)
+	f.d.RotateSession(proto.Session{Key: newKey})
 	f.key = newKey
 
 	// 新会话的 ID 又从 1 开始。
@@ -128,7 +128,7 @@ func TestDaemonReplayWindowKeptOnHotUpgrade(t *testing.T) {
 	}
 
 	in := make(chan *proto.Message, 4)
-	f.d.SwapConn(&fakeConn{in: in, out: f.out}, f.key) // 同一把 key，仅换通道
+	f.d.SwapConn(&fakeConn{in: in, out: f.out}, proto.Session{Key: f.key}) // 同一把 key，仅换通道
 
 	f.inject(req)
 	resp := f.resp()

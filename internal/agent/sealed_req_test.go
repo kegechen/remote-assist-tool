@@ -42,8 +42,8 @@ func newSealedFixture(t *testing.T) *sealedFixture {
 	// 第二个工具用于「改挂到别的工具上」的断言。
 	r.Register(&countingTool{name: "other"})
 
-	key := proto.DeriveSessionKey("ABCD-2345", "nonceA", "nonceB")
-	d := NewDaemon(r, conn, key)
+	key := proto.DeriveSessionKey("ABCD-2345", "nonceA", "nonceB", proto.ToolProtocolVersion)
+	d := NewDaemon(r, conn, proto.Session{Key: key})
 	go d.RunLoop(context.Background())
 
 	return &sealedFixture{t: t, key: key, out: out, tool: tool, d: d}
@@ -191,7 +191,7 @@ func TestSealedReqPlainChannelUnaffected(t *testing.T) {
 	tool := &countingTool{name: "probe"}
 	r := NewRegistry()
 	r.Register(tool)
-	d := NewDaemon(r, &fakeConn{in: in, out: out}, [32]byte{})
+	d := NewDaemon(r, &fakeConn{in: in, out: out}, proto.Session{})
 	go d.RunLoop(context.Background())
 
 	msg, _ := proto.NewMessage(proto.MsgToolReq, &proto.ToolReq{ID: 8, Tool: "probe", ArgsJSON: json.RawMessage(`{}`)})
@@ -242,7 +242,7 @@ func TestSealedRespPlainChannelStaysPlain(t *testing.T) {
 	out := make(chan *proto.Message, 16)
 	r := NewRegistry()
 	r.Register(&countingTool{name: "probe"})
-	d := NewDaemon(r, &fakeConn{in: in, out: out}, [32]byte{})
+	d := NewDaemon(r, &fakeConn{in: in, out: out}, proto.Session{})
 	go d.RunLoop(context.Background())
 
 	msg, _ := proto.NewMessage(proto.MsgToolReq, &proto.ToolReq{ID: 1, Tool: "probe", ArgsJSON: json.RawMessage(`{}`)})
@@ -268,9 +268,9 @@ func TestBusyRespIsSealed(t *testing.T) {
 	out := make(chan *proto.Message, 4)
 	r := NewRegistry()
 	r.Register(&countingTool{name: "probe"})
-	key := proto.DeriveSessionKey("ABCD-2345", "nonceA", "nonceB")
+	key := proto.DeriveSessionKey("ABCD-2345", "nonceA", "nonceB", proto.ToolProtocolVersion)
 	// 故意不起 RunLoop：没人消费 inbound，塞满即触发 default 分支。
-	d := NewDaemon(r, &fakeConn{in: make(chan *proto.Message, 4), out: out}, key)
+	d := NewDaemon(r, &fakeConn{in: make(chan *proto.Message, 4), out: out}, proto.Session{Key: key})
 
 	msg, err := proto.NewMessage(proto.MsgToolReq, &proto.ToolReq{ID: 42, Tool: "probe", ArgsJSON: json.RawMessage(`{}`)})
 	if err != nil {

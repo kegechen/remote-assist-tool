@@ -23,7 +23,7 @@ func TestP2PToolHelloIgnoredAfterRelayHandshake(t *testing.T) {
 	key := [32]byte{1, 2, 3}
 	s := &ShareMode{code: "ABCD-2345"}
 	s.p2pEpoch = epoch
-	s.daemonKey = key
+	s.daemonSess = proto.Session{Key: key}
 
 	done := make(chan struct{})
 	go func() {
@@ -32,7 +32,7 @@ func TestP2PToolHelloIgnoredAfterRelayHandshake(t *testing.T) {
 	}()
 
 	peer := NewP2PConn(peerTunnel)
-	hello := proto.NewHello()
+	hello := proto.NewHello("")
 	if err := peer.SendMessage(proto.MsgToolHello, hello); err != nil {
 		t.Fatalf("发送 ToolHello: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestP2PToolHelloIgnoredAfterRelayHandshake(t *testing.T) {
 		t.Fatalf("relay 握手后仍响应了 P2P ToolHello: %s", msg.Type)
 	}
 
-	if got := s.currentDaemonKey(); got != key {
+	if got := s.currentDaemonSess().Key; got != key {
 		t.Errorf("会话密钥被注入的 ToolHello 改写了: %x", got)
 	}
 

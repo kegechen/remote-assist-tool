@@ -57,7 +57,7 @@ func sealResp(t *testing.T, id uint64, result string) *proto.Message {
 // 按序回调，最终结果照常返回。
 func TestBridgeCallToolStreamDecryptsAndOrdersChunks(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -104,7 +104,7 @@ func TestBridgeCallToolStreamDecryptsAndOrdersChunks(t *testing.T) {
 // 或串到别的调用上——旧版 share 端仍会为某些工具发块。
 func TestBridgeIgnoresChunksForNonStreamCall(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	go func() {
 		req := <-conn.sent
@@ -129,7 +129,7 @@ func TestBridgeIgnoresChunksForNonStreamCall(t *testing.T) {
 // host 兜底超时后才把剩余输出吐完，那时回调早已失效，不能再往里投。
 func TestBridgeDropsChunksAfterCallReturns(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, streamKey)
+	br := NewBridge(conn, proto.Session{Key: streamKey})
 
 	var id uint64
 	go func() {

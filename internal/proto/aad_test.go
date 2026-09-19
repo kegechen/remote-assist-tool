@@ -77,11 +77,28 @@ func TestAADFieldsAreUnambiguous(t *testing.T) {
 	}
 }
 
-// TestToolProtocolVersionIsV2 v2 的三项变更（AAD / 强制密文 args / 抗重放）都不向后
-// 兼容。版本号必须一起抬，否则旧端会在每条请求上收到 decrypt_failed，而不是握手阶段
-// 一条可读的"版本不支持"。
+// TestToolProtocolVersionIsV2 v2 的几项变更（AAD / 强制密文 args / 抗重放）改变了线上
+// 格式，必须由版本号承载，这样不匹配的两端在握手阶段就能谈出结论，而不是在每条请求上
+// 收到 decrypt_failed。
+//
+// 互通性现在由版本协商负责（见 handshake.go），不再靠"两端编译期常量恰好相等"。
 func TestToolProtocolVersionIsV2(t *testing.T) {
 	if ToolProtocolVersion != "2" {
 		t.Fatalf("ToolProtocolVersion = %q，AAD/强制密文/抗重放要求版本为 2", ToolProtocolVersion)
+	}
+}
+
+// TestDefaultMinProtoRefusesV1 锁定默认不降级到 v1。
+//
+// 这是整个兼容方案的安全支点：一旦默认值放宽到 v1，不可信的 relay 只要从 Hello 里删掉
+// versions 字段，就能把两个 v2 端悄悄打回无 AAD、无抗重放的通道。兼容性由
+// --min-proto=1 显式承担，不能靠改这个默认值来换。
+//
+// 断言的是"拒绝 v1"这个行为，而不是"等于 ToolProtocolVersion"这个恒等式 —— 后者会在
+// 下次升版本时把 v3 默认拒绝 v2 一并锁成正确答案，理由见
+// TestDefaultMinProtoIsLowestAuthenticatedVersion。
+func TestDefaultMinProtoRefusesV1(t *testing.T) {
+	if versionRank(DefaultMinProto) >= versionRank(ToolProtocolVersionV1) {
+		t.Fatalf("DefaultMinProto = %q，默认不得接受 v1", DefaultMinProto)
 	}
 }

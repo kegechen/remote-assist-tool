@@ -23,6 +23,10 @@ import (
 //
 // 兼容性：旧版本不带 MAC，新版本会拒绝它们的打洞包，P2P 因此谈不成并回落 TCP relay
 // （auto 模式下是无感降级，required 模式会失败）。这是批次 3 明确接受的破坏性变更。
+//
+// 注意这一条**不随 --min-proto=1 放开**：打洞认证要是能靠"自称是旧版"绕过，它就等于
+// 不存在。降级到 v1 的会话照样在 relay 上跑工具通道，只是没有 P2P 直连——功能降级，
+// 认证不降级。
 
 // punchMACLen 截断后的 MAC 字节数。HMAC-SHA256 截断到 128 bit 对"在线伪造一个打洞包"
 // 这种一次性、无重试价值的攻击绰绰有余，也省下 JSON 里的一半体积。
@@ -35,12 +39,23 @@ const (
 	punchDirHelp  = "help"
 )
 
+// punchKeyInfo 打洞 MAC 密钥的 HKDF info。
+//
+// 这个串**必须与工具协议版本解耦**，早先它是 "rat-p2p-punch-v"+ToolProtocolVersion 拼出来
+// 的，那是个意外耦合：打洞发生在工具通道握手之前，那时版本还没协商完，拿不到结果；而
+// 一旦工具协议升到 v3，打洞密钥会跟着无故改变，两端版本不一致时打洞直接失败。
+//
+// 取值固定为 "...-v2" 而不是 "...-v1"，是为了保持与 1.0.0 已发布版本的打洞兼容——这个串
+// 只是个域分离标签，数字本身没有含义，改它除了破坏兼容没有别的作用。打洞包格式自成一套
+// 版本，与工具协议版本无关。
+const punchKeyInfo = "rat-p2p-punch-v2"
+
 // derivePunchKey 从协助码派生打洞 MAC 密钥。
 //
 // 与 DeriveSessionKey 用不同的 info 串做域分离：两者都以协助码为密钥材料，混用会让
 // 打洞包变成针对工具通道密钥的预言机。
 func derivePunchKey(code string) []byte {
-	hk := hkdf.New(sha256.New, []byte(code), nil, []byte("rat-p2p-punch-v"+ToolProtocolVersion))
+	hk := hkdf.New(sha256.New, []byte(code), nil, []byte(punchKeyInfo))
 	key := make([]byte, 32)
 	io.ReadFull(hk, key)
 	return key

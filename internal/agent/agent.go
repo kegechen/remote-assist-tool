@@ -95,29 +95,30 @@ type MsgConn interface {
 
 // Daemon share 端工具消息分发器；持有 Registry + outbound conn
 type Daemon struct {
-	reg        *Registry
-	conn       MsgConn
-	connMu     sync.RWMutex // protects conn for SwapConn
-	key        [32]byte
+	reg    *Registry
+	conn   MsgConn
+	connMu sync.RWMutex // protects conn/sess for SwapConn
+	// sess 会话密钥 + 协商出的协议版本。二者必须一起替换，理由见 proto.Session。
+	sess       proto.Session
 	inbound    chan *proto.Message
 	cancels    sync.Map          // id -> context.CancelFunc
 	replay     replayGuard       // 按调用 ID 抗重放，每把 key 一份
 	OnActivity func(line string) // 可选钩子，每条工具调用完成时触发
 }
 
-func NewDaemon(reg *Registry, conn MsgConn, key [32]byte) *Daemon {
-	return &Daemon{reg: reg, conn: conn, key: key, inbound: make(chan *proto.Message, 64)}
+func NewDaemon(reg *Registry, conn MsgConn, sess proto.Session) *Daemon {
+	return &Daemon{reg: reg, conn: conn, sess: sess, inbound: make(chan *proto.Message, 64)}
 }
 
-// RotateKey 用新的 session_key 替换；用于同一 share 服务多个 help 端续连。
+// RotateSession 用新的会话（密钥 + 协商版本）替换；用于同一 share 服务多个 help 端续连。
 // 取消所有 in-flight 请求（旧 key 加密的不再有意义）。
-func (d *Daemon) RotateKey(key [32]byte) {
+func (d *Daemon) RotateSession(sess proto.Session) {
 	d.connMu.Lock()
-	same := d.key == key
-	d.key = key
+	same := d.sess == sess
+	d.sess = sess
 	d.connMu.Unlock()
 	if same {
-		return // key 没变，在途请求依然有效，不该被打断
+		return // 会话没变，在途请求依然有效，不该被打断
 	}
 	// 换 key ⟹ 新会话，抗重放窗口必须跟着重置：新会话的调用 ID 与旧会话无关，
 	// 留着旧位会把合法请求误判成重放。
@@ -130,27 +131,27 @@ func (d *Daemon) RotateKey(key [32]byte) {
 	})
 }
 
-// currentKey 取当前会话密钥快照。与 conn 同锁保护：P2P 热升级会在工具调用飞行途中
+// currentSession 取当前会话快照。与 conn 同锁保护：P2P 热升级会在工具调用飞行途中
 // 并发替换二者，裸读会构成数据竞态。
-func (d *Daemon) currentKey() [32]byte {
+func (d *Daemon) currentSession() proto.Session {
 	d.connMu.RLock()
 	defer d.connMu.RUnlock()
-	return d.key
+	return d.sess
 }
 
-// SwapConn 原子替换出站连接（relay ⇄ P2P），并按需轮换会话密钥。
+// SwapConn 原子替换出站连接（relay ⇄ P2P），并按需轮换会话。
 //
-// key 与当前相同时**不取消在途请求**：P2P 热升级复用 relay 握手协商出的同一把 key，
+// sess 与当前相同时**不取消在途请求**：P2P 热升级复用 relay 握手协商出的同一个会话，
 // 换的只是传输通道，正在跑的工具调用不该因此被打断。升级发生在会话中途（connect
-// 之后几秒），很可能正压在用户的第一个 exec 上——这里若无条件 RotateKey，那个调用
+// 之后几秒），很可能正压在用户的第一个 exec 上——这里若无条件轮换，那个调用
 // 会直接以 cancelled 收场。
-// key 确实变了（重新握手，如 P2P 断开后降级回 relay）才轮换并取消在途请求，
+// 会话确实变了（重新握手，如 P2P 断开后降级回 relay）才轮换并取消在途请求，
 // 因为旧 key 加密的请求已经没有意义。
-func (d *Daemon) SwapConn(conn MsgConn, key [32]byte) {
+func (d *Daemon) SwapConn(conn MsgConn, sess proto.Session) {
 	d.connMu.Lock()
 	d.conn = conn
 	d.connMu.Unlock()
-	d.RotateKey(key)
+	d.RotateSession(sess)
 }
 
 // sendMsg sends a message via the current conn, safe for concurrent SwapConn.
@@ -180,7 +181,7 @@ func (d *Daemon) Inject(msg *proto.Message) {
 		if msg.Type == proto.MsgToolReq {
 			var req proto.ToolReq
 			if err := proto.DecodePayload(msg, &req); err == nil {
-				go d.sendResp(d.currentKey(), proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "server_busy", ErrorMsg: "daemon inbound full"})
+				go d.sendResp(d.currentSession(), proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "server_busy", ErrorMsg: "daemon inbound full"})
 			}
 		}
 		log.Printf("daemon: inbound full, dropping %s", msg.Type)
@@ -226,31 +227,44 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if err := proto.DecodePayload(msg, &req); err != nil {
 		return
 	}
-	// 整个请求用同一份 key 快照：解密入参与加密结果必须配对，中途若发生 SwapConn
-	// （P2P 升级/降级）也不能让一半用旧 key、一半用新 key。
-	key := d.currentKey()
-	// 握手完成后，args 必须是合法密文——包括"没有参数"的调用，host 也会封一个 "{}"。
-	//
-	// 以前的判据是 len(req.ArgsJSON) > 0，等于留了个后门：注入方发一条不带 args 的
-	// tool_req{tool:"process_list"} 就绕过全部解密直接触发远端 fork tasklist/ps，
-	// 全程不需要会话密钥。现在没有合法密文就一律拒绝，且拒绝发生在 Dispatch 之前。
-	if key != [32]byte{} {
+	// 整个请求用同一份会话快照：解密入参与加密结果必须配对，中途若发生 SwapConn
+	// （P2P 升级/降级）也不能让一半用旧 key、一半用新 key。版本随 key 一起快照，
+	// 因而也不会出现"用新版本的 AAD 配旧版本的 key"。
+	sess := d.currentSession()
+	// 握手完成后 args 必须是合法密文——包括"没有参数"的调用，发送侧也会封一个 "{}"。
+	// 拒绝发生在 Registry.Dispatch 之前，所以未鉴权的请求碰不到任何工具。
+	if sess.Active() {
+		// 空 args 一律拒绝，**不分版本**：握手之后没有合法密文就不执行任何工具。
+		//
+		// 这里刻意不给 v1 开口子，尽管真实 v1 的判据是 len > 0（缺 args 字段就跳过解密
+		// 直接派发）。理由是那条分支合法客户端根本走不到：ToolReq.ArgsJSON 的 tag 没有
+		// omitempty，任何版本的客户端经结构体序列化都必定写出 "args":null（4 字节），
+		// 走的是解密分支。能造出"连 args 字段都没有"的帧的，只有手写 JSON 的注入方——
+		// 于是"忠实复刻 v1"在这里等于专门为攻击者保留一条免密钥执行远端工具的路，
+		// 而那正是 0a03278 / 7d92bb9 堵掉的口子。
+		//
+		// 收紧它不损失任何兼容性：真实 0.0.x 的无参调用发的是 args:null，在真 v1 那边
+		// 本来也会失败（decrypt_failed），这里只是把错误码换成更准确的 unauthenticated。
 		if isBlankArgs(req.ArgsJSON) {
-			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "unauthenticated", ErrorMsg: "args must be AEAD-sealed after handshake"})
+			d.sendResp(sess, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "unauthenticated", ErrorMsg: "args must be AEAD-sealed after handshake"})
 			return
 		}
-		// AAD 绑定 id/tool/deadline_ms：把捕获的密文改挂到别的工具上会解密失败。
-		plain, err := proto.AEADOpenJSON(&key, req.ArgsJSON, proto.ToolReqAAD(req.ID, req.Tool, req.DeadlineMs))
-		if err != nil {
-			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
-			return
+		{
+			// AAD 绑定 id/tool/deadline_ms：把捕获的密文改挂到别的工具上会解密失败。
+			// v1 会话下 ReqAAD 返回 nil，与 0.0.x 的加封方式一致。
+			plain, err := proto.AEADOpenJSON(&sess.Key, req.ArgsJSON, sess.ReqAAD(req.ID, req.Tool, req.DeadlineMs))
+			if err != nil {
+				d.sendResp(sess, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "decrypt_failed", ErrorMsg: err.Error()})
+				return
+			}
+			req.ArgsJSON = plain
 		}
-		req.ArgsJSON = plain
 		// 抗重放：AAD 挡住了"改 ID 重挂"，但原样重放仍然成立（nonce 由发送方给），
 		// 只能靠接收侧去重。放在解密之后，避免未认证的 ID 污染窗口。
-		if !d.replay.accept(req.ID) {
+		// v1 的发送方不保证 ID 单调，开了会误杀，故只在 v2 会话上生效。
+		if sess.AntiReplay() && !d.replay.accept(req.ID) {
 			log.Printf("daemon: rejected replayed tool_req id=%d tool=%s", req.ID, req.Tool)
-			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "replayed", ErrorMsg: "duplicate or out-of-window request id"})
+			d.sendResp(sess, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "replayed", ErrorMsg: "duplicate or out-of-window request id"})
 			return
 		}
 	}
@@ -268,7 +282,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("tool | %s | panic | 0ms | err:remote_panic", req.Tool)
-			d.sendResp(key, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
+			d.sendResp(sess, proto.ToolResp{ID: req.ID, OK: false, ErrorCode: "remote_panic", ErrorMsg: "tool panic"})
 		}
 	}()
 	sink := &chunkSink{daemon: d, id: req.ID, active: requestWantsStream(req.ArgsJSON)}
@@ -312,28 +326,34 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if err := sink.Finish(); err != nil {
 		log.Printf("tool | %s | stream terminator send failed: %v", req.Tool, err)
 	}
-	if err := d.sendResp(key, resp); err != nil {
+	if err := d.sendResp(sess, resp); err != nil {
 		log.Printf("tool | %s | response send failed: %v", req.Tool, err)
 	}
 }
 
 // sendResp 加封并发送一条工具响应。
 //
-// 握手后**每一条**响应都要封，包括 ResultJSON 为空的错误响应：密文里的 MAC 是
+// v2 起握手后**每一条**响应都要封，包括 ResultJSON 为空的错误响应：密文里的 MAC 是
 // ok / error_code / error_msg 这些明文字段唯一的认证依据（它们都在 AAD 里）。
 // 不封的话，中间人把一次成功的 read_file 改成 ok:true + result 清空，接收侧会跳过
 // 解密、直接把"空结果 + 成功"交给调用方——比一次明确的失败危险得多。
 //
 // 空 result 归一成 "{}" 而不是留空，是为了让"封过"与"没封"在接收侧可以只按
 // len(result) > 0 区分，判据简单到不会有歧义。
-func (d *Daemon) sendResp(key [32]byte, resp proto.ToolResp) error {
-	if key != [32]byte{} {
+//
+// v1 会话下保持 0.0.x 的旧行为：空 result 不封。那时的接收侧正是按 len(result) > 0
+// 决定要不要解密的，这里若强行封一个 "{}"，对端会把它当成真实结果解出来。
+func (d *Daemon) sendResp(sess proto.Session, resp proto.ToolResp) error {
+	if sess.Active() {
 		plain := resp.ResultJSON
 		if len(plain) == 0 {
+			if !sess.RequireSealedResp() {
+				return d.sendMsg(proto.MsgToolResp, &resp)
+			}
 			plain = json.RawMessage("{}")
 		}
 		// 密文以 JSON 字符串 base64 形式承载，保证 json.RawMessage 合法。
-		wrapped, err := proto.AEADSealJSON(&key, plain, proto.ToolRespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg))
+		wrapped, err := proto.AEADSealJSON(&sess.Key, plain, sess.RespAAD(resp.ID, resp.OK, resp.ErrorCode, resp.ErrorMsg))
 		if err != nil {
 			// 几乎只可能是熵源故障。宁可发一条接收侧必然拒绝的响应，也不能退回明文：
 			// 那等于把工具结果原样交给 relay。
@@ -366,11 +386,11 @@ func (s *chunkSink) Send(stream string, data []byte) error {
 	// 先把帧整体建好，AAD 直接取自它的字段——以后给 StreamChunk 添了新的明文字段
 	// （或真的用起 Fin），漏进 AAD 的话是编译期看得见的改动。
 	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Stream: stream, Data: data}
-	// key 取当前值而非请求开始时的快照：接收侧（mcp.Bridge.HandleInbound）同样按
+	// 会话取当前值而非请求开始时的快照：接收侧（mcp.Bridge.HandleInbound）同样按
 	// 当前 key 解流帧，两边必须对称。换 key 会取消在途请求，所以这个窗口本就极短，
 	// 真撞上时接收侧记一个空洞并把整次调用判为 stream_incomplete。
-	if key := s.daemon.currentKey(); key != [32]byte{} {
-		ct, err := proto.AEADSeal(&key, data, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
+	if sess := s.daemon.currentSession(); sess.Active() {
+		ct, err := proto.AEADSeal(&sess.Key, data, sess.StreamAAD(c.ID, c.Seq, c.Stream, c.Fin))
 		if err != nil {
 			return err
 		}
@@ -390,8 +410,8 @@ func (s *chunkSink) Finish() error {
 	}
 	s.finished = true
 	c := proto.StreamChunk{ID: s.id, Seq: s.seq, Fin: true}
-	if key := s.daemon.currentKey(); key != [32]byte{} {
-		ct, err := proto.AEADSeal(&key, nil, proto.StreamChunkAAD(c.ID, c.Seq, c.Stream, c.Fin))
+	if sess := s.daemon.currentSession(); sess.Active() {
+		ct, err := proto.AEADSeal(&sess.Key, nil, sess.StreamAAD(c.ID, c.Seq, c.Stream, c.Fin))
 		if err != nil {
 			return err
 		}

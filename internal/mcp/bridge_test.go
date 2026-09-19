@@ -24,7 +24,7 @@ func (c *stubConn) SendMessage(t proto.MessageType, p interface{}) error {
 
 func TestBridgeCallToolResolvesOnResp(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, [32]byte{})
+	br := NewBridge(conn, proto.Session{})
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -53,7 +53,7 @@ func TestBridgeCallToolResolvesOnResp(t *testing.T) {
 // 不必干等兜底 deadline（2~10 分钟）。
 func TestBridgeDisconnectWakesInflight(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, [32]byte{})
+	br := NewBridge(conn, proto.Session{})
 
 	type result struct {
 		out json.RawMessage
@@ -98,9 +98,9 @@ func (discardConn) SendMessage(proto.MessageType, interface{}) error { return ni
 func TestBridgeSwapConnRoutesToNewConn(t *testing.T) {
 	oldConn := &stubConn{sent: make(chan *proto.Message, 4)}
 	newConn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(oldConn, [32]byte{})
+	br := NewBridge(oldConn, proto.Session{})
 
-	br.SwapConn(newConn, [32]byte{})
+	br.SwapConn(newConn, proto.Session{})
 
 	go func() {
 		req := <-newConn.sent
@@ -132,8 +132,8 @@ func TestBridgeSwapConnSwitchesKey(t *testing.T) {
 	oldKey := [32]byte{1}
 	newKey := [32]byte{2}
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, oldKey)
-	br.SwapConn(conn, newKey)
+	br := NewBridge(conn, proto.Session{Key: oldKey})
+	br.SwapConn(conn, proto.Session{Key: newKey})
 
 	go func() {
 		req := <-conn.sent
@@ -162,7 +162,7 @@ func TestBridgeSwapConnSwitchesKey(t *testing.T) {
 // TestBridgeSwapConnRace 并发 SwapConn 与 CallTool 不应触发数据竞态（go test -race）。
 // 后台 P2P 升级正是在工具调用可能同时在飞的时候换 conn/key 的。
 func TestBridgeSwapConnRace(t *testing.T) {
-	br := NewBridge(discardConn{}, [32]byte{})
+	br := NewBridge(discardConn{}, proto.Session{})
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -177,7 +177,7 @@ func TestBridgeSwapConnRace(t *testing.T) {
 				return
 			default:
 				i++
-				br.SwapConn(discardConn{}, [32]byte{i})
+				br.SwapConn(discardConn{}, proto.Session{Key: [32]byte{i}})
 			}
 		}
 	}()
@@ -201,7 +201,7 @@ func TestBridgeSwapConnRace(t *testing.T) {
 // 不发消息、不阻塞。
 func TestBridgeCallToolAfterDisconnect(t *testing.T) {
 	conn := &stubConn{sent: make(chan *proto.Message, 4)}
-	br := NewBridge(conn, [32]byte{})
+	br := NewBridge(conn, proto.Session{})
 	br.Disconnect(errors.New("tunnel_lost: 隧道已断开"))
 
 	done := make(chan error, 1)

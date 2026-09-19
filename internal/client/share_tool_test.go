@@ -172,7 +172,7 @@ func TestShareRelayHandshakeContinuesWhileP2PStartBlocks(t *testing.T) {
 		t.Fatal("P2P manager Start was not invoked")
 	}
 
-	hello := proto.NewHello()
+	hello := proto.NewHello("")
 	if err := helpConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestRelayHelloSwapsDaemonFromStaleP2PConn(t *testing.T) {
 	reg := agent.NewRegistry()
 	reg.Register(relayProbeTool{})
 	staleP2P := &sendRecorder{}
-	daemon := agent.NewDaemon(reg, staleP2P, [32]byte{})
+	daemon := agent.NewDaemon(reg, staleP2P, proto.Session{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go daemon.RunLoop(ctx)
@@ -280,7 +280,7 @@ func TestRelayHelloSwapsDaemonFromStaleP2PConn(t *testing.T) {
 	// daemon 已由测试装好，阻止 ensureDaemon 覆盖它并另起永久 goroutine。
 	s.daemonOnce.Do(func() {})
 
-	hello := proto.NewHello()
+	hello := proto.NewHello("")
 	helloMsg, err := proto.NewMessage(proto.MsgToolHello, &hello)
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func TestRelayHelloSwapsDaemonFromStaleP2PConn(t *testing.T) {
 	if err := proto.DecodePayload(&ackMsg, &ack); err != nil {
 		t.Fatalf("decode relay hello ack: %v", err)
 	}
-	key := proto.DeriveSessionKey(s.code, ack.NonceB64, hello.NonceB64)
+	key := proto.DeriveSessionKey(s.code, ack.NonceB64, hello.NonceB64, proto.ToolProtocolVersion)
 	const probeID = 42
 	const probeTool = "relay_probe"
 	args, err := proto.AEADSealJSON(&key, json.RawMessage(`{}`), proto.ToolReqAAD(probeID, probeTool, 0))
