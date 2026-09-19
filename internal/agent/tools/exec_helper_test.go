@@ -68,6 +68,16 @@ func TestExecTreeHelper(t *testing.T) {
 		}
 		os.Exit(0)
 
+	case "mixed-encoding":
+		// 在一次写里同时吐 UTF-8 和代码页字节，喂给 decodingWriter 的正是最难的那种块：
+		// 合法 UTF-8 前缀 + 非法字节 + 还能解的 DBCS 尾巴。
+		//
+		// 不用真实命令来造这个场景：cmd 内置命令输出哪种语言取决于 MUI 资源和调用方式
+		// (本机上 `cmd /c ver` 出中文、`cmd /c "ver & echo x"` 出英文)，拿它当断言依据
+		// 的测试今天过明天挂，查起来还查不到自己头上。helper 直接写死字节，确定性强。
+		os.Stdout.Write(append([]byte("中"), 0xD5, 0xFD, 0xD4, 0xDA)) // UTF-8"中" + GBK"正在"
+		os.Exit(0)
+
 	case "spew":
 		n, _ := strconv.Atoi(os.Getenv(helperLinesEnv))
 		w := bufio.NewWriterSize(os.Stdout, 64<<10)

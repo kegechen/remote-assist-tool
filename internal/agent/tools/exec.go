@@ -108,10 +108,20 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 	// 就能把被协助端撑爆，而攒下来的东西 99% 马上就要被扔掉。
 	outBuf := newBoundedStream(maxOut)
 	errBuf := newBoundedStream(maxOut)
-	cmd.Stdout = outBuf
-	cmd.Stderr = errBuf
+	// decodingWriter 夹在中间，把非 UTF-8 的控制台输出(中文 Windows 的 CP936 等)按被协助端
+	// 的活动代码页转成 UTF-8。放在 boundedStream 上游而不是截断之后：result() 会往截断处插
+	// 一段 UTF-8 的省略标记，代码页字节混上它之后就再也转不回来了。顺带让 boundedStream 的
+	// utf8.RuneStart 对齐名副其实——它一直假设自己收到的是 UTF-8。
+	outDec := newDecodingWriter(outBuf)
+	errDec := newDecodingWriter(errBuf)
+	cmd.Stdout = outDec
+	cmd.Stderr = errDec
 
 	err := cmd.Run()
+	// Run 已经 Wait 过，os/exec 的复制 goroutine 收工了，这里独占访问。不 flush 的话尾部
+	// 那个"跨 Write 边界被切断的字符"会被永久留在 pending 里，表现为输出少了最后一个汉字。
+	_ = outDec.Flush()
+	_ = errDec.Flush()
 	if runCtx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("deadline_exceeded: exec timed out")
 	}
