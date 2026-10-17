@@ -1,7 +1,7 @@
 # 配置 `remote-debug` MCP
 
-本页供 Claude Code / Codex 自动执行，请直接完成以下步骤，不要只向用户复述命令。目标是在本机安装 `remote`，并把
-`remote help --mcp-stdio` 注册成名为 `remote-debug` 的 stdio MCP Server。
+本页供 AI agent（Claude Code、Codex、豆包等支持 MCP 的 agent）自动执行，请直接完成以下步骤，不要只向用户复述命令。
+目标是在本机安装 `remote`，并把 `remote help --mcp-stdio` 注册成名为 `remote-debug` 的 stdio MCP Server。
 
 ## 1. 安装 `remote`
 
@@ -21,8 +21,8 @@ curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/
 
 ## 2. 配置 MCP
 
-只配置当前正在使用的客户端。先用 `claude mcp list` 或 `codex mcp list` 检查；
-若已有可正常启动的 `remote-debug`，不要重复添加。
+只配置当前正在使用的 MCP 客户端。下面以 Claude Code 和 Codex 为例：先用 `claude mcp list` 或
+`codex mcp list` 检查；若已有可正常启动的 `remote-debug`，不要重复添加。
 
 Claude Code：
 
@@ -38,17 +38,20 @@ codex mcp add remote-debug -- remote help --mcp-stdio
 codex mcp list
 ```
 
+其他支持 stdio MCP server 的 agent：按各自的配置方式，把命令 `remote`、参数
+`help --mcp-stdio` 配成一个名为 `remote-debug` 的 MCP server 即可。
+
 配置中不要加入 `--code` 或 `--server`。这是 bootstrap 模式：每次分享的协助码和
 中转地址由对话中的 `connect(code=..., server=...)` 临时传入，不需要反复改配置。
 
 ## 3. 生效并连接
 
-重启 Claude Code / Codex 会话，使新 MCP 配置生效，然后重新粘贴 `remote share`
+重启 AI agent 会话（或其 MCP 客户端），使新 MCP 配置生效，然后重新粘贴 `remote share`
 输出的整段协助信息。调用 `remote-debug` 的 `connect` 成功，并确认返回的
 `peer_host` 与分享信息中的“本机标识”一致，即完成连接。
 
 默认配置使用 TLS 并跳过证书校验，适配工具内置的自签名 relay。若分享信息明确显示
-`(明文)`，需要在 MCP 命令末尾临时增加 `--plain` 后重启客户端。
+`(明文)`，需要在 MCP 命令末尾临时增加 `--plain` 后重启 MCP 客户端。
 
 ## 4. 排查 `Transport closed`
 
@@ -66,11 +69,12 @@ Caused by:
 
 按以下顺序验证：
 
-1. 检查**报错的客户端进程自身**是否仍有 `remote help --mcp-stdio` 子进程；其他 Codex /
-   Claude 进程下的同名子进程不能证明当前句柄可用。
-2. 检查宿主日志中是否先出现 `rmcp::service ... task cancelled`，之后工具调用才报
-   `Transport closed`。若顺序如此，属于宿主侧 stale transport。
-3. 重启受影响的 Claude Code / Codex 进程或新开客户端进程，再用同一二进制和同一协助码
+1. 检查**报错的客户端进程自身**是否仍有 `remote help --mcp-stdio` 子进程；其他客户端
+   进程下的同名子进程不能证明当前句柄可用。
+2. 检查宿主日志中是否先出现 MCP 任务被取消的记录（例如基于 rmcp 的宿主会记
+   `rmcp::service ... task cancelled`），之后工具调用才报 `Transport closed`。若顺序如此，
+   属于宿主侧 stale transport。
+3. 重启受影响的 MCP 客户端（宿主）进程或新开客户端进程，再用同一二进制和同一协助码
    调用 `connect`。新进程成功即可排除 CLI、relay 和协助码。
 4. 不要在已关闭的旧句柄上反复调用 `connect`；stdio 管道关闭后只能由宿主重新启动 MCP
    server。若新进程仍失败，再用独立 stdio 测试执行

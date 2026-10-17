@@ -90,7 +90,7 @@ func NewHelpMCPBootstrap(cfg *Config) *HelpMCPBootstrap {
 
 // Run 阻塞跑 MCP stdio server，直到 stdin EOF
 func (b *HelpMCPBootstrap) Run(ctx context.Context) error {
-	fmt.Fprintln(os.Stderr, "MCP stdio 模式（bootstrap）：等待 Claude 通过 connect 工具提供协助码")
+	fmt.Fprintln(os.Stderr, "MCP stdio 模式（bootstrap）：等待 AI agent 通过 connect 工具提供协助码")
 	srv := mcp.NewServer(b)
 	return srv.Serve(ctx, os.Stdin, os.Stdout)
 }

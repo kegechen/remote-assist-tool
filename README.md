@@ -1,10 +1,10 @@
 # Remote Assist Tool
 
-命令行远程协助工具：通过中转服务器（或 LAN 内直连 / NAT 穿透 P2P）建立安全隧道。既支持传统 SSH 远程协助，也支持让本地 **Claude Code 通过 MCP 工具通道直接调试远端机器**。
+命令行远程协助工具：通过中转服务器（或 LAN 内直连 / NAT 穿透 P2P）建立安全隧道。既支持传统 SSH 远程协助，也支持让本地的 **AI agent 通过 MCP 工具通道直接调试远端机器** —— Claude Code、Codex、豆包等，只要支持 MCP 都能用。
 
 ## 特性
 
-- **两种协助通道**：经典 SSH 隧道；Claude Code MCP 工具通道（12 个远程工具，含文件上传/下载）。
+- **两种协助通道**：经典 SSH 隧道；MCP 工具通道（12 个远程工具，含文件上传/下载），适用于任何支持 MCP 的 AI agent。
 - **三种连接方式**：公网 relay 中转；LAN 内 `--standalone` 进程内 relay 直连；NAT 穿透 P2P 直连（STUN 打洞，失败自动回落中转）。
 - **分层加密**：relay 链路 TLS；MCP 工具通道额外以协助码派生密钥做 XChaCha20-Poly1305 AEAD，防的是 relay 之外的网络路径。**relay 本身是可信边界**（协助码由它生成，见下方[安全特性](#安全特性)），请使用自己部署的 relay。
 - **护栏**：exec 命令黑/白名单；可选 `--root` 把文件工具限制在某子树内（防手滑，非安全边界 —— exec 不受其约束）。
@@ -160,10 +160,11 @@ Help side connects exactly like a normal relay (no --plain needed):
 >
 > 该证书存放在 `~/.remote_assist_standalone_certs/`，跨次启动复用（临近过期才重新生成），这样 help 端的指纹钉扎才能稳定命中。删掉这个目录会换新证书，届时老的 help 端需要 `--trust-new-cert`。
 
-### 用法三：Claude Code MCP 远程调试
+### 用法三：AI agent 通过 MCP 远程调试
 
-让本地 Claude Code 直接调试远端机器，无需在远端开 openssh-server。
-首次接入可直接把 [`MCP_SETUP.md`](MCP_SETUP.md) 交给 Claude Code 或 Codex，自动完成
+让本地的 AI agent 直接调试远端机器，无需在远端开 openssh-server。`remote help --mcp-stdio`
+是标准的 stdio MCP server，Claude Code、Codex、豆包等任何支持 MCP 的 agent 都能接入。
+首次接入可直接把 [`MCP_SETUP.md`](MCP_SETUP.md) 交给你的 AI 助手，让它自动完成
 `remote` 下载与 `remote-debug` MCP 配置。
 
 远端启动 share（带沙箱）：
@@ -172,7 +173,7 @@ Help side connects exactly like a normal relay (no --plain needed):
 remote share --server relay.example.com:8443
 ```
 
-本地配置 Claude Code（项目根 `.mcp.json` 或 `~/.claude/mcp.json`）：
+本地把它配成一个 MCP server。以 Claude Code 为例（项目根 `.mcp.json` 或 `~/.claude/mcp.json`）：
 
 ```jsonc
 {
@@ -185,43 +186,34 @@ remote share --server relay.example.com:8443
 }
 ```
 
+其他 agent 按各自的配置方式填同样的内容即可：命令 `remote`，参数 `help --server <relay> --mcp-stdio`，
+MCP server 名建议用 `remote-debug`。
+
 注意 **不带 `--code`** —— 这是 bootstrap 模式，MCP server 启动时还不知道协助码。
 
 每次调试会话：
 
 1. 远端跑 `remote share`，拿到协助码 `ABCD-EFGHIJ`；
-2. 在 Claude Code 里直接说：“**协助码 ABCD-EFGHIJ，连上去**”；
-3. Claude 调用 `remote-debug:connect("ABCD-EFGHIJ")` 完成握手；若是 standalone/LAN，可加地址：`connect("ABCD-EFGHIJ", server="192.168.1.23:8443")`；
-4. 之后所有调用直接走真实工具，无需重启 Claude。
+2. 对你的 AI 助手直接说：“**协助码 ABCD-EFGHIJ，连上去**”（`remote share` 启动时已把整段协助文案复制到剪贴板，直接粘贴也行）；
+3. agent 调用 `remote-debug:connect("ABCD-EFGHIJ")` 完成握手；若是 standalone/LAN，可加地址：`connect("ABCD-EFGHIJ", server="192.168.1.23:8443")`；
+4. 之后所有调用直接走真实工具，无需重启 agent。
 
 旧用法（写死协助码）仍支持：在 args 里加 `"--code", "ABCD-EFGHIJ"` 跳过 bootstrap。
 
 > 若 `connect` 直接报 `Transport closed`，且没有返回 `session_id` / `peer_host`，请求通常
-> 尚未到达 `remote` CLI。不要据此判断协助码失效或 relay 故障；先重启受影响的 Claude
-> Code / Codex 进程，再用同一码重试。旧 stdio 句柄一旦被宿主取消，反复调用 `connect`
+> 尚未到达 `remote` CLI。不要据此判断协助码失效或 relay 故障；先重启受影响的 agent
+> 进程（Claude Code、Codex 等），再用同一码重试。旧 stdio 句柄一旦被宿主取消，反复调用 `connect`
 > 无法恢复。详细证据与排查步骤见 [`MCP_SETUP.md`](MCP_SETUP.md#4-排查-transport-closed)
 > 和 [`remote-debug` MCP 接入参考](docs/remote-debug-MCP接入参考.md#7-排错速查)。
 
 ## 架构
 
-```
-              ┌──────────────────────────────────────────┐
-              │      公网 Relay（TLS）/ standalone 进程内   │
-              │   仅转发；工具通道内容对 relay 不可见        │
-              └───────────────┬──────────────┬────────────┘
-                              │              │
-              ┌───────────────┘              └───────────────┐
-              │   （NAT 穿透成功则 P2P 直连，跳过 relay）       │
-   ┌──────────▼──────────┐                      ┌────────────▼─────────┐
-   │  被协助端 (Share)    │ ◀── 工具通道 AEAD ──▶ │   协助端 (Help)       │
-   │  remote share        │      / SSH 隧道       │   remote help        │
-   └──────────┬──────────┘                      └────────────┬─────────┘
-              │                                               │
-   ┌──────────▼──────────┐                      ┌────────────▼─────────┐
-   │  沙箱内文件/exec      │                      │  本地 SSH :2222 /     │
-   │  或本地 SSH :22       │                      │  Claude Code MCP      │
-   └─────────────────────┘                      └──────────────────────┘
-```
+![remote-assist-tool 架构](docs/images/architecture.svg)
+
+- **协助端**：AI agent（或浏览器控制台）经 MCP stdio 调用本地的 `remote help`，后者把请求封成加密工具帧；
+- **relay**：发协助码、配对会话、转发消息、辅助打洞。它是可信边界，见[安全特性](#安全特性)；
+- **被协助端**：`remote share` 只主动连出，工具 daemon 执行命令和文件操作，每条调用实时显示在终端上；
+- **P2P 优先**：NAT 穿透成功则直连，失败自动回落 relay；经典 SSH 隧道模式走同一套连接。
 
 ## 命令行参考
 
@@ -311,7 +303,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--p2p` | `auto` | P2P 模式：`disabled` / `auto` / `required` |
 | `--stun` | - | STUN 服务地址 |
 | `--bind-ip` | - | 指定 UDP 绑定 IP |
-| `--mcp-stdio` | `false` | 作为 MCP stdio server 运行（供 Claude Code） |
+| `--mcp-stdio` | `false` | 作为 MCP stdio server 运行（供任何支持 MCP 的 AI agent） |
 | `--legacy-ssh` | `false` | 强制传统 SSH 隧道模式（不加 `--mcp-stdio` 时即此模式） |
 | `--plain` | `false` | 非 TLS（仅开发） |
 
@@ -368,12 +360,12 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | **自建服务** | ✅ 支持 | ✅ 支持 | ❌（有自托管版） | ❌ 依赖官方 |
 | **连接方式** | Relay / P2P / LAN 直连 | 仅 Relay | P2P 优先 | 仅 Relay |
 | **单次使用** | ✅ 专为临时设计 | ❌ 偏长期 | ❌ 偏长期 | ✅ 临时 |
-| **AI 集成** | ✅ Claude Code MCP | ❌ | ❌ | ❌ |
+| **AI 集成** | ✅ MCP（任何支持 MCP 的 agent） | ❌ | ❌ | ❌ |
 
 ## 本工具的优势
 
-1. **极简** —— `share` 生成码，`help`/Claude 用码连接，两步搞定。
+1. **极简** —— `share` 生成码，`help` / AI agent 用码连接，两步搞定。
 2. **协助码过期** —— 默认 30 分钟自动失效。
 3. **三种连接** —— 公网中转、LAN 直连、P2P 直连按场景自动选择。
 4. **完全自托管** —— 数据自己掌控。
-5. **AI 原生** —— 直接挂到 Claude Code 当远程调试 MCP。
+5. **AI 原生** —— 标准 MCP server，挂到 Claude Code、Codex、豆包等任何支持 MCP 的 agent 上当远程调试工具。

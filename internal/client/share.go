@@ -409,7 +409,7 @@ func (s *ShareMode) register() error {
 	s.code = resp.Code
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
 	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
-	s.printf("\n================ 请复制给 Claude/Codex ================\n%s\n", instructions)
+	s.printf("\n================ 请复制给你的 AI 助手（支持 MCP 即可） ================\n%s\n", instructions)
 	s.println("========================================================")
 	// 整段复制到系统剪贴板，让未配置 MCP 的协助端也能直接按文案中的指南完成安装。
 	// 首次注册与重连刷新 code 都走到这里，剪贴板始终包含最新协助信息。

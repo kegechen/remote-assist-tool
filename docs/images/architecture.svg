@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800" font-family="'PingFang SC','Microsoft YaHei','Noto Sans SC','Source Han Sans SC',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrOrange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="800" rx="18" fill="url(#bg)"/>
+
+  <!-- 标题 -->
+  <text x="40" y="52" font-size="26" font-weight="700" fill="#0f172a">remote-assist-tool 架构</text>
+  <text x="40" y="80" font-size="15" fill="#64748b">让任何支持 MCP 的 AI agent 直接操作远端机器 —— 不需要 SSH，不需要开端口，能穿 NAT</text>
+
+  <!-- ============ 左：协助端 ============ -->
+  <rect x="30" y="108" width="390" height="452" rx="16" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="52" y="140" font-size="17" font-weight="700" fill="#1d4ed8">协助端 · 你的电脑</text>
+
+  <g filter="url(#shadow)">
+    <rect x="52" y="160" width="166" height="92" rx="12" fill="#ffffff" stroke="#93c5fd"/>
+    <rect x="232" y="160" width="166" height="92" rx="12" fill="#ffffff" stroke="#93c5fd"/>
+  </g>
+  <text x="135" y="196" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">AI Agent</text>
+  <text x="135" y="220" font-size="12" fill="#475569" text-anchor="middle">Claude Code · Codex · 豆包</text>
+  <text x="135" y="240" font-size="12" fill="#94a3b8" text-anchor="middle">任何支持 MCP 的客户端</text>
+  <text x="315" y="196" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">浏览器控制台</text>
+  <text x="315" y="220" font-size="13" fill="#475569" text-anchor="middle">文件树 · 流式终端</text>
+  <text x="315" y="240" font-size="12" fill="#94a3b8" text-anchor="middle">上传下载 · 热升级 share</text>
+
+  <line x1="135" y1="252" x2="170" y2="318" stroke="#2563eb" stroke-width="2" marker-end="url(#arrBlue)"/>
+  <line x1="315" y1="252" x2="280" y2="318" stroke="#2563eb" stroke-width="2" marker-end="url(#arrBlue)"/>
+  <text x="225" y="296" font-size="12.5" fill="#2563eb" text-anchor="middle">MCP · stdio</text>
+
+  <g filter="url(#shadow)">
+    <rect x="52" y="322" width="346" height="214" rx="12" fill="#ffffff" stroke="#3b82f6" stroke-width="1.8"/>
+  </g>
+  <rect x="52" y="322" width="346" height="44" rx="12" fill="#2563eb"/>
+  <rect x="52" y="352" width="346" height="14" fill="#2563eb"/>
+  <text x="225" y="351" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">remote help --mcp-stdio</text>
+  <g font-size="14" fill="#334155">
+    <text x="74" y="394">● MCP 请求 ⇄ 加密工具帧</text>
+    <text x="74" y="424">● connect：协助码配对、选择中转</text>
+    <text x="74" y="454">● 大文件 512 KiB 分块，断点续传</text>
+    <text x="74" y="484">● 30 秒心跳，断线自动重连</text>
+    <text x="74" y="514">● 每次调用必有返回，不拖死 AI</text>
+  </g>
+
+  <!-- ============ 中：Relay ============ -->
+  <g filter="url(#shadow)">
+    <rect x="478" y="140" width="324" height="214" rx="14" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
+  </g>
+  <rect x="478" y="140" width="324" height="44" rx="14" fill="#7c3aed"/>
+  <rect x="478" y="170" width="324" height="14" fill="#7c3aed"/>
+  <text x="640" y="169" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Relay 中转服务</text>
+  <g font-size="14" fill="#334155">
+    <text x="500" y="212">● 生成协助码，配对两端会话</text>
+    <text x="500" y="242">● TLS 转发 · 限流 · STUN 辅助打洞</text>
+    <text x="500" y="272">● 默认：内置的海外公共 relay</text>
+    <text x="500" y="302">● 连不上？从 Release 下载 relay 自建</text>
+  </g>
+  <rect x="500" y="318" width="280" height="24" rx="12" fill="#f5f3ff" stroke="#c4b5fd"/>
+  <text x="640" y="335" font-size="12.5" fill="#6d28d9" text-anchor="middle">可信边界：请使用自己部署的 relay</text>
+
+  <rect x="498" y="378" width="284" height="56" rx="12" fill="#ffffff" stroke="#c4b5fd" stroke-dasharray="5 4"/>
+  <text x="640" y="401" font-size="13.5" font-weight="700" fill="#6d28d9" text-anchor="middle">局域网 --standalone</text>
+  <text x="640" y="422" font-size="12.5" fill="#64748b" text-anchor="middle">relay 内嵌在 share 进程里，不依赖外部服务</text>
+
+  <!-- 中转连线 -->
+  <path d="M398,400 C440,400 440,250 476,250" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrPurple)" marker-start="url(#arrPurple)"/>
+  <path d="M804,250 C840,250 840,400 858,400" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrPurple)" marker-start="url(#arrPurple)"/>
+  <text x="449" y="232" font-size="12.5" font-weight="700" fill="#7c3aed" text-anchor="middle">TLS</text>
+  <text x="831" y="232" font-size="12.5" font-weight="700" fill="#7c3aed" text-anchor="middle">TLS</text>
+
+  <!-- ============ 右：被协助端 ============ -->
+  <rect x="860" y="108" width="390" height="452" rx="16" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.5"/>
+  <text x="882" y="140" font-size="17" font-weight="700" fill="#047857">被协助端 · 远端机器</text>
+  <text x="1228" y="140" font-size="12.5" fill="#059669" text-anchor="end">Windows / Linux / macOS</text>
+
+  <g filter="url(#shadow)">
+    <rect x="882" y="160" width="346" height="150" rx="12" fill="#ffffff" stroke="#10b981" stroke-width="1.8"/>
+  </g>
+  <rect x="882" y="160" width="346" height="44" rx="12" fill="#059669"/>
+  <rect x="882" y="190" width="346" height="14" fill="#059669"/>
+  <text x="1055" y="189" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">remote share</text>
+  <g font-size="14" fill="#334155">
+    <text x="904" y="232">● 一条命令或双击，免安装、免管理员</text>
+    <text x="904" y="260">● 协助文案自动复制，直接贴给 AI</text>
+    <text x="904" y="288">● 实时显示每条操作 · 审计日志</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="882" y="326" width="346" height="210" rx="12" fill="#ffffff" stroke="#6ee7b7"/>
+  </g>
+  <text x="904" y="356" font-size="15" font-weight="700" fill="#065f46">工具 daemon</text>
+  <g font-size="12.5" fill="#065f46" font-family="Consolas,'SFMono-Regular',Menlo,monospace">
+    <rect x="904" y="370" width="62" height="26" rx="13" fill="#d1fae5"/><text x="935" y="388" text-anchor="middle">exec</text>
+    <rect x="974" y="370" width="92" height="26" rx="13" fill="#d1fae5"/><text x="1020" y="388" text-anchor="middle">read_file</text>
+    <rect x="1074" y="370" width="100" height="26" rx="13" fill="#d1fae5"/><text x="1124" y="388" text-anchor="middle">write_file</text>
+    <rect x="904" y="404" width="86" height="26" rx="13" fill="#d1fae5"/><text x="947" y="422" text-anchor="middle">list_dir</text>
+    <rect x="998" y="404" width="56" height="26" rx="13" fill="#d1fae5"/><text x="1026" y="422" text-anchor="middle">stat</text>
+    <rect x="1062" y="404" width="56" height="26" rx="13" fill="#d1fae5"/><text x="1090" y="422" text-anchor="middle">glob</text>
+    <rect x="1126" y="404" width="56" height="26" rx="13" fill="#d1fae5"/><text x="1154" y="422" text-anchor="middle">grep</text>
+    <rect x="904" y="438" width="118" height="26" rx="13" fill="#d1fae5"/><text x="963" y="456" text-anchor="middle">process_list</text>
+    <rect x="1030" y="438" width="86" height="26" rx="13" fill="#d1fae5"/><text x="1073" y="456" text-anchor="middle">tail_log</text>
+    <rect x="1124" y="438" width="86" height="26" rx="13" fill="#d1fae5"/><text x="1167" y="456" text-anchor="middle">file_md5</text>
+  </g>
+  <text x="904" y="492" font-size="13" fill="#475569">护栏：exec 黑/白名单 · --root 防手滑 · 显式 --elevate</text>
+  <text x="904" y="516" font-size="13" fill="#475569">输出为 AI 设计：转 UTF-8 · 截断保留首尾</text>
+
+  <!-- ============ P2P 直连 ============ -->
+  <path d="M225,536 C225,610 1055,610 1055,538" fill="none" stroke="#ea580c" stroke-width="2.6" stroke-dasharray="9 6" marker-end="url(#arrOrange)" marker-start="url(#arrOrange)"/>
+  <rect x="440" y="580" width="400" height="38" rx="19" fill="#fff7ed" stroke="#fdba74"/>
+  <text x="640" y="604" font-size="14" font-weight="700" fill="#c2410c" text-anchor="middle">P2P 直连优先 · 打不通自动回落中转</text>
+  <text x="640" y="638" font-size="12.5" fill="#9a3412" text-anchor="middle">UDP 打洞（NAT 类型检测 · 端口预测 · 生日攻击）+ 自建可靠传输（序号 / ACK / 发送窗口）</text>
+
+  <!-- ============ 底部：安全分层 ============ -->
+  <text x="40" y="690" font-size="15" font-weight="700" fill="#0f172a">安全分层</text>
+  <g filter="url(#shadow)">
+    <rect x="40" y="704" width="380" height="62" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect x="450" y="704" width="380" height="62" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect x="860" y="704" width="380" height="62" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  </g>
+  <circle cx="68" cy="735" r="14" fill="#7c3aed"/><text x="68" y="740" font-size="14" font-weight="700" fill="#fff" text-anchor="middle">1</text>
+  <text x="92" y="730" font-size="14.5" font-weight="700" fill="#0f172a">传输层 TLS</text>
+  <text x="92" y="752" font-size="12.5" fill="#64748b">自签证书 + TOFU 指纹钉扎</text>
+  <circle cx="478" cy="735" r="14" fill="#2563eb"/><text x="478" y="740" font-size="14" font-weight="700" fill="#fff" text-anchor="middle">2</text>
+  <text x="502" y="730" font-size="14.5" font-weight="700" fill="#0f172a">工具通道协议 v2</text>
+  <text x="502" y="752" font-size="12.5" fill="#64748b">XChaCha20-Poly1305 · AAD 绑定 · 抗重放</text>
+  <circle cx="888" cy="735" r="14" fill="#ea580c"/><text x="888" y="740" font-size="14" font-weight="700" fill="#fff" text-anchor="middle">3</text>
+  <text x="912" y="730" font-size="14.5" font-weight="700" fill="#0f172a">P2P 打洞包认证</text>
+  <text x="912" y="752" font-size="12.5" fill="#64748b">协助码派生 HMAC，冒充与反射一律丢弃</text>
+</svg>
