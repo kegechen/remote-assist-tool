@@ -56,6 +56,26 @@ type ShareMode struct {
 	p2pDone       chan struct{}        // 本轮会话终止信号，唤醒阻塞在 resultCh 上的升级 goroutine
 	daemonSess    proto.Session        // 最近一次工具握手的结果（密钥+协商版本），P2P 升级时沿用
 	newP2PManager func(p2p.P2PMode, string, string) shareP2PManager
+
+	// console 是 share 端的控制台输出：文件传输时在这里原地刷新一行进度，其他提示
+	// 经它输出才不会和进度行串在一起。nil（测试里直接构造的 ShareMode）时直接打 stdout。
+	console *transferProgress
+}
+
+func (s *ShareMode) printf(format string, args ...any) {
+	if s.console == nil {
+		fmt.Printf(format, args...)
+		return
+	}
+	s.console.Print(fmt.Sprintf(format, args...))
+}
+
+func (s *ShareMode) println(args ...any) {
+	if s.console == nil {
+		fmt.Println(args...)
+		return
+	}
+	s.console.Print(fmt.Sprintln(args...))
 }
 
 // beginP2PSession 开启新一轮会话的 P2P 状态，返回本轮 epoch 与终止信号。
@@ -223,6 +243,8 @@ func NewShareMode(cfg *Config, sshAddr string, newInstance bool, sbCfg agent.San
 		sbCfg:          sbCfg,
 		minProto:       cfg.MinProto,
 	}
+	tty, width := consoleInfo(os.Stdout)
+	share.console = newTransferProgress(os.Stdout, tty, width)
 	if newInstance {
 		share.clientID, _ = generateClientID()
 	}
@@ -232,6 +254,20 @@ func NewShareMode(cfg *Config, sshAddr string, newInstance bool, sbCfg agent.San
 // Run 运行被协助模式，协助端断开时自动等待新连接
 func (s *ShareMode) Run() (string, time.Time, error) {
 	defer s.client.Close()
+	if s.console != nil {
+		// log 默认写 stderr。stderr 也是终端时多半和 stdout 是同一个窗口，
+		// 日志同样要先擦掉进度行再写，否则会接在进度行末尾。
+		if tty, _ := consoleInfo(os.Stderr); tty && s.console.tty {
+			prev := log.Writer()
+			log.SetOutput(s.console.Writer(prev))
+			defer log.SetOutput(prev)
+			// 同一个窗口里，传输的开始/汇总已经显示过一遍，日志副本只是噪音（stderr 是
+			// 终端时也不落盘）。重复分块不上屏，它的日志照写。
+			s.console.quietSummaryLogs = true
+		}
+		s.console.Start()
+		defer s.console.Stop()
+	}
 
 	// 持久守护：连接/注册/隧道任何环节出错（EOF、relay 重启、网络抖动、协助码过期…）
 	// 都【不退出】，一律退避重连重注册，只能由信号（Ctrl+C / systemctl stop）终止。
@@ -251,8 +287,8 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 		// 对端断开 + 协助码仍有效 → 在当前连接上等待新的协助端（不重连不退出）
 		if isPeerDisconnect && !codeExpired {
 			rapidFails = 0
-			fmt.Printf("\n协助端已断开连接，协助码仍有效: %s\n", formatCode(s.code))
-			fmt.Println("等待新的协助端连接...")
+			s.printf("\n协助端已断开连接，协助码仍有效: %s\n", formatCode(s.code))
+			s.println("等待新的协助端连接...")
 			continue
 		}
 
@@ -260,11 +296,11 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 		// 或网络中断)、连接异常、协助码过期。统一退避重连重注册。
 		switch {
 		case tunnelErr == nil:
-			fmt.Println("\n隧道已关闭（relay 重启或网络中断），正在重连...")
+			s.println("\n隧道已关闭（relay 重启或网络中断），正在重连...")
 		case codeExpired:
-			fmt.Println("\n连接中断且协助码已过期，正在重连获取新协助码...")
+			s.println("\n连接中断且协助码已过期，正在重连获取新协助码...")
 		default:
-			fmt.Printf("\n连接中断: %v，协助码仍有效: %s，正在重连...\n", tunnelErr, formatCode(s.code))
+			s.printf("\n连接中断: %v，协助码仍有效: %s，正在重连...\n", tunnelErr, formatCode(s.code))
 		}
 
 		// 防热循环：若隧道"建立后极短时间内即断"，reconnectWithBackoff 可能每次第 1 次
@@ -273,7 +309,7 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 		var floor time.Duration
 		rapidFails, floor = rapidReconnectBackoff(sessionDur, rapidFails)
 		if floor > 0 {
-			fmt.Printf("（隧道存活仅 %v，连续 %d 次快速断开，%v 后再重连以防空转）\n",
+			s.printf("（隧道存活仅 %v，连续 %d 次快速断开，%v 后再重连以防空转）\n",
 				sessionDur.Round(time.Millisecond), rapidFails, floor)
 			time.Sleep(floor)
 		}
@@ -304,7 +340,7 @@ func (s *ShareMode) reconnectWithBackoff() {
 		}
 		if err == nil {
 			if attempt > 1 {
-				fmt.Printf("重连成功（第 %d 次尝试）\n", attempt)
+				s.printf("重连成功（第 %d 次尝试）\n", attempt)
 			}
 			// 心跳保活绑定 relay 连接生命周期：register 成功即启动，覆盖「等待协助端 /
 			// relay 中转 / P2P 转发」全程。relay 对每个 client 有 readIdleTimeout(2min)，
@@ -316,7 +352,7 @@ func (s *ShareMode) reconnectWithBackoff() {
 			s.client.StartHeartbeatLoop(30 * time.Second)
 			return
 		}
-		fmt.Printf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay)
+		s.printf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay)
 		time.Sleep(delay)
 		delay *= 2
 		if delay > reconnectMaxDelay {
@@ -373,14 +409,14 @@ func (s *ShareMode) register() error {
 	s.code = resp.Code
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
 	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
-	fmt.Printf("\n================ 请复制给 Claude/Codex ================\n%s\n", instructions)
-	fmt.Println("========================================================")
+	s.printf("\n================ 请复制给 Claude/Codex ================\n%s\n", instructions)
+	s.println("========================================================")
 	// 整段复制到系统剪贴板，让未配置 MCP 的协助端也能直接按文案中的指南完成安装。
 	// 首次注册与重连刷新 code 都走到这里，剪贴板始终包含最新协助信息。
 	if err := copyToClipboard(instructions); err == nil {
-		fmt.Println("（以上协助信息已复制到剪贴板）")
+		s.println("（以上协助信息已复制到剪贴板）")
 	}
-	fmt.Println("等待协助端连接...")
+	s.println("等待协助端连接...")
 	s.writeCodeFile()
 	return nil
 }
@@ -459,7 +495,7 @@ func (s *ShareMode) waitAndHandleTunnel() error {
 
 	s.launchP2PUpgrade(sessionID, epoch, sessionDone)
 
-	fmt.Println("开始中转转发流量（P2P 将在后台尝试升级）...")
+	s.println("开始中转转发流量（P2P 将在后台尝试升级）...")
 	return s.handleTunnel()
 }
 
@@ -510,7 +546,7 @@ func (s *ShareMode) launchP2PUpgrade(sessionID string, epoch uint64, sessionDone
 			active := s.clearP2PAttempt(epoch, mode == p2p.P2PModeRequired)
 			mgr.Close()
 			if mode == p2p.P2PModeRequired && active {
-				fmt.Println("P2P 直连失败，--p2p required 下不接受中转，断开重试...")
+				s.println("P2P 直连失败，--p2p required 下不接受中转，断开重试...")
 			}
 			return
 		}
@@ -535,7 +571,7 @@ func (s *ShareMode) upgradeToP2P(mgr shareP2PManager, resultCh <-chan p2p.P2PRes
 		mgr.Close()
 		if mode == p2p.P2PModeRequired && active {
 			log.Printf("P2P required but failed (%s), dropping session", reason)
-			fmt.Println("P2P 直连失败，--p2p required 下不接受中转，断开重试...")
+			s.println("P2P 直连失败，--p2p required 下不接受中转，断开重试...")
 		}
 	}
 
@@ -555,7 +591,7 @@ func (s *ShareMode) upgradeToP2P(mgr shareP2PManager, resultCh <-chan p2p.P2PRes
 			reason = result.Err.Error()
 			log.Printf("P2P negotiation failed: %v", result.Err)
 		} else {
-			fmt.Println("P2P 未建立，继续使用中转（不影响使用）")
+			s.println("P2P 未建立，继续使用中转（不影响使用）")
 		}
 		// 必须关掉 manager：否则它的 backgroundRetry 会继续打洞，之后成功了就往
 		// 没人读的 resultCh 塞一条隧道，那条隧道既不会被使用也不会被关闭。
@@ -603,7 +639,7 @@ func (s *ShareMode) upgradeToP2P(mgr shareP2PManager, resultCh <-chan p2p.P2PRes
 		abandon(nil, "P2P tunnel closed")
 		return
 	}
-	fmt.Println("P2P 直连已建立，SSH 流量走直连...")
+	s.println("P2P 直连已建立，SSH 流量走直连...")
 	// 只记日志，不动 relay 连接。
 	//
 	// handleSSHTunnelP2P 对任何隧道读错误都返回 ErrPeerDisconnected，包括「relay 健康、
@@ -638,12 +674,12 @@ func (s *ShareMode) waitSessionReady() (string, error) {
 			if err := proto.DecodePayload(msg, &ready); err != nil {
 				return "", err
 			}
-			fmt.Println("协助端已连接！")
+			s.println("协助端已连接！")
 			if ready.PeerVersion != "" {
-				fmt.Printf("对端版本: %s\n", ready.PeerVersion)
+				s.printf("对端版本: %s\n", ready.PeerVersion)
 			}
 			if ready.PeerHost != "" {
-				fmt.Printf("对端标识: %s\n", ready.PeerHost)
+				s.printf("对端标识: %s\n", ready.PeerHost)
 			}
 			return ready.SessionID, nil
 		case proto.MsgHeartbeat:
@@ -741,7 +777,7 @@ func (s *ShareMode) handleToolOverP2P(tunnel *p2p.UDPTunnel, epoch uint64) {
 			if !swapped && s.swapDaemonTo(pc, epoch) {
 				swapped = true
 				log.Printf("P2P confirmed by inbound tool request, response path switched to P2P")
-				fmt.Println("已切换到 P2P 直连")
+				s.println("已切换到 P2P 直连")
 			}
 			if d := s.currentDaemon(); d != nil {
 				d.Inject(msg)
@@ -797,7 +833,7 @@ func (s *ShareMode) handleSSHTunnelP2P(tunnel *p2p.UDPTunnel, prefix []byte) err
 			return nil
 		}
 		sshConn = conn
-		fmt.Println("已连接到本地SSH服务 (P2P直连)...")
+		s.println("已连接到本地SSH服务 (P2P直连)...")
 
 		go func() {
 			buf := make([]byte, 32*1024)
@@ -816,7 +852,7 @@ func (s *ShareMode) handleSSHTunnelP2P(tunnel *p2p.UDPTunnel, prefix []byte) err
 			}
 			connMu.Unlock()
 			conn.Close()
-			fmt.Println("本地SSH连接已断开，等待新的SSH会话...")
+			s.println("本地SSH连接已断开，等待新的SSH会话...")
 		}()
 
 		return conn
@@ -899,7 +935,7 @@ func (s *ShareMode) handleTunnel() error {
 			return nil
 		}
 		sshConn = conn
-		fmt.Println("已连接到本地SSH服务...")
+		s.println("已连接到本地SSH服务...")
 
 		// Start SSH → relay goroutine
 		go func() {
@@ -919,7 +955,7 @@ func (s *ShareMode) handleTunnel() error {
 			}
 			connMu.Unlock()
 			conn.Close()
-			fmt.Println("本地SSH连接已断开，等待新的SSH会话...")
+			s.println("本地SSH连接已断开，等待新的SSH会话...")
 		}()
 
 		return conn
@@ -948,12 +984,12 @@ func (s *ShareMode) handleTunnel() error {
 				return err
 			}
 			closeSSH()
-			fmt.Println("新的协助端已连接，正在重建 P2P 协商...")
+			s.println("新的协助端已连接，正在重建 P2P 协商...")
 			if ready.PeerVersion != "" {
-				fmt.Printf("对端版本: %s\n", ready.PeerVersion)
+				s.printf("对端版本: %s\n", ready.PeerVersion)
 			}
 			if ready.PeerHost != "" {
-				fmt.Printf("对端标识: %s\n", ready.PeerHost)
+				s.printf("对端标识: %s\n", ready.PeerHost)
 			}
 			epoch, sessionDone := s.beginP2PSession()
 			s.launchP2PUpgrade(ready.SessionID, epoch, sessionDone)
@@ -1184,7 +1220,10 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		reg.Register(tools.NewProcessList())
 		reg.Register(tools.NewTailLog(sb))
 		d := agent.NewDaemon(reg, s.client, sess)
-		d.OnActivity = func(line string) { fmt.Println(line) }
+		d.OnActivity = func(line string) { s.println(line) }
+		if s.console != nil {
+			d.OnTransfer = s.console.Event
+		}
 		s.p2pMu.Lock()
 		s.daemon = d
 		s.p2pMu.Unlock()

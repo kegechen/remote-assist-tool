@@ -104,6 +104,9 @@ type Daemon struct {
 	cancels    sync.Map          // id -> context.CancelFunc
 	replay     replayGuard       // 按调用 ID 抗重放，每把 key 一份
 	OnActivity func(line string) // 可选钩子，每条工具调用完成时触发
+	// OnTransfer 可选钩子：成功的文件传输分块改由它接收（见 parseTransfer），
+	// 不再触发 OnActivity。未设置时传输分块照旧逐条走 OnActivity。
+	OnTransfer func(TransferEvent)
 }
 
 func NewDaemon(reg *Registry, conn MsgConn, sess proto.Session) *Daemon {
@@ -315,11 +318,18 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		status = "err:" + resp.ErrorCode
 	}
 	dur := time.Since(start).Milliseconds()
-	argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
-	log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
-	if d.OnActivity != nil {
-		d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
-			time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
+	// 文件传输分块交给 OnTransfer 聚合成进度，不再逐块各打一行活动和一行日志——
+	// 一个几十 MB 的文件就是上百块，刷屏且淹没其他调用。失败的分块仍走常规路径，
+	// 错误必须单独看得见。
+	if ev, ok := d.transferEvent(&req, &resp); ok {
+		d.OnTransfer(ev)
+	} else {
+		argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
+		log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
+		if d.OnActivity != nil {
+			d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
+				time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
+		}
 	}
 	// 流式调用必须先发一个经过 AEAD 认证的结束帧，再发 ToolResp。结束帧携带最终
 	// Seq，使接收侧能够区分「真的没有更多输出」和「最后一帧刚好丢了」。
@@ -429,6 +439,14 @@ func requestWantsStream(raw json.RawMessage) bool {
 		Stream bool `json:"stream"`
 	}
 	return json.Unmarshal(raw, &flags) == nil && flags.Stream
+}
+
+// transferEvent 在设置了 OnTransfer 时识别成功的传输分块。
+func (d *Daemon) transferEvent(req *proto.ToolReq, resp *proto.ToolResp) (TransferEvent, bool) {
+	if d.OnTransfer == nil || !resp.OK {
+		return TransferEvent{}, false
+	}
+	return parseTransfer(req.Tool, req.ArgsJSON, resp.ResultJSON)
 }
 
 // summarizeArgs 对各工具脱敏：read_file/write_file 只记 path+size；exec 记 argv[0]+argc

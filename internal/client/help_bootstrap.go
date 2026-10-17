@@ -881,23 +881,27 @@ func (b *HelpMCPBootstrap) doUploadFile(ctx context.Context, br toolCaller, raw 
 		}
 	}
 
+	var totalSize int64
+	if fi, e := f.Stat(); e == nil {
+		totalSize = fi.Size()
+	}
+
 	// 从头传：先同步 truncate 远端为空（offset 写模式不 truncate，需先清空避免旧内容残留）。
+	// total 是给 share 端显示进度的提示（见 agent.parseTransfer），旧版 share 端会忽略这个
+	// 未知字段，不影响兼容。
 	if a.Offset == 0 {
 		truncArgs, _ := json.Marshal(struct {
 			Path    string `json:"path"`
 			Content []byte `json:"content"`
 			Create  bool   `json:"create"`
-		}{Path: a.RemotePath, Content: []byte{}, Create: true})
+			Total   int64  `json:"total,omitempty"`
+		}{Path: a.RemotePath, Content: []byte{}, Create: true, Total: totalSize})
 		if _, err := callToolRetry(ctx, br, "write_file", truncArgs); err != nil {
 			return nil, fmt.Errorf("truncate remote %q: %w", a.RemotePath, err)
 		}
 	}
 
 	// 流水线并发上传
-	var totalSize int64
-	if fi, e := f.Stat(); e == nil {
-		totalSize = fi.Size()
-	}
 	var doneBytes atomic.Int64
 	doneBytes.Store(a.Offset)
 	progStop := make(chan struct{})
@@ -971,7 +975,8 @@ func (b *HelpMCPBootstrap) doUploadFile(ctx context.Context, br toolCaller, raw 
 				Path    string `json:"path"`
 				Content []byte `json:"content"`
 				At      int64  `json:"at"`
-			}{Path: a.RemotePath, Content: data, At: at})
+				Total   int64  `json:"total,omitempty"`
+			}{Path: a.RemotePath, Content: data, At: at, Total: totalSize})
 			if _, err := callToolRetry(cctx, br, "write_file", wargs); err != nil {
 				setErr(fmt.Errorf("upload to remote %q failed near offset %d (reconnect and re-call upload_file with offset=0 to resume from scratch): %w", a.RemotePath, at, err))
 				return
@@ -1045,10 +1050,12 @@ func (b *HelpMCPBootstrap) doDownloadFile(ctx context.Context, br toolCaller, ra
 			Path   string `json:"path"`
 			Offset int64  `json:"offset"`
 			Length int64  `json:"length"`
+			Total  int64  `json:"total,omitempty"` // share 端显示进度用，旧版 share 端忽略
 		}{
 			Path:   a.RemotePath,
 			Offset: total,
 			Length: fileTransferChunk,
+			Total:  totalSize,
 		})
 		resraw, err := callToolRetry(ctx, br, "read_file", rargs)
 		if err != nil {
