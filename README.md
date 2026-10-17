@@ -6,7 +6,7 @@
 
 - **两种协助通道**：经典 SSH 隧道；Claude Code MCP 工具通道（12 个远程工具，含文件上传/下载）。
 - **三种连接方式**：公网 relay 中转；LAN 内 `--standalone` 进程内 relay 直连；NAT 穿透 P2P 直连（STUN 打洞，失败自动回落中转）。
-- **分层加密**：relay 链路 TLS；MCP 工具通道额外以协助码派生密钥做 XChaCha20-Poly1305 AEAD —— 即使 relay 被攻破，也看不见、无法伪造工具内容。
+- **分层加密**：relay 链路 TLS；MCP 工具通道额外以协助码派生密钥做 XChaCha20-Poly1305 AEAD，防的是 relay 之外的网络路径。**relay 本身是可信边界**（协助码由它生成，见下方[安全特性](#安全特性)），请使用自己部署的 relay。
 - **护栏**：exec 命令黑/白名单；可选 `--root` 把文件工具限制在某子树内（防手滑，非安全边界 —— exec 不受其约束）。
 - **relay 加固**：连接数限流（全局 + 每 IP）、读/写超时、单消息大小上限，抵御资源耗尽型 DoS / slowloris。
 
@@ -320,7 +320,8 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 ## 安全特性
 
 - relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。跳过校验时退化为 TOFU 指纹钉扎（`~/.remote_assist_known_hosts`），把中间人窗口从「永远」压到「仅首次连接」；回环地址不钉扎。
-- MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 仅转发密文，看不见也无法伪造工具内容。
+- MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 之外的网络路径看不到、也改不了工具内容。
+- **relay 是可信边界，不是不可信的管道**。协助码由 relay 生成，握手双方的 nonce 也经它转发 —— 派生会话密钥的全部输入在 relay 侧都看得到。因此控制了 relay 进程的人可以自行推导密钥，解密、伪造活动会话的工具数据。AEAD 挡得住 relay 的普通转发逻辑误读误改，挡不住失陷的 relay。结论：**只用自己部署、自己信得过的 relay**；局域网用 `--standalone` 时 relay 就跑在 share 进程里，没有第三方。详见 [docs/SECURITY_SR005_TRUST_MODEL.md](docs/SECURITY_SR005_TRUST_MODEL.md)。
 - 工具通道协议 v2 在 AEAD 之上补了三件事（**与 v1 不兼容**，见下）：
   - **AAD 绑定明文字段**：`tool` / `id` / `deadline_ms`、响应的 `ok` / `error_code` / `error_msg`、流帧的 `seq` / `stream` 都是外层明文。它们进 AAD 之后，把一条捕获的密文改挂到别的工具（比如把 `read_file` 的参数挂到 `write_file`，让远端把文件截断成 0 字节）、改 ID、改超时、把成功翻成失败、把流帧重排或跨流投递，全部会解密失败。
   - **每条响应都要加封**（包括结果为空的错误响应），接收侧先验真再看 `ok`。否则中间人只要把一次成功的 `read_file` 的 `result` 清空，调用方就会拿到「空结果 + 成功」—— AI 会据此得出「这个文件是空的」，而它没有任何别的办法察觉。
