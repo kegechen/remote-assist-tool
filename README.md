@@ -104,6 +104,8 @@ relay 的 Linux/Windows amd64/arm64 share，`--standalone` / `--no-auth` 会被�
 remote share --server relay.example.com:8443
 ```
 
+> `--server` 不是必填：省略它会使用内置公共 relay `23.95.78.14:8443`；只有连接自建 relay 时才填写自己的地址。
+
 程序显示协助码，例如：
 
 ```
@@ -130,6 +132,7 @@ remote share --new-instance --ssh 127.0.0.1:2222 --server relay.example.com:8443
 
 ```bash
 remote help --server relay.example.com:8443 --code ABCD-EFGHIJ --legacy-ssh
+# 也可以省略 --server，直接使用内置公共 relay
 # 然后在另一个终端：
 ssh -p 2222 user@127.0.0.1
 ```
@@ -185,6 +188,8 @@ remote share --server relay.example.com:8443
   }
 }
 ```
+
+配置中的 `--server` 也可以省略；省略时 MCP server 使用内置公共 relay。只有自建 relay 才需要填写 `--server <host>:<port>`。
 
 其他 agent 按各自的配置方式填同样的内容即可：命令 `remote`，参数 `help --server <relay> --mcp-stdio`，
 MCP server 名建议用 `remote-debug`。

@@ -2,192 +2,182 @@
 
 ## 前置条件
 
-1. **安装 Go 1.21 或更高版本**
-   - 下载: https://golang.org/dl/
-   - 安装后验证: `go version`
-
-2. **Git (可选)**
-   - 用于版本管理
+1. 安装 Go 1.21 或更高版本，并确认 `go version` 可执行。
+2. 安装 Git（构建脚本用 `git describe` 写入版本信息）。
+3. Windows 构建脚本还会生成 VERSIONINFO 资源；首次构建时 Go 需要下载 `goversioninfo` 工具依赖。
 
 ## 快速构建
+
+在仓库根目录运行脚本：
 
 ### Windows
 
 ```cmd
-# 方式1: 使用构建脚本
 build.bat
-
-# 方式2: 手动构建
-mkdir bin
-go build -o bin/remote-assist-relay-windows-amd64.exe ./cmd/relay
-go build -o bin/remote-assist-cli-windows-amd64.exe ./cmd/remote
 ```
 
 ### Linux / macOS
 
 ```bash
-# 方式1: 使用构建脚本
 chmod +x build.sh
 ./build.sh
-
-# 方式2: 手动构建
-mkdir -p bin
-go build -o bin/relay ./cmd/relay
-go build -o bin/remote ./cmd/remote
 ```
 
-## 运行测试
+脚本会构建 relay、CLI 和 web UI。主要产物为：
 
-### 单元测试
+```text
+bin/remote-assist-relay-<os>-<arch>[.exe]
+bin/remote-assist-cli-<os>-<arch>[.exe]
+bin/remote-assist-webui-<os>-<arch>[.exe]
+```
+
+版本号来自 `git describe --tags --always --dirty`。如果只需要临时本机构建，也可以直接指定输出文件：
 
 ```bash
-# 运行所有单元测试
-go test -v ./internal/...
+mkdir -p bin
+go build -o bin/remote-assist-relay-$(go env GOOS)-$(go env GOARCH) ./cmd/relay
+go build -o bin/remote-assist-cli-$(go env GOOS)-$(go env GOARCH) ./cmd/remote
+go build -o bin/remote-assist-webui-$(go env GOOS)-$(go env GOARCH) ./cmd/gui
+```
 
-# 运行特定包的测试
-go test -v ./internal/relay
-go test -v ./internal/proto
+## 自动检查
 
-# 运行带竞态检测的测试
-go test -race -v ./internal/...
+```bash
+# 格式、静态检查和全部测试
+gofmt -l cmd internal tests
+go vet ./...
+go test ./... -count=1
 
-# 生成覆盖率报告
-go test -coverprofile=coverage.out ./internal/...
+# 需要 C 编译器和 cgo；本机不满足时交给 CI
+go test -race ./...
+
+# 覆盖率
+go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-### 快速测试验证
-
-如果Go已安装，可以运行以下命令验证代码可编译：
-
-```bash
-# 只编译不运行
-go build ./internal/...
-go build ./cmd/relay
-go build ./cmd/remote
-```
+`go build ./...` 可作为不运行程序的编译检查。跨平台发布时为每个目标设置 `GOOS`、`GOARCH`，并使用脚本或相同的 `go build -o` 规则生成带平台后缀的文件名。
 
 ## 手动功能测试
 
-### 1. 启动中继服务器
+下面示例使用手动生成的 `bin/relay` 和 `bin/remote` 文件名；如果使用脚本构建，请替换为实际的 `remote-assist-relay-*` 和 `remote-assist-cli-*` 产物。
+
+### 1. 启动 relay
 
 ```bash
-# 生成自签名证书并启动
-bin/relay --listen :8443 --gen-certs --certs-dir ./certs
-
-# 或者先生成证书，再启动
-bin/relay --gen-certs --certs-dir ./certs
-bin/relay --listen :8443 --cert ./certs/server.crt --key ./certs/server.key
+mkdir -p certs
+# relay 会在 certs/server.crt 和 server.key 不存在时自动生成自签证书
+bin/relay run --listen :18443 --certs-dir ./certs --audit ./audit.log
 ```
 
-### 2. 被协助端 (Share)
-
-在另一个终端:
+也可以先单独生成证书：
 
 ```bash
-bin/remote share --server localhost:8443 --insecure
+bin/relay run --gen-certs --certs-dir ./certs
+bin/relay run --listen :18443 --cert ./certs/server.crt --key ./certs/server.key --audit ./audit.log
 ```
 
-会显示类似:
-```
-协助码已生成: ABCD-EFGHIJ
-有效期至: 2026-02-28 18:30:00
+### 2. 被协助端（Share）
 
-等待协助端连接...
-```
-
-### 3. 协助端 (Help)
-
-在第三个终端:
+在第二个终端运行：
 
 ```bash
-bin/remote help --server localhost:8443 --code ABCD-EFGHIJ --insecure
+bin/remote share --server localhost:18443 --insecure
 ```
 
-### 4. SSH 连接
+程序会显示协助码和有效期，并等待协助端连接。这里的 `--server localhost:18443` 是因为本节启动了本地 relay；如果不启动本地 relay，省略 `--server` 即可使用内置公共 relay `23.95.78.14:8443`。`--insecure` 仅用于本地自签证书测试。
 
-在第四个终端:
+### 3. 协助端（Help）
+
+MCP 工具模式需要把 `--mcp-stdio` 接到 MCP 客户端；只验证传统 SSH 隧道时，在第三个终端运行：
 
 ```bash
-# 如果被协助端有SSH服务器
+bin/remote help --server localhost:18443 --code <协助码> --legacy-ssh --insecure
+```
+
+成功后，help 在本机监听默认的 `127.0.0.1:2222`，可用 SSH 客户端连接：
+
+```bash
 ssh -p 2222 user@127.0.0.1
 ```
 
+### 4. MCP smoke test
+
+在支持 MCP 的客户端中，把 `bin/remote help --server localhost:18443 --mcp-stdio --insecure` 配成 stdio MCP server，再调用 `connect` 并传入 share 显示的协助码。工具列表和参数以 `README.md` 的 MCP 章节为准。
+
 ## 测试清单
 
-### 单元测试检查
-- [ ] `go test ./internal/relay` - 通过
-- [ ] `go test ./internal/proto` - 通过
-- [ ] `go test -race ./internal/...` - 通过
+### 编译与单元测试
 
-### 功能测试检查
-- [ ] 服务器可以启动
-- [ ] Share模式可以生成协助码
-- [ ] Help模式可以使用有效码连接
-- [ ] 审计日志正常记录
+- [ ] `go build ./...` 通过
+- [ ] `go vet ./...` 通过
+- [ ] `go test ./... -count=1` 通过
+- [ ] 在具备 cgo/C 编译器的环境运行 `go test -race ./...`
 
-### 安全测试检查
-- [ ] 协助码格式正确（无易混淆字符）
-- [ ] 过期码无法使用
-- [ ] 无效码返回清晰错误
+### 功能测试
+
+- [ ] relay 启动并监听预期端口
+- [ ] share 生成协助码，help 能使用有效码连接
+- [ ] `--legacy-ssh` 模式能建立本地 SSH 转发
+- [ ] MCP 模式能完成 `connect` 和至少一个只读工具调用
+- [ ] 无效码和过期码返回清晰错误
+- [ ] relay 审计日志记录连接和拒绝事件
+
+### 安全测试
+
+- [ ] 协助码使用无易混淆字符的随机格式
+- [ ] 生产客户端使用 `--insecure=false` 或 `--ca`
+- [ ] 公网 relay 不使用 `--plain` 或 `--no-auth`
+- [ ] 配置 `--root` 时明确它只是文件工具防手滑护栏，不能限制 exec
 
 ## 故障排除
 
-### 问题: `go: command not found`
+### `go: command not found`
 
-**解决方案**: 确保Go已安装并添加到PATH
+确认 Go 已安装并加入 PATH：
 
-Windows:
-```cmd
-set PATH=%PATH%;C:\Program Files\Go\bin
+```powershell
+$env:Path += ';C:\Program Files\Go\bin'
 ```
 
-Linux/macOS:
+Linux/macOS：
+
 ```bash
-export PATH=$PATH:/usr/local/go/bin
+export PATH="$PATH:/usr/local/go/bin"
 ```
 
-### 问题: 证书验证失败
+### 证书验证失败
 
-**解决方案**: 使用 `--insecure` 标志（仅限开发环境）
+本地自签证书测试可在客户端加 `--insecure`。生产环境应配置受信 CA，并使用 `--insecure=false` 或 `--ca <file>`；不要用 `--plain` 绕过 TLS。
+
+### 端口被占用
+
+为 relay 和 help 使用其他端口：
+
 ```bash
-bin/remote share --server localhost:8443 --insecure
-```
-
-### 问题: 端口被占用
-
-**解决方案**: 使用其他端口
-```bash
-bin/relay --listen :9443
-bin/remote share --server localhost:9443 --insecure
+bin/relay run --listen :19443
+bin/remote share --server localhost:19443 --insecure
 ```
 
 ## 项目结构
 
-```
+```text
 remote-assist-tool/
 ├── cmd/
-│   ├── relay/          # 中继服务器
-│   │   └── main.go
-│   └── remote/         # 统一客户端
-│       └── main.go
+│   ├── relay/       # relay 服务端和 Windows 服务入口
+│   ├── remote/      # share/help 客户端和 MCP 入口
+│   └── gui/         # web UI 入口
 ├── internal/
-│   ├── relay/          # 中继逻辑
-│   │   ├── server.go
-│   │   ├── session.go
-│   │   ├── code.go
-│   │   ├── tunnel.go
-│   │   └── *_test.go   # 测试
-│   ├── client/         # 客户端逻辑
-│   │   ├── client.go
-│   │   ├── share.go
-│   │   └── help.go
-│   ├── proto/          # 协议定义
-│   │   ├── message.go
-│   │   └── message_test.go
-│   ├── crypto/         # TLS配置
-│   │   └── tls.go
-│   └── logger/         # 审计日志
-│       └── audit.go
-└── tests/              # 集成测试
+│   ├── agent/       # 远端工具 daemon 和工具实现
+│   ├── client/      # share/help 会话与传输
+│   ├── crypto/      # TLS、TOFU 和工具通道加密
+│   ├── gui/         # GUI 后端
+│   ├── logger/       # 审计日志
+│   ├── mcp/         # MCP stdio server
+│   ├── p2p/         # STUN、打洞与 UDP relay
+│   ├── proto/       # relay 和工具通道协议
+│   ├── relay/       # TCP relay 与会话管理
+│   └── version/     # 版本信息
+└── tests/
+    └── e2e/         # 端到端测试
 ```
