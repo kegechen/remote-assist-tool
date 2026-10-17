@@ -225,6 +225,19 @@ remote share --server relay.example.com:8443
 
 ## 命令行参考
 
+### 默认 relay 与自建
+
+`remote share` / `remote help` 不传 `--server` 时，连接内置的公共 relay `23.95.78.14:8443`，它部署在**海外**。
+开箱即用，但有两种情况建议自建：
+
+- **连不上或很慢**：部分网络访问海外服务器不稳定；
+- **要自己掌控信任边界**：relay 能推导出工具通道的会话密钥（见[安全特性](#安全特性)），敏感环境应只用自己的 relay。
+
+自建很简单：从 [GitHub Release](https://github.com/kegechen/remote-assist-tool/releases/latest) 下载对应平台的
+`remote-assist-relay-<os>-<arch>`（Windows / Linux / macOS 的 amd64、arm64 都有），在一台两端都能访问的机器上运行，
+放行 TCP 8443；两端用 `--server <host>:8443`，或设置环境变量 `REMOTE_RELAY_SERVER=<host>:8443` 指向它。
+两端在同一局域网时，更省事的是直接用 `remote share --standalone`，不需要单独的 relay。
+
 ### relay — 中转服务器
 
 | 选项 | 默认值 | 说明 |
@@ -266,7 +279,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `--server` | `localhost:8443` | 中转服务器地址（也可用环境变量 `REMOTE_RELAY_SERVER` 覆盖） |
+| `--server` | 内置公共 relay `23.95.78.14:8443` | 中转服务器地址（也可用环境变量 `REMOTE_RELAY_SERVER` 覆盖）。默认 relay 位于海外，见上方「默认 relay 与自建」 |
 | `--insecure` | `true` | 跳过 TLS 校验（自签 relay 用；对接受信 CA relay 改 `false`） |
 | `--ca` | - | CA 证书文件 |
 | `--trust-new-cert` | `false` | 接受与首次连接时不一致的 relay 证书指纹并重新记录（relay 确实换了证书时用） |
@@ -289,7 +302,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `--server` | `localhost:8443` | 中转服务器地址（可用 `REMOTE_RELAY_SERVER` 覆盖） |
+| `--server` | 内置公共 relay `23.95.78.14:8443` | 中转服务器地址（可用 `REMOTE_RELAY_SERVER` 覆盖） |
 | `--code` | - | 协助码（SSH/直连模式必填；MCP bootstrap 模式留空，由 `connect` 工具提供） |
 | `--insecure` | `true` | 跳过 TLS 校验（同 share） |
 | `--ca` | - | CA 证书文件 |
