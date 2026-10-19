@@ -383,3 +383,25 @@ func TestDefaultMinProtoIsLowestAuthenticatedVersion(t *testing.T) {
 		t.Fatal("默认配置必须拒绝 v1")
 	}
 }
+
+// TestSatisfiesMinProto 复用已有会话的判据：协商结果不低于下限才算满足，未知版本一律不满足。
+func TestSatisfiesMinProto(t *testing.T) {
+	cases := []struct {
+		v, floor string
+		want     bool
+	}{
+		{ToolProtocolVersionV2, "", true},
+		{ToolProtocolVersionV2, ToolProtocolVersionV2, true},
+		{ToolProtocolVersionV2, ToolProtocolVersionV1, true},
+		{ToolProtocolVersionV1, ToolProtocolVersionV1, true},
+		{ToolProtocolVersionV1, "", false},
+		{ToolProtocolVersionV1, ToolProtocolVersionV2, false},
+		{"", ToolProtocolVersionV1, false},
+		{"9", ToolProtocolVersionV1, false},
+	}
+	for _, c := range cases {
+		if got := SatisfiesMinProto(c.v, c.floor); got != c.want {
+			t.Errorf("SatisfiesMinProto(%q, %q) = %v, want %v", c.v, c.floor, got, c.want)
+		}
+	}
+}

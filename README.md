@@ -203,6 +203,8 @@ MCP server 名建议用 `remote-debug`。
 3. agent 调用 `remote-debug:connect("ABCD-EFGHIJ")` 完成握手；若是 standalone/LAN，可加地址：`connect("ABCD-EFGHIJ", server="192.168.1.23:8443")`；
 4. 之后所有调用直接走真实工具，无需重启 agent。
 
+对端若是 0.0.x 旧版，`connect` 会被拒并说明原因；征得用户同意后，在同一会话里调用 `connect("ABCD-EFGHIJ", min_proto="1")` 即可以兼容模式连上，无需重启 agent 或 MCP（风险见下文「兼容性」）。写死 `--code` 的旧用法没有 `connect` 这一步，仍需在启动参数里加 `--min-proto=1`。
+
 旧用法（写死协助码）仍支持：在 args 里加 `"--code", "ABCD-EFGHIJ"` 跳过 bootstrap。
 
 > 若 `connect` 直接报 `Transport closed`，且没有返回 `session_id` / `peer_host`，请求通常
@@ -342,8 +344,12 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
   - 工具通道版本号在 ToolHello/ToolHelloAck 里协商：双方各自通告支持的版本集，取交集里最高的一个。`0.0.1`~`0.0.9` 是 v1，`1.0.0` 起是 v2。
   - **默认拒绝降级**。允许自动降级的话，不可信的 relay 只要从 Hello 里删掉 `versions` 字段，就能把两个 v2 端悄悄打回 v1，白拿一条没有 AAD、没有抗重放的通道，而且事后无从察觉。所以放宽必须是用户的显式决定。
   - 遇到旧版时握手会失败，并给出可操作的提示（而不是一句 `unsupported tool protocol version`）。**参数永远加在新版本那一端** —— 旧版根本没有这个旗标：
-    - 新版 help 连旧版 share → 在 **help 端**加 `--min-proto=1`；
+    - 新版 help 连旧版 share → 在 **help 端**放宽，三种入口任选其一：
+      - 命令行：加 `--min-proto=1` 重启（命令行模式遇到旧版时直接中止，不会自动降级）；
+      - MCP（AI agent）：**不用重启 MCP，也不用改配置**。`connect` 被拒时报错会提示 AI 先向用户说明风险、取得同意，再在当前会话里调用 `connect(code, min_proto="1")` 重试。这个参数只对这一次连接生效（含传输中断后的自动重连），并覆盖启动参数 `--min-proto`。它只是下限：已有的 v2 会话满足它，重复带上不会断开重连；
+      - GUI：勾选连接栏的「兼容旧版」后重新连接。断线自动重连会沿用这个设置；通过 GUI 把对端升级成功后会自动取消勾选，恢复默认的不降级。
     - 旧版 help 连新版 share → 在 **share 端**加 `--min-proto=1`（提示会同时打在 share 本机和旧 help 的终端上）。
+  - 降级到 v1 后，MCP `connect` 的返回结果会带上 `proto_version:"1"` 和 `warning`，GUI 终端会打出警告，连接详情里的「工具协议」一栏也会标明处于兼容模式。正常连接时 `proto_version` 为 `"2"`。
   - 放宽只是降低下限，不是强制降级：两端都支持 v2 时仍然谈成 v2。真的降到 v1 时两端都会打印醒目告警，因为那意味着 AAD 绑定、强制密文参数、抗重放三项一起关掉了。
   - **与 0.0.x 互通时没有 P2P 直连，全程走中转**：协商到 v1 后新端不再发任何打洞包、也不会把流量切到隧道。原因是打洞认证只能单向生效——我们会拒绝旧版不带 MAC 的包，但旧版只比对 `session_id`、压根不认识 `mac` 字段，会照单全收我们的包并**单方面**认定 P2P 已通，然后把流量送进一条我们这边根本没建起来的隧道。不发包是唯一能让两端状态保持一致的做法。
     - 需要说明的是：share 侧的地址通告可能在工具握手之前就发出去了（`advertiseAddr` 在 `mgr.Start()` 内部，而握手要等 `SessionReady` 之后才到），所以旧对端仍可能自行打洞、空等到它自己超时。这部分浪费在对端、我们改不动它的代码；要彻底免掉就得推迟 P2P 启动，但握手到达前分不清这是工具会话还是 SSH 会话，推迟会让 SSH 的 P2P 一起失效。**不会**因此出现黑洞：新端始终不回包、也不切隧道。

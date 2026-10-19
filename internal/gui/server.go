@@ -45,6 +45,8 @@ type Server struct {
 	lastCode     string
 	lastServer   string
 	lastNoAuth   bool
+	lastMinProto string // 勾选「兼容旧版」时为 "1"；自动重连必须沿用，否则断线重连会退回默认值被拒
+	protoVersion string
 	peerVersion  string
 	helpVersion  string
 	peerHost     string
@@ -535,6 +537,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{
 		"ok": connected, "connected": connected, "server": s.effectiveSrv, "session_id": s.sessionID,
 		"peer_host": s.peerHost, "peer_version": s.peerVersion, "help_version": s.helpVersion, "p2p": s.p2p,
+		"proto_version": s.protoVersion,
 	}
 	if !s.connectedAt.IsZero() {
 		result["connected_seconds"] = int64(time.Since(s.connectedAt).Seconds())
@@ -593,6 +596,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Code   string `json:"code"`
 		Server string `json:"server"`
 		NoAuth bool   `json:"no_auth"`
+		// MinProto 对应「兼容旧版」复选框，透传给 connect 工具的 min_proto；取值由 help 校验。
+		MinProto string `json:"min_proto"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -635,16 +640,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// connect 工具建立隧道
-	connectArgs := map[string]any{}
-	if req.NoAuth {
-		connectArgs["no_auth"] = true
-	} else {
-		connectArgs["code"] = req.Code
-	}
-	if req.Server != "" {
-		connectArgs["server"] = req.Server
-	}
-	res, err := client.CallTool(ctx, "connect", connectArgs)
+	res, err := client.CallTool(ctx, "connect", connectToolArgs(req.Code, req.Server, req.NoAuth, req.MinProto))
 	if err != nil {
 		// connect 失败：不杀子进程（MCP server 仍存活在 bootstrap 状态），
 		// 用户修正参数后可再次点击连接（下次进来会先关掉这个旧进程再起新的）。
@@ -660,7 +656,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.client = client
 	s.connected = true
 	// 缓存连接参数，供子进程意外退出时自动重连
-	s.recordConnectMetadata(res, req.Code, req.Server, req.NoAuth)
+	s.recordConnectMetadata(res, req.Code, req.Server, req.NoAuth, req.MinProto)
 	if !s.guardStarted {
 		s.guardStarted = true
 		go s.guardLoop()
@@ -689,6 +685,7 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		s.effectiveSrv = ""
 		s.sessionID = ""
 		s.p2p = false
+		s.protoVersion = ""
 		s.connectedAt = time.Time{}
 	}
 	s.mu.Unlock()
@@ -718,7 +715,7 @@ func (s *Server) guardLoop() {
 			continue
 		}
 		wasConnected := s.connected
-		code, server, noAuth := s.lastCode, s.lastServer, s.lastNoAuth
+		code, server, noAuth, minProto := s.lastCode, s.lastServer, s.lastNoAuth, s.lastMinProto
 		gen := s.connGen
 		s.connected = false
 		s.client = nil
@@ -738,7 +735,7 @@ func (s *Server) guardLoop() {
 		backoff := []time.Duration{1, 2, 3, 4, 5, 5}
 		for attempt, d := range backoff {
 			time.Sleep(d * time.Second)
-			outcome = s.tryReconnect(gen, code, server, noAuth)
+			outcome = s.tryReconnect(gen, code, server, noAuth, minProto)
 			if outcome != reconnectFailed {
 				break
 			}
@@ -765,7 +762,7 @@ const (
 // 代次：建好连接后若 s.connGen 已变，说明用户在此期间主动断开或改连了别的 share，这条
 // 过期连接必须丢弃、绝不覆盖用户当前的 s.client（否则后续命令会发错机器、还会泄漏用户
 // 刚建的连接）。
-func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool) reconnectOutcome {
+func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool, minProto string) reconnectOutcome {
 	s.mu.Lock()
 	binPath := s.binPath
 	defSrv := s.defaultServer
@@ -792,7 +789,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool) reco
 		client.Close()
 		return reconnectFailed
 	}
-	res, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth))
+	res, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth, minProto))
 	if err != nil {
 		client.Close()
 		return reconnectFailed
@@ -807,7 +804,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool) reco
 	}
 	s.client = client
 	s.connected = true
-	s.recordConnectMetadata(res, code, server, noAuth)
+	s.recordConnectMetadata(res, code, server, noAuth, minProto)
 	s.mu.Unlock()
 	s.broadcast("event: connected\n")
 	return reconnectOK

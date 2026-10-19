@@ -31,6 +31,8 @@ type connectMetadata struct {
 	PeerHost    string `json:"peer_host"`
 	HelpVersion string `json:"help_version"`
 	P2P         bool   `json:"p2p"`
+	// ProtoVersion 协商出的工具协议版本，"1" 表示兼容旧版的模式（安全防护已降级）。
+	ProtoVersion string `json:"proto_version"`
 }
 
 type remoteExecResult struct {
@@ -77,10 +79,11 @@ func decodeConnectMetadata(raw json.RawMessage) (connectMetadata, error) {
 	return meta, err
 }
 
-func (s *Server) recordConnectMetadata(raw json.RawMessage, code, server string, noAuth bool) {
+func (s *Server) recordConnectMetadata(raw json.RawMessage, code, server string, noAuth bool, minProto string) {
 	s.lastCode = code
 	s.lastServer = server
 	s.lastNoAuth = noAuth
+	s.lastMinProto = minProto
 	meta, err := decodeConnectMetadata(raw)
 	if err != nil {
 		return
@@ -91,6 +94,7 @@ func (s *Server) recordConnectMetadata(raw json.RawMessage, code, server string,
 	s.effectiveSrv = meta.Server
 	s.sessionID = meta.SessionID
 	s.p2p = meta.P2P
+	s.protoVersion = meta.ProtoVersion
 	s.connectedAt = time.Now()
 }
 
@@ -542,13 +546,14 @@ func (s *Server) markConnectionLost(client *MCPClient) bool {
 	s.effectiveSrv = ""
 	s.sessionID = ""
 	s.p2p = false
+	s.protoVersion = ""
 	s.connectedAt = time.Time{}
 	s.mu.Unlock()
 	s.broadcast("event: lost\n")
 	return true
 }
 
-func connectToolArgs(code, server string, noAuth bool) map[string]any {
+func connectToolArgs(code, server string, noAuth bool, minProto string) map[string]any {
 	args := map[string]any{}
 	if noAuth {
 		args["no_auth"] = true
@@ -558,11 +563,14 @@ func connectToolArgs(code, server string, noAuth bool) map[string]any {
 	if server != "" {
 		args["server"] = server
 	}
+	if minProto != "" {
+		args["min_proto"] = minProto
+	}
 	return args
 }
 
-func reconnectPeer(ctx context.Context, client *MCPClient, code, server string, noAuth bool) (connectMetadata, error) {
-	raw, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth))
+func reconnectPeer(ctx context.Context, client *MCPClient, code, server string, noAuth bool, minProto string) (connectMetadata, error) {
+	raw, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth, minProto))
 	if err != nil {
 		return connectMetadata{}, err
 	}
@@ -601,7 +609,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	client := s.client
 	connected := s.connected
-	oldCode, oldServer, oldNoAuth := s.lastCode, s.lastServer, s.lastNoAuth
+	oldCode, oldServer, oldNoAuth, oldMinProto := s.lastCode, s.lastServer, s.lastNoAuth, s.lastMinProto
 	peerVersion, effectiveServer := s.peerVersion, s.effectiveSrv
 	if effectiveServer == "" {
 		if oldServer != "" {
@@ -801,10 +809,12 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.upgradeProgress("新 share 已就绪，正在切换通道")
-	newMeta, err := reconnectPeer(ctx, client, newCode.Code, newCode.Server, false)
+	// 新 share 就是本次刚装上的当前版本，按默认下限（不降级）连；回连 old 才沿用原来的放宽——
+	// 被升级的 old 很可能正是靠「兼容旧版」才连上的 0.0.x。
+	newMeta, err := reconnectPeer(ctx, client, newCode.Code, newCode.Server, false, "")
 	if err != nil {
 		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		_, reconnectErr := reconnectPeer(rollbackCtx, client, oldCode, oldServer, oldNoAuth)
+		_, reconnectErr := reconnectPeer(rollbackCtx, client, oldCode, oldServer, oldNoAuth, oldMinProto)
 		var cleanupErr error
 		if reconnectErr == nil {
 			if probe.OS == "windows" {
@@ -827,13 +837,13 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if newMeta.PeerVersion != "" && extractVersion(newMeta.PeerVersion) != extractVersion(candidateVersion) {
 		var reconnectErr, cleanupErr error
 		if probe.OS == "windows" {
-			_, reconnectErr = reconnectPeer(ctx, client, oldCode, oldServer, oldNoAuth)
+			_, reconnectErr = reconnectPeer(ctx, client, oldCode, oldServer, oldNoAuth, oldMinProto)
 			if reconnectErr == nil {
 				cleanupErr = rollbackWindowsUpgrade(ctx, client, remoteBinary, probe, newPID, pidPath, backupPath, failedPath)
 			}
 		} else {
 			_, _ = execRemote(ctx, client, []string{"kill", "-TERM", strconv.Itoa(newPID)})
-			_, reconnectErr = reconnectPeer(ctx, client, oldCode, oldServer, oldNoAuth)
+			_, reconnectErr = reconnectPeer(ctx, client, oldCode, oldServer, oldNoAuth, oldMinProto)
 		}
 		msg := fmt.Sprintf("新通道版本校验失败：期望 %s，实际 %s", candidateVersion, newMeta.PeerVersion)
 		if reconnectErr != nil {
@@ -854,7 +864,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.upgradeProgress("新通道验证成功，正在原子替换原文件")
 		if _, err := execRemote(ctx, client, []string{remoteBinary, "upgrade-finalize", "--source", remoteBinary, "--target", probe.Exe}); err != nil {
 			_, _ = execRemote(ctx, client, []string{"kill", "-TERM", strconv.Itoa(newPID)})
-			_, reconnectErr := reconnectPeer(ctx, client, oldCode, oldServer, oldNoAuth)
+			_, reconnectErr := reconnectPeer(ctx, client, oldCode, oldServer, oldNoAuth, oldMinProto)
 			msg := "替换原文件失败，old 尚未终止: " + err.Error()
 			if reconnectErr != nil {
 				msg += "；自动回连 old 失败: " + reconnectErr.Error()
@@ -869,7 +879,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.client == client {
 		s.connected = true
-		s.recordConnectMetadata(mustJSON(newMeta), newCode.Code, newCode.Server, false)
+		s.recordConnectMetadata(mustJSON(newMeta), newCode.Code, newCode.Server, false, "")
 	}
 	s.mu.Unlock()
 	s.upgrading.Store(false) // 先开放普通 API，随后 connected 事件触发的 loadDrives 才能成功。

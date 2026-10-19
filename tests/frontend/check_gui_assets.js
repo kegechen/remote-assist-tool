@@ -308,5 +308,71 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   check('终端页关不掉', !!still);
 }
 
-console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
-process.exit(failed ? 1 : 0);
+// ---------- 14. 兼容旧版复选框 ----------
+// 复选框要真的把 min_proto 送到后端，失败时要把写给 AI 的 min_proto 指引翻译成
+// GUI 上能操作的话，降级成功要把警告亮出来——三处任何一处断了，用户都无从得知。
+(async () => {
+  const calls = [];
+  let connectReply = { ok: true, result: {} };
+  ctx.fetch = async (p, opts) => {
+    const body = JSON.parse(opts.body || '{}');
+    calls.push({ path: p, body });
+    return { json: async () => (p === '/api/connect' ? connectReply : { ok: true, result: {} }) };
+  };
+  const term = els.get('term-output');
+  const lastConnect = () => calls.filter((c) => c.path === '/api/connect').pop();
+  const mcpText = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });
+
+  els.get('legacy').checked = false;
+  connectReply = { ok: true, result: mcpText({ connected: true, proto_version: '2' }) };
+  term.innerHTML = '';
+  await ctx.doConnect();
+  check('未勾选兼容旧版时 min_proto 为空', !!lastConnect() && lastConnect().body.min_proto === '');
+  check('谈成 v2 不显示警告', !/\[警告\]/.test(term.innerHTML));
+
+  els.get('legacy').checked = true;
+  connectReply = { ok: true, result: mcpText({ connected: true, proto_version: '1', warning: '已降级到 v1 兼容模式' }) };
+  term.innerHTML = '';
+  await ctx.doConnect();
+  check('勾选兼容旧版时送出 min_proto=1', !!lastConnect() && lastConnect().body.min_proto === '1');
+  check('降级成功时终端显示警告', /\[警告\].*已降级到 v1 兼容模式/.test(term.innerHTML));
+
+  els.get('legacy').checked = false;
+  connectReply = { ok: false, error: 'connect failed: handshake failed: 对端只支持 v1……再调用 connect 并带上 min_proto="1"' };
+  term.innerHTML = '';
+  await ctx.doConnect();
+  check('旧版对端被拒时提示勾选兼容旧版', /勾选「兼容旧版」/.test(term.innerHTML));
+
+  els.get('legacy').checked = true;
+  term.innerHTML = '';
+  await ctx.doConnect();
+  check('已勾选时不重复提示勾选', !/勾选「兼容旧版」/.test(term.innerHTML));
+
+  // 判据要窄：参数校验错误里也出现 min_proto 这个词（"connect accepts only: ..., min_proto"），
+  // 那不是对端太旧，不该把用户引向降级。
+  els.get('legacy').checked = false;
+  connectReply = { ok: false, error: 'connect failed: bad args: json: unknown field "x" (connect accepts only: code, server, no_auth, min_proto; ...)' };
+  term.innerHTML = '';
+  await ctx.doConnect();
+  check('参数错误不误报为旧版对端', !/勾选「兼容旧版」/.test(term.innerHTML));
+
+  // 通道内升级成功后取消勾选：对端已是当前版本。
+  els.get('legacy').checked = true;
+  ctx.confirm = () => true;
+  const realFetch = ctx.fetch;
+  ctx.fetch = async (p, opts) => p === '/api/upgrade'
+    ? { json: async () => ({ ok: true, peer_version: '1.0.1' }) }
+    : realFetch(p, opts);
+  ctx.FormData = function () { this.append = () => {}; };
+  els.get('upgrade-file').files = [{ name: 'remote.exe' }];
+  await els.get('upgrade-file').onchange();
+  check('升级成功后取消勾选兼容旧版', els.get('legacy').checked === false);
+  ctx.fetch = realFetch;
+
+  console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
+  process.exit(failed ? 1 : 0);
+})().catch((e) => {
+  check('兼容旧版复选框', false, `${e.name}: ${e.message}`);
+  console.log(`\n${failed} 项失败`);
+  process.exit(1);
+});

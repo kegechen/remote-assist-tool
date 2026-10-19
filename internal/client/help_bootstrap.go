@@ -79,9 +79,10 @@ type HelpMCPBootstrap struct {
 	activeTarget connectTarget
 	activeResult connectResult
 	// 记录最近一次成功 connect 的参数，供传输中隧道断时自动重连+续传（抗抖动）
-	lastCode   string
-	lastServer string
-	lastNoAuth bool
+	lastCode     string
+	lastServer   string
+	lastNoAuth   bool
+	lastMinProto string
 }
 
 func NewHelpMCPBootstrap(cfg *Config) *HelpMCPBootstrap {
@@ -151,18 +152,24 @@ func isTunnelDown(err error) bool {
 }
 
 // reconnect 用最近一次成功 connect 的参数重建隧道 + bridge（供传输中自动重连）。
+//
+// 缓存必须在拿到 connectMu **之后**再读：多个传输并发断线时，重连会排队等锁，期间调用方
+// 可能发起了新的 connect（作废或改写了缓存）。若锁外先拍快照，排在后面的重连就会拿旧参数
+// 拆掉新会话、或把刚被否决的会话连回去。锁内读到的永远是最新意图。
 func (b *HelpMCPBootstrap) reconnect(ctx context.Context) error {
+	b.connectMu.Lock()
+	defer b.connectMu.Unlock()
+	// 排队等锁期间传输可能已被取消：那就没人要这条连接了，不必再拨号。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.mu.Lock()
-	a := connectArgs{Code: b.lastCode, Server: b.lastServer, NoAuth: b.lastNoAuth}
+	a := connectArgs{Code: b.lastCode, Server: b.lastServer, NoAuth: b.lastNoAuth, MinProto: b.lastMinProto}
 	b.mu.Unlock()
 	if a.Code == "" && !a.NoAuth {
 		return fmt.Errorf("no cached assist code to auto-reconnect")
 	}
-	raw, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	_, err = b.doConnect(ctx, raw)
+	_, err := b.connectLocked(ctx, a, true)
 	return err
 }
 
@@ -239,6 +246,10 @@ type connectArgs struct {
 	Code   string `json:"code"`
 	Server string `json:"server,omitempty"`  // 可选：覆盖 cfg.ServerAddr，用于 share --standalone LAN 直连
 	NoAuth bool   `json:"no_auth,omitempty"` // true: 使用固定 NoAuthCode，无需用户提供 code
+	// MinProto 覆盖启动参数 --min-proto，只对这一次连接生效。MCP 进程由宿主托管，改启动
+	// 参数就得重启宿主；遇到旧版 share 时由 AI 征得用户同意后带 "1" 重试即可，进程不动。
+	// 它只是下限：对端支持 v2 时照样谈成 v2。
+	MinProto string `json:"min_proto,omitempty"`
 }
 
 type connectResult struct {
@@ -249,26 +260,66 @@ type connectResult struct {
 	PeerVersion string `json:"peer_version,omitempty"` // share 版本，来自 relay join 响应
 	PeerHost    string `json:"peer_host,omitempty"`
 	HelpVersion string `json:"help_version,omitempty"` // 当前 help CLI 版本，供 GUI 做升级提示
+	// ProtoVersion 协商出的工具协议版本。降级到 v1 时附带 Warning：stderr 上的告警 AI
+	// 看不到，只有放进结果里，它才能如实转告用户当前处在兼容模式。
+	ProtoVersion string `json:"proto_version,omitempty"`
+	Warning      string `json:"warning,omitempty"`
 }
 
 type connectTarget struct {
-	Code   string
-	Server string
-	NoAuth bool
+	Code     string
+	Server   string
+	NoAuth   bool
+	MinProto string
+}
+
+// lastTarget 把缓存的上一次成功参数按 connectWith 的规则归一化成目标，用于判断
+// 本次调用是否是同一个意图。调用方需持有 b.mu。
+func (b *HelpMCPBootstrap) lastTarget() connectTarget {
+	server := b.cfg.ServerAddr
+	if b.lastServer != "" {
+		server = b.lastServer
+	}
+	code := b.lastCode
+	if b.lastNoAuth && code == "" {
+		code = proto.NoAuthCode
+	}
+	minProto := b.cfg.MinProto
+	if b.lastMinProto != "" {
+		minProto = b.lastMinProto
+	}
+	minProto, _ = proto.NormalizeMinProto(minProto)
+	return connectTarget{Code: normalizeCode(code), Server: NormalizeServerAddr(server), NoAuth: b.lastNoAuth, MinProto: minProto}
+}
+
+// sameEndpoint 报告两次 connect 是否指向同一个对端会话（忽略协议下限）。
+func (t connectTarget) sameEndpoint(o connectTarget) bool {
+	return t.Code == o.Code && t.Server == o.Server && t.NoAuth == o.NoAuth
 }
 
 func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
-	b.connectMu.Lock()
-	defer b.connectMu.Unlock()
-
 	var a connectArgs
 	// 拒绝未知字段：静默忽略会让写错名字的参数悄悄失效，connect 转而连上内置默认
 	// relay，报出的超时错误完全指不到根因（调用方臆造 relay_url 时就这么栽过）。
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&a); err != nil {
-		return nil, fmt.Errorf("bad args: %w (connect accepts only: code, server, no_auth; for the relay address use server=\"host:port\", no http:// prefix)", err)
+		return nil, fmt.Errorf("bad args: %w (connect accepts only: code, server, no_auth, min_proto; for the relay address use server=\"host:port\", no http:// prefix)", err)
 	}
+	return b.connectWith(ctx, a)
+}
+
+// connectWith 处理调用方发起的 connect（新意图）；自动重连走 reconnect。
+func (b *HelpMCPBootstrap) connectWith(ctx context.Context, a connectArgs) (json.RawMessage, error) {
+	b.connectMu.Lock()
+	defer b.connectMu.Unlock()
+	return b.connectLocked(ctx, a, false)
+}
+
+// connectLocked 建立（或复用）一次连接，调用方须持有 connectMu。fromReconnect 标明调用
+// 来自传输中的自动重连：那是在沿用缓存参数，不代表调用方的新意图，不能动缓存。
+func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fromReconnect bool) (json.RawMessage, error) {
+
 	// schema 里明说了 "http://host:port is rejected"——那就真得拒绝。不挡的话
 	// NormalizeServerAddr 会把它揉成 "[http://1.2.3.4:8443]:8443" 再去拨号，报错指不到
 	// 根因，正好重蹈上面 DisallowUnknownFields 想根治的覆辙（承诺与实现不符比没承诺更坏）。
@@ -286,6 +337,13 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	if a.Code == "" {
 		return nil, fmt.Errorf("code required (or set no_auth=true for trusted LANs)")
 	}
+	// 非法取值直接拒绝，不静默回落：这是一道安全闸，min_proto="3" 之类的手误若被当成
+	// 默认值，调用方会以为自己设了什么（与 --min-proto 的 normalizeMinProto 同理）。
+	if a.MinProto != "" {
+		if _, err := proto.NormalizeMinProto(a.MinProto); err != nil {
+			return nil, fmt.Errorf("bad args: min_proto %w", err)
+		}
+	}
 
 	// 先算出实际连接目标。相同目标的重复 connect 是常见操作（新一轮 agent 可能不
 	// 知道 MCP 子进程仍保持着连接），必须幂等复用，不能拆掉健康的 relay/P2P 会话。
@@ -294,14 +352,40 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		effectiveCfg.ServerAddr = a.Server
 	}
 	effectiveCfg.ServerAddr = NormalizeServerAddr(effectiveCfg.ServerAddr)
+	if a.MinProto != "" {
+		effectiveCfg.MinProto = a.MinProto
+	}
+	// 目标里记的是**生效值**而不是入参：带不带 min_proto 若最终落到同一个下限，就是同一个
+	// 连接，应命中幂等复用；下限不同则必须重新握手。
+	effectiveMinProto, _ := proto.NormalizeMinProto(effectiveCfg.MinProto)
 	target := connectTarget{
-		Code:   normalizeCode(a.Code),
-		Server: effectiveCfg.ServerAddr,
-		NoAuth: a.NoAuth,
+		Code:     normalizeCode(a.Code),
+		Server:   effectiveCfg.ServerAddr,
+		NoAuth:   a.NoAuth,
+		MinProto: effectiveMinProto,
 	}
 
 	b.mu.Lock()
-	if b.help != nil && b.bridge != nil && b.activeTarget == target {
+	// 调用方的新意图若与缓存参数不同，缓存立即作废——不论旧会话是否还在。否则这次连接
+	// 一旦失败，传输中的自动重连（reconnect）会拿旧参数悄悄连回去：换码连 B 失败后连回 A，
+	// 或用旧的 min_proto="1" 把用户刚以默认下限否决掉的 v1 会话恢复回来。
+	// 与缓存相同的重试不清：那只是再试一次同一件事，不该让自动重连失去依据。
+	if !fromReconnect && b.lastTarget() != target {
+		b.lastCode, b.lastServer, b.lastNoAuth, b.lastMinProto = "", "", false, ""
+	}
+	if b.help != nil && b.bridge != nil && b.activeTarget.sameEndpoint(target) &&
+		proto.SatisfiesMinProto(b.activeResult.ProtoVersion, target.MinProto) {
+		// 下限是放宽，不是指定版本：已有会话的协商结果满足本次下限就照常复用。
+		// AI 为保险起见带上 min_proto="1" 重复 connect 时，不该把健康的 v2 会话拆掉重连；
+		// 反过来，现有 v1 会话不满足默认下限 v2，必须重新握手（对 0.0.x 会按设计被拒）。
+		//
+		// 复用时把记录更新为本次参数：之后的自动重连以最近一次意图为准（尤其是收紧回
+		// 默认下限的情况）。会话中途的版本变化另由 downgradeToRelay 守住（要求与首次
+		// 握手版本一致），不依赖这里的记录。
+		if !fromReconnect {
+			b.activeTarget.MinProto = target.MinProto
+			b.lastCode, b.lastServer, b.lastNoAuth, b.lastMinProto = a.Code, a.Server, a.NoAuth, a.MinProto
+		}
 		result := b.activeResult
 		b.mu.Unlock()
 		return json.Marshal(result)
@@ -347,6 +431,10 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	sess, hsErr := h.handshakeToolCapturing(addrRelay.deliver)
 	if hsErr != nil {
 		h.client.Close()
+		var incompat *proto.IncompatibleVersionError
+		if errors.As(hsErr, &incompat) {
+			return nil, fmt.Errorf("handshake failed: %s", mcpIncompatHint(incompat))
+		}
 		return nil, fmt.Errorf("handshake failed: %w", hsErr)
 	}
 	bridge := mcp.NewBridge(h.client, sess)
@@ -401,12 +489,16 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	// P2P 起始为 false：连接先在 relay 上可用，升级成功后由 upgradeToP2P 回填
 	// b.activeResult.P2P，重复 connect 走幂等复用路径即可读到最新状态。
 	result := connectResult{
-		Connected:   true,
-		SessionID:   resp.SessionID,
-		Server:      effectiveCfg.ServerAddr,
-		PeerVersion: resp.PeerVersion,
-		PeerHost:    resp.PeerHost,
-		HelpVersion: version.Info(),
+		Connected:    true,
+		SessionID:    resp.SessionID,
+		Server:       effectiveCfg.ServerAddr,
+		PeerVersion:  resp.PeerVersion,
+		PeerHost:     resp.PeerHost,
+		HelpVersion:  version.Info(),
+		ProtoVersion: sess.Version,
+	}
+	if sess.Version == proto.ToolProtocolVersionV1 {
+		result.Warning = v1CompatWarning
 	}
 
 	// 必须在启动读循环前发布活动状态。否则连接若立即断开，teardown 可能先运行却
@@ -420,6 +512,7 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 	b.lastCode = a.Code
 	b.lastServer = a.Server
 	b.lastNoAuth = a.NoAuth
+	b.lastMinProto = a.MinProto
 	b.mu.Unlock()
 
 	// --- P2P：后台协商并热升级，不阻塞 connect 返回 ---
@@ -504,7 +597,8 @@ func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (
 		if p2pMode == p2p.P2PModeRequired {
 			teardown(errors.New("P2P required but peer speaks legacy v1"))
 			return nil, fmt.Errorf("P2P required but failed: 对端为旧版本（工具协议 v1），" +
-				"其打洞包不带认证、本端一律拒绝，P2P 无法建立。请升级对端，或改用 --p2p auto 经中转连接")
+				"其打洞包不带认证、本端一律拒绝，P2P 无法建立。请升级对端；" +
+				"本端以 --p2p required 启动，不接受中转，这是启动参数、会话中无法更改，请如实告知用户由其决定")
 		}
 		fmt.Fprintln(os.Stderr, "MCP: 对端为旧版本（工具协议 v1），P2P 直连不可用，全程使用中转")
 	}
@@ -661,7 +755,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 				teardown(fmt.Errorf("tunnel_lost: P2P 隧道断开且 --p2p required 不接受中转回退（%w），请重新 connect", err))
 				return
 			}
-			b.downgradeToRelay(h, bridge, pc, p2pConnPtr, helloAckCh, teardown, err)
+			b.downgradeToRelay(h, bridge, pc, p2pConnPtr, helloAckCh, teardown, err, sess.Version)
 			return
 		}
 		dispatchHelpToolMessage(msg, bridge)
@@ -686,6 +780,10 @@ func (b *HelpMCPBootstrap) sessionAlive(bridge *mcp.Bridge) bool {
 // 已知取舍：降级窗口内在途的 CallTool 收不到响应，会等到各自 ctx deadline 才失败
 // （不主动 Disconnect，否则等于放弃整条会话）。P2P 中途断本就少见，比起原先直接
 // 判死会话仍是净改善。
+// errVersionChangedMidSession P2P 断开回中转重新握手时，对端给出的版本与首次握手不一致。
+// 合法对端不会中途换版本，只可能是被替换或报文被篡改；不能给出"降级/重启"之类的指引。
+var errVersionChangedMidSession = errors.New("对端在会话中途改变了工具协议版本（可能已被替换，或报文被篡改）")
+
 func (b *HelpMCPBootstrap) downgradeToRelay(
 	h *HelpMode,
 	bridge *mcp.Bridge,
@@ -694,6 +792,7 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 	helloAckCh <-chan proto.HelloAck,
 	teardown func(error),
 	cause error,
+	sessVersion string,
 ) {
 	p2pConnPtr.Store(nil)
 	pc.Close()
@@ -731,7 +830,20 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 		// （或中间人）在这里同样可能塞一个 Version:"1" 进来，绕过本端的 minProto 底线。
 		newSess, err := h.sessionFromAck(ack, hello)
 		if err != nil {
+			// 版本不兼容不能原样透出：那条文本是命令行版的"加 --min-proto=1 重启"。
+			// 首次握手已经谈成过，对端中途谈不成只可能是被替换或报文被篡改，不该引导降级。
+			var incompat *proto.IncompatibleVersionError
+			if errors.As(err, &incompat) {
+				err = errVersionChangedMidSession
+			}
 			teardown(fmt.Errorf("tunnel_lost: P2P 中断后重新握手失败（%w），请重新 connect", err))
+			return
+		}
+		// 版本必须与首次握手一致。下限放宽到 v1 时，一条伪造的 Version:"1" 应答能过
+		// sessionFromAck，若照单全收，会话就在中途悄悄掉到 v1：connect 结果、复用判断和
+		// GUI 状态都还以为是 v2，之后按默认下限的 connect 会复用一个实际跑在 v1 上的会话。
+		if newSess.Version != sessVersion {
+			teardown(fmt.Errorf("tunnel_lost: P2P 中断后重新握手失败（%w），请重新 connect", errVersionChangedMidSession))
 			return
 		}
 		bridge.SwapConn(h.client, newSess)

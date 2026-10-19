@@ -67,6 +67,16 @@ func versionRank(v string) int {
 	return -1
 }
 
+// SatisfiesMinProto 报告已协商出的版本 v 是否不低于下限 floor（空串视作默认下限）。
+// 未知版本一律不满足。
+func SatisfiesMinProto(v, floor string) bool {
+	if floor == "" {
+		floor = DefaultMinProto
+	}
+	r := versionRank(v)
+	return r >= 0 && r <= versionRank(floor)
+}
+
 // NormalizeMinProto 校验 --min-proto 的取值，返回可用的最低版本。
 func NormalizeMinProto(v string) (string, error) {
 	if v == "" {

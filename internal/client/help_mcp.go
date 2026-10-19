@@ -168,6 +168,45 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 	return nil
 }
 
+// localIncompatError 握手因版本不兼容失败。文本是给命令行用户看的 LocalHint
+// （"在本端加 --min-proto=1 重启"），同时保留原始错误，供 MCP bootstrap 换成
+// connect 工具能照做的指引（见 mcpIncompatHint）——那里改不了启动参数。
+type localIncompatError struct {
+	incompat *proto.IncompatibleVersionError
+}
+
+func (e *localIncompatError) Error() string { return e.incompat.LocalHint() }
+func (e *localIncompatError) Unwrap() error { return e.incompat }
+
+// v1CompatWarning 降级到 v1 后需要让用户知道的事。stderr 与 connect 结果共用这一句。
+const v1CompatWarning = "工具通道已降级到 v1 兼容模式（对端为旧版本）：" +
+	"AAD 绑定、强制密文参数、抗重放均已关闭，仅应在可信网络中使用"
+
+// mcpIncompatHint 把版本不兼容翻译成 MCP 调用方（AI agent）能照做的指引。
+//
+// 命令行版的 LocalHint 指向"加 --min-proto=1 重启"，可 MCP 进程由宿主托管，照做就是
+// 改宿主配置、重启 MCP 服务，甚至另起进程——AI 真这么干过。这里改成指向 connect 的
+// min_proto 参数：只对这一次连接生效，进程不动。
+//
+// 降级会关掉认证相关的防护，所以明确要求先征得用户同意；对端是 1.0.0 及以上时传了
+// 也仍走 v2，说明这点能让 AI 放心地按指引重试，而不是瞎猜。
+func mcpIncompatHint(e *proto.IncompatibleVersionError) string {
+	// 以下两个分支目前不可达（没有低于 v1 的版本，对端无交集时 InterpretHelloAck 也
+	// 不会产出空的 Got），保留为防御：新增版本后它们就会变得可达。
+	peer := "未知版本"
+	if e.Got != "" {
+		peer = "v" + e.Got
+	}
+	head := fmt.Sprintf("工具协议版本不兼容：对端（%s）只支持 %s，本端要求 v%s，已拒绝本次连接。", e.PeerSide, peer, e.Want)
+	if e.Want == proto.ToolProtocolVersionV1 {
+		// 本端已经放宽到最低了，再降也没有更低的版本可降，只能升级对端。
+		return head + fmt.Sprintf("请将%s升级到 1.0.0 及以上。", e.PeerSide)
+	}
+	return head + fmt.Sprintf("请将%s升级到 1.0.0 及以上；若暂时无法升级，"+
+		"先向用户说明风险并取得同意，再调用 connect 并带上 min_proto=\"1\" 以兼容模式重试"+
+		"（在当前会话中直接调用即可，不必改任何配置；兼容模式会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络）。", e.PeerSide)
+}
+
 // sessionFromAck 校验 share 的应答并派生本次会话。
 //
 // 两件事都不能省：
@@ -180,14 +219,12 @@ func (h *HelpMode) sessionFromAck(ack proto.HelloAck, hello proto.Hello) (proto.
 	if err != nil {
 		var incompat *proto.IncompatibleVersionError
 		if errors.As(err, &incompat) {
-			return proto.Session{}, errors.New(incompat.LocalHint())
+			return proto.Session{}, &localIncompatError{incompat}
 		}
 		return proto.Session{}, err
 	}
 	if version == proto.ToolProtocolVersionV1 {
-		fmt.Fprintf(os.Stderr, "[警告] 工具通道已降级到 v%s 兼容模式（对端为旧版本）："+
-			"AAD 绑定、强制密文参数、抗重放均已关闭，仅应在可信网络中使用\n",
-			proto.ToolProtocolVersionV1)
+		fmt.Fprintf(os.Stderr, "[警告] %s\n", v1CompatWarning)
 	}
 	return proto.Session{
 		Key:     proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64, version),

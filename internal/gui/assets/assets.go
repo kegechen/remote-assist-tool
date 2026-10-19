@@ -111,6 +111,7 @@ main{flex:1;display:flex;min-height:0}
     <span class="meta">Relay:</span>
     <input class="server" id="server" placeholder="host:port">
     <label class="meta"><input type="checkbox" id="noauth"> NoAuth</label>
+    <label class="meta" title="对端是 0.0.x 旧版时才需要勾选：以 v1 兼容模式连接，会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络。对端是新版时勾选也仍走 v2。"><input type="checkbox" id="legacy"> 兼容旧版</label>
     <button id="connect">连接</button>
     <button class="sm" id="btnProc">进程</button>
     <button id="status" title="连接详情" disabled>未连接</button>
@@ -173,7 +174,7 @@ async function showConnectionInfo(){
   const mode=r.p2p?'P2P 直连':'Relay 中转',latency=r.latency_ms!==undefined?r.latency_ms+' ms':'不可用';
   panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="ok">'+esc(mode)+'</span></div>'+
     connectionRow('服务器',r.server)+connectionRow('传输',mode,r.p2p?'transport-p2p':'')+connectionRow('往返延迟',latency)+
-    connectionRow('远端主机',r.peer_host)+connectionRow('远端版本',r.peer_version)+connectionRow('Help 版本',r.help_version)+
+    connectionRow('远端主机',r.peer_host)+connectionRow('远端版本',r.peer_version)+connectionRow('工具协议',r.proto_version?('v'+r.proto_version+(r.proto_version==='1'?'（兼容模式，安全防护已降级）':'')):'')+connectionRow('Help 版本',r.help_version)+
     connectionRow('会话 ID',r.session_id)+connectionRow('已连接',formatConnectedTime(r.connected_seconds));
 }
 status.onclick=e=>{e.stopPropagation();const panel=$('#conn-info');if(panel.style.display==='block')panel.style.display='none';else showConnectionInfo()};
@@ -181,12 +182,18 @@ $('#conn-info').onclick=e=>e.stopPropagation();
 document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
 
 async function doConnect(){
-  const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked;
+  const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked,legacy=$('#legacy').checked;
   resetRemoteState(); // 可能换了一台远端，旧缓存一律作废
   setStatus(false,'连接中...');
-  const r=await api('/api/connect',{code,server,no_auth:noauth});
-  if(r.ok){const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();openTerm()}
-  else{setStatus(false,'失败');termLog('<span class="err">'+esc(r.error)+'</span>')}
+  const r=await api('/api/connect',{code,server,no_auth:noauth,min_proto:legacy?'1':''});
+  if(r.ok){
+    const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();openTerm();
+    if(d.warning)termLog('<span class="err">[警告] '+esc(d.warning)+'</span>');
+  }else{
+    setStatus(false,'失败');termLog('<span class="err">'+esc(r.error)+'</span>');
+    // 报错里的指引是写给 AI 的（connect 的 min_proto 参数），GUI 用户对应的是「兼容旧版」复选框。
+    if(!legacy&&String(r.error).includes('min_proto="1"'))termLog('<span class="err">对端是旧版本：如确认处于可信网络，可勾选「兼容旧版」后重新连接；更稳妥的做法是升级对端。</span>');
+  }
 }
 async function doDisconnect(){
   await api('/api/disconnect',{});
@@ -241,6 +248,7 @@ $('#upgrade-file').onchange=async()=>{
     const newVersion=r.peer_version||r.new_version||peerVersion;
     btn.style.display='none';resetRemoteState();$('#upgrade-notice').style.display='flex';$('#upgrade-notice').className='success';
     peerVersion=newVersion;$('#upgrade-msg').textContent='share 已升级到 '+newVersion+(r.warning?'；'+r.warning:'');loadDrives();
+    $('#legacy').checked=false; // 对端已是当前版本，不必再降级；留着勾选，下次手动连另一台 0.0.x 会不经拦截直接降级
   }catch(e){$('#upgrade-msg').textContent='升级请求失败: '+String(e);btn.disabled=false}
   finally{connBtn.disabled=false;renderConnBtn()}
 };
