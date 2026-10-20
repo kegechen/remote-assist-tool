@@ -27,14 +27,15 @@ var helpDisconnectDebounce = 5 * time.Second
 
 // 同 ClientID 多进程互踢检测：shareConflictWindow 内顶掉「仍在线」的 share 超过
 // shareConflictMaxReplaces 次，即判定为两个进程在抢同一身份。
-const (
-	shareConflictWindow      = time.Minute
-	shareConflictMaxReplaces = 3
-)
+const shareConflictMaxReplaces = 3
 
-// shareConflictCooldown 判定冲突后的冷却期：期间一律拒绝顶替在线 share，每次被拒的
-// 尝试都会顺延。在线 share 真正断开（Share==nil）后不再检查，后来者可直接接管。
-var shareConflictCooldown = 10 * time.Minute
+// shareConflictWindow / shareConflictCooldown 用 var 只为让测试调到毫秒级；运行期不改。
+// 冷却期内一律拒绝顶替在线 share，每次被拒的尝试都会顺延；在线 share 真正断开时
+// 冲突状态清零（见 DisconnectClient），后来者可直接接管。
+var (
+	shareConflictWindow   = time.Minute
+	shareConflictCooldown = 10 * time.Minute
+)
 
 // Conn 连接接口
 type Conn interface {
@@ -676,6 +677,11 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 		session.shareReady = false
 		help := session.Help
 		session.Share = nil
+		// 在线者真正离开：互踢已经结束（被顶掉一方的断开在上面 byConnID 查不到，走不到
+		// 这里），清掉冲突状态。否则接管者在冷却期内遇到一次半开重连会被误判为冲突，
+		// 直到读超时清掉死连接前都注册不上。
+		session.liveReplaces = nil
+		session.conflictUntil = time.Time{}
 		log.Printf("Share disconnected from session %s", session.ID)
 		return &DisconnectResult{
 			PeerToNotify:   help, // 可能为 nil

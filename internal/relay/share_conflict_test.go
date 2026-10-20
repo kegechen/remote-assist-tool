@@ -107,19 +107,103 @@ func TestConflictCooldownReleasedWhenOnlineShareLeaves(t *testing.T) {
 	}
 	const clientID = "cid-release"
 	online, _, _, _ := registerShare(t, srv, "s0", clientID, "0.0.6")
+	conflicted := 0
 	for i := 1; i <= 10; i++ {
 		c, _, _, resp := registerShare(t, srv, "s"+string(rune('a'+i)), clientID, "v1.1.0")
 		if resp.Type == proto.MsgRegisterResponse {
 			srv.sessions.DisconnectClient(online.ID)
 			online = c
+		} else if errorCodeOf(t, resp) == proto.ErrCodeClientIDConflict {
+			conflicted++
 		}
+	}
+	if conflicted == 0 {
+		t.Fatal("前置条件：应已进入冲突冷却")
 	}
 	// 在线 share 真正断开
 	srv.sessions.DisconnectClient(online.ID)
 
-	_, _, closeConn, resp := registerShare(t, srv, "s-final", clientID, "v1.1.0")
+	taker, _, closeConn, resp := registerShare(t, srv, "s-final", clientID, "v1.1.0")
 	if closeConn || resp.Type != proto.MsgRegisterResponse {
 		t.Fatalf("在线 share 离开后应允许接管: close=%v type=%s code=%s", closeConn, resp.Type, errorCodeOf(t, resp))
+	}
+
+	// 接管者随后一次半开重连（旧连接 relay 尚未感知）必须照常顶替：在线者离开时冲突
+	// 状态应已清零，不能沿用之前的冷却期把接管者误拒。
+	_, _, closeConn, resp = registerShare(t, srv, "s-reconnect", clientID, "v1.1.0")
+	if closeConn || resp.Type != proto.MsgRegisterResponse {
+		t.Fatalf("接管后单次重连被误判冲突: code=%s", errorCodeOf(t, resp))
+	}
+	_ = taker
+}
+
+func shrinkConflictTiming(t *testing.T, window, cooldown time.Duration) {
+	t.Helper()
+	origW, origC := shareConflictWindow, shareConflictCooldown
+	shareConflictWindow, shareConflictCooldown = window, cooldown
+	t.Cleanup(func() { shareConflictWindow, shareConflictCooldown = origW, origC })
+}
+
+// replaceOnline 让新连接顶替当前在线 share，返回新的在线者与响应。
+func replaceOnline(t *testing.T, srv *Server, online *ClientConn, id, clientID string) (*ClientConn, proto.Message) {
+	t.Helper()
+	c, _, _, resp := registerShare(t, srv, id, clientID, "v1.1.0")
+	if resp.Type == proto.MsgRegisterResponse {
+		srv.sessions.DisconnectClient(online.ID)
+		return c, resp
+	}
+	return online, resp
+}
+
+// TestConflictWindowSlides 分散在窗口之外的顶替不累计：只有短时间内密集顶替才算互踢。
+func TestConflictWindowSlides(t *testing.T) {
+	shrinkConflictTiming(t, 40*time.Millisecond, time.Hour)
+	srv, err := NewServer(&Config{CodeTTL: time.Hour, CodeLength: 10, DisableSourceIPLimits: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientID = "cid-slide"
+	online, _, _, _ := registerShare(t, srv, "w0", clientID, "v1.1.0")
+	for round := 0; round < 3; round++ {
+		for i := 0; i < shareConflictMaxReplaces; i++ {
+			var resp proto.Message
+			online, resp = replaceOnline(t, srv, online, "w"+string(rune('a'+round*10+i)), clientID)
+			if resp.Type != proto.MsgRegisterResponse {
+				t.Fatalf("第 %d 轮第 %d 次：窗口外的顶替被误判冲突 code=%s", round, i, errorCodeOf(t, resp))
+			}
+		}
+		time.Sleep(60 * time.Millisecond)
+	}
+}
+
+// TestConflictCooldownExpires 冷却期满且后来者不再重试后，恢复正常顶替语义。
+func TestConflictCooldownExpires(t *testing.T) {
+	shrinkConflictTiming(t, time.Hour, 40*time.Millisecond)
+	srv, err := NewServer(&Config{CodeTTL: time.Hour, CodeLength: 10, DisableSourceIPLimits: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const clientID = "cid-expire"
+	online, _, _, _ := registerShare(t, srv, "e0", clientID, "v1.1.0")
+	var resp proto.Message
+	for i := 1; i <= shareConflictMaxReplaces+1; i++ {
+		online, resp = replaceOnline(t, srv, online, "e"+string(rune('a'+i)), clientID)
+	}
+	if errorCodeOf(t, resp) != proto.ErrCodeClientIDConflict {
+		t.Fatal("前置条件：应已判定冲突")
+	}
+	// 冷却期内被拒会顺延
+	time.Sleep(25 * time.Millisecond)
+	if _, resp = replaceOnline(t, srv, online, "e-mid", clientID); errorCodeOf(t, resp) != proto.ErrCodeClientIDConflict {
+		t.Fatal("冷却期内应继续拒绝")
+	}
+	time.Sleep(25 * time.Millisecond)
+	if _, resp = replaceOnline(t, srv, online, "e-mid2", clientID); errorCodeOf(t, resp) != proto.ErrCodeClientIDConflict {
+		t.Fatal("被拒尝试应顺延冷却期")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if _, resp = replaceOnline(t, srv, online, "e-after", clientID); resp.Type != proto.MsgRegisterResponse {
+		t.Fatalf("冷却期满后应恢复顶替: code=%s", errorCodeOf(t, resp))
 	}
 }
 

@@ -38,6 +38,7 @@ type ShareMode struct {
 	sshAddr        string
 	newInstance    bool
 	clientID       string
+	conflictHinted bool // 本轮冲突的醒目提示已打印过；注册成功后复位
 	codeFile       string
 	mirrorCodeFile string
 	code           string
@@ -402,8 +403,12 @@ func (s *ShareMode) register() error {
 		var errMsg proto.ErrorMessage
 		_ = proto.DecodePayload(msg, &errMsg)
 		if errMsg.Code == proto.ErrCodeClientIDConflict {
-			// 不退出：另一个进程可能随后被停掉，退避重试即可自动接管。
-			s.printf("\n[!] %s\n    （例如旧版 share 仍在后台运行：结束它即可，本进程会自动接管）\n", errMsg.Message)
+			// 不退出：另一个进程可能随后被停掉，退避重试即可自动接管。醒目提示每轮冲突只打
+			// 一次，之后的重试只剩 reconnectWithBackoff 的单行失败日志。
+			if !s.conflictHinted {
+				s.conflictHinted = true
+				s.printf("\n[!] %s\n    （例如旧版 share 仍在后台运行：结束它即可，本进程会自动接管）\n", errMsg.Message)
+			}
 		}
 		return fmt.Errorf("register rejected: %s - %s", errMsg.Code, errMsg.Message)
 	}
@@ -417,6 +422,7 @@ func (s *ShareMode) register() error {
 	}
 	s.code = resp.Code
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
+	s.conflictHinted = false
 	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
 	s.printf("\n================ 请复制给你的 AI 助手（支持 MCP 即可） ================\n%s\n", instructions)
 	s.println("========================================================")

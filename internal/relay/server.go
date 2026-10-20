@@ -645,7 +645,7 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 			log.Printf("Share register rejected (client_id conflict) client_fp=%s (version: %s, host: %s); online share version: %s",
 				logger.CodeFingerprint(client.ClientID), client.Version, client.Host, result.OnlineVersion)
 			s.sendError(client, proto.ErrCodeClientIDConflict, fmt.Sprintf(
-				"本机已有另一个被协助端进程使用同一身份在线（版本 %s，%s），两者正在互相顶替；请先停止其中一个进程",
+				"另一个使用同一身份的被协助端进程已在线（版本 %s，%s），两者正在互相顶替；请先停止其中一个进程",
 				result.OnlineVersion, result.OnlineHost))
 			return true
 		}
