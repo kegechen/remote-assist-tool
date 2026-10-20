@@ -1,11 +1,15 @@
 package client
 
 import (
+	"bufio"
+	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
+	"github.com/remote-assist/tool/internal/proto"
 )
 
 // blackholeListener 起一个「只接受连接、永不应答」的 relay：TCP 三次握手成功，之后一个
@@ -120,5 +124,39 @@ func TestDialTimeoutIsConfigured(t *testing.T) {
 	}
 	if joinTimeout <= 0 {
 		t.Fatal("joinTimeout 必须为正")
+	}
+}
+
+// relay 以 CLIENT_ID_CONFLICT 拒绝注册时，register 必须返回带错误码与说明的 error，
+// 而不是含糊的 "unexpected response: error"——用户要靠这条说明知道该停掉哪个进程。
+func TestShareRegisterSurfacesClientIDConflict(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = bufio.NewReader(conn).ReadBytes('\n')
+		msg, _ := proto.NewMessage(proto.MsgError, &proto.ErrorMessage{Code: proto.ErrCodeClientIDConflict, Message: "版本 0.0.6 在线"})
+		data, _ := json.Marshal(msg)
+		_, _ = conn.Write(append(data, '\n'))
+		time.Sleep(time.Second)
+	}()
+	shrinkJoinTimeout(t, 2*time.Second)
+
+	s := NewShareMode(&Config{ServerAddr: ln.Addr().String()}, "127.0.0.1:0", true, agent.SandboxConfig{}, "", "")
+	if err := s.client.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer s.client.Close()
+
+	err = mustFinishWithin(t, 5*time.Second, "ShareMode.register", func() error { return s.register() })
+	if err == nil || !strings.Contains(err.Error(), proto.ErrCodeClientIDConflict) || !strings.Contains(err.Error(), "0.0.6") {
+		t.Fatalf("期望带 CLIENT_ID_CONFLICT 与说明的错误，实际: %v", err)
 	}
 }

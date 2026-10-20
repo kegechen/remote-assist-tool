@@ -25,6 +25,17 @@ var (
 // 用 var 而非 const 只为让测试调到毫秒级；运行期不改。
 var helpDisconnectDebounce = 5 * time.Second
 
+// 同 ClientID 多进程互踢检测：shareConflictWindow 内顶掉「仍在线」的 share 超过
+// shareConflictMaxReplaces 次，即判定为两个进程在抢同一身份。
+const (
+	shareConflictWindow      = time.Minute
+	shareConflictMaxReplaces = 3
+)
+
+// shareConflictCooldown 判定冲突后的冷却期：期间一律拒绝顶替在线 share，每次被拒的
+// 尝试都会顺延。在线 share 真正断开（Share==nil）后不再检查，后来者可直接接管。
+var shareConflictCooldown = 10 * time.Minute
+
 // Conn 连接接口
 type Conn interface {
 	io.ReadWriteCloser
@@ -84,6 +95,10 @@ type TunnelSession struct {
 	// Help 断连去抖
 	helpDisconnectTimer *time.Timer // Help 断连延迟计时器
 	pendingHelpID       string      // 待断连的 Help ID
+
+	// 同 ClientID 多进程互踢检测（见 ReuseSessionByClientID）
+	liveReplaces  []time.Time // 窗口内顶掉在线 share 的时刻，最多保留 shareConflictMaxReplaces+1 个
+	conflictUntil time.Time   // 非零且未过期 = 处于冲突冷却期
 }
 
 // SessionManager 会话管理器
@@ -229,6 +244,13 @@ type ReuseSessionResult struct {
 	ExpiresAt time.Time
 	OldShare  *ClientConn
 	OldHelp   *ClientConn
+
+	// Conflict 为 true 时（此时 ok=false）表示同 ClientID 的另一个进程正在线且两边在
+	// 互踢：会话未做任何改动，调用方应拒绝新来者，且【不得】另建会话。
+	// OnlineVersion/OnlineHost 是在线那个 share 的快照，用于提示用户是哪个进程。
+	Conflict      bool
+	OnlineVersion string
+	OnlineHost    string
 }
 
 // ReuseSessionByClientID 原子查询并复用会话。调用方只能使用返回快照，不能持有内部 session 指针。
@@ -244,8 +266,29 @@ func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *Clie
 	if !exists {
 		return nil, false
 	}
-	if time.Now().After(session.ExpiresAt) || session.closed {
+	now := time.Now()
+	if now.After(session.ExpiresAt) || session.closed {
 		return nil, false
+	}
+
+	// 顶掉一个「仍在线」的 share：单进程重连时旧连接通常已断（relay 先收到 FIN、
+	// Share 已被置 nil），只有半开连接才会走到这里，短时间内反复发生基本只可能是两个
+	// 进程（如旧版 share 没退出又起了新版）在抢同一 ClientID——彼此顶掉、立刻重连，
+	// 形成无退避的建连风暴，足以触发 fail2ban 封掉整个出口 IP。
+	// 识别后进入冷却期：保留在线的那个，拒绝后来者。被拒者的 register 失败会走客户端
+	// 的指数退避（旧版客户端同样如此），风暴随之平息。
+	if old := session.Share; old != nil && old != newShare {
+		if now.Before(session.conflictUntil) {
+			session.conflictUntil = now.Add(shareConflictCooldown)
+			return conflictResult(session), false
+		}
+		session.liveReplaces = recordLiveReplace(session.liveReplaces, now)
+		if len(session.liveReplaces) > shareConflictMaxReplaces {
+			session.liveReplaces = nil
+			session.conflictUntil = now.Add(shareConflictCooldown)
+			log.Printf("Share client_id conflict detected in session %s: online share %s (version: %s) kept, newcomer rejected", session.ID, old.ID, old.Version)
+			return conflictResult(session), false
+		}
 	}
 
 	result := &ReuseSessionResult{
@@ -282,6 +325,32 @@ func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *Clie
 	sm.byConnID[newShare.ID] = session
 
 	return result, true
+}
+
+func conflictResult(session *TunnelSession) *ReuseSessionResult {
+	return &ReuseSessionResult{
+		SessionID:     session.ID,
+		Conflict:      true,
+		OnlineVersion: session.Share.Version,
+		OnlineHost:    session.Share.Host,
+	}
+}
+
+// recordLiveReplace 追加一次顶替记录，丢弃窗口外的旧记录，并把长度封顶在
+// shareConflictMaxReplaces+1，防止单个会话的记录无限增长。
+func recordLiveReplace(times []time.Time, now time.Time) []time.Time {
+	cutoff := now.Add(-shareConflictWindow)
+	kept := times[:0]
+	for _, t := range times {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	kept = append(kept, now)
+	if over := len(kept) - (shareConflictMaxReplaces + 1); over > 0 {
+		kept = kept[over:]
+	}
+	return kept
 }
 
 // MarkShareReady 在 RegisterResponse 写出后发布 Share。expectedShareID 防并发复用误发布旧连接。

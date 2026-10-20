@@ -398,6 +398,15 @@ func (s *ShareMode) register() error {
 		return err
 	}
 
+	if msg.Type == proto.MsgError {
+		var errMsg proto.ErrorMessage
+		_ = proto.DecodePayload(msg, &errMsg)
+		if errMsg.Code == proto.ErrCodeClientIDConflict {
+			// 不退出：另一个进程可能随后被停掉，退避重试即可自动接管。
+			s.printf("\n[!] %s\n    （例如旧版 share 仍在后台运行：结束它即可，本进程会自动接管）\n", errMsg.Message)
+		}
+		return fmt.Errorf("register rejected: %s - %s", errMsg.Code, errMsg.Message)
+	}
 	if msg.Type != proto.MsgRegisterResponse {
 		return fmt.Errorf("unexpected response: %s", msg.Type)
 	}

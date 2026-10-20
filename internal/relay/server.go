@@ -639,7 +639,17 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 
 	// 如果有 ClientID，尝试原子复用现有会话
 	if client.ClientID != "" {
-		if result, ok := s.sessions.ReuseSessionByClientID(client.ClientID, client); ok {
+		result, ok := s.sessions.ReuseSessionByClientID(client.ClientID, client)
+		if !ok && result != nil && result.Conflict {
+			// 不能落到下面「另建会话」：那会让两个进程各占一个协助码继续抢，还白占配额。
+			log.Printf("Share register rejected (client_id conflict) client_fp=%s (version: %s, host: %s); online share version: %s",
+				logger.CodeFingerprint(client.ClientID), client.Version, client.Host, result.OnlineVersion)
+			s.sendError(client, proto.ErrCodeClientIDConflict, fmt.Sprintf(
+				"本机已有另一个被协助端进程使用同一身份在线（版本 %s，%s），两者正在互相顶替；请先停止其中一个进程",
+				result.OnlineVersion, result.OnlineHost))
+			return true
+		}
+		if ok {
 			// 复用成功
 			code = result.Code
 			expiresAt = result.ExpiresAt
