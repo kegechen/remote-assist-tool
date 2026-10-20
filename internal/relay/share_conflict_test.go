@@ -178,7 +178,7 @@ func TestConflictWindowSlides(t *testing.T) {
 
 // TestConflictCooldownExpires 冷却期满且后来者不再重试后，恢复正常顶替语义。
 func TestConflictCooldownExpires(t *testing.T) {
-	shrinkConflictTiming(t, time.Hour, 40*time.Millisecond)
+	shrinkConflictTiming(t, time.Hour, 200*time.Millisecond)
 	srv, err := NewServer(&Config{CodeTTL: time.Hour, CodeLength: 10, DisableSourceIPLimits: true})
 	if err != nil {
 		t.Fatal(err)
@@ -192,16 +192,17 @@ func TestConflictCooldownExpires(t *testing.T) {
 	if errorCodeOf(t, resp) != proto.ErrCodeClientIDConflict {
 		t.Fatal("前置条件：应已判定冲突")
 	}
-	// 冷却期内被拒会顺延
-	time.Sleep(25 * time.Millisecond)
+	// 冷却期内被拒会顺延。两次等待合计超过一个冷却期，第二次仍被拒才说明确实顺延了；
+	// 每次等待离当前冷却截止仍留 80ms 余量，负载重的 CI 上也不会提前过期。
+	time.Sleep(120 * time.Millisecond)
 	if _, resp = replaceOnline(t, srv, online, "e-mid", clientID); errorCodeOf(t, resp) != proto.ErrCodeClientIDConflict {
 		t.Fatal("冷却期内应继续拒绝")
 	}
-	time.Sleep(25 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 	if _, resp = replaceOnline(t, srv, online, "e-mid2", clientID); errorCodeOf(t, resp) != proto.ErrCodeClientIDConflict {
 		t.Fatal("被拒尝试应顺延冷却期")
 	}
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	if _, resp = replaceOnline(t, srv, online, "e-after", clientID); resp.Type != proto.MsgRegisterResponse {
 		t.Fatalf("冷却期满后应恢复顶替: code=%s", errorCodeOf(t, resp))
 	}
