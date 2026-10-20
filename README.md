@@ -211,7 +211,7 @@ MCP server 名建议用 `remote-debug`。
 > 尚未到达 `remote` CLI。不要据此判断协助码失效或 relay 故障；先重启受影响的 agent
 > 进程（Claude Code、Codex 等），再用同一码重试。旧 stdio 句柄一旦被宿主取消，反复调用 `connect`
 > 无法恢复。详细证据与排查步骤见 [`MCP_SETUP.md`](MCP_SETUP.md#4-排查-transport-closed)
-> 和 [`remote-debug` MCP 接入参考](docs/remote-debug-MCP接入参考.md#7-排错速查)。
+> 和 [`remote-debug` MCP 接入参考](docs/remote-debug-MCP接入参考.md#6-错误码与排错)。
 
 ## 架构
 

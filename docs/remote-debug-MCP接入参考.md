@@ -1,142 +1,186 @@
-# `remote-debug` MCP Server 接入参考
+# `remote-debug` MCP 接入参考
 
-> **先澄清一个常见误解**：`remote-debug` **不是 skill、也不是 plugin，而是一个 MCP Server**。
-> 它由本地的 `remote help --mcp-stdio` 进程提供，通过 stdio 跟 MCP 客户端通信——Claude Code、Codex、豆包等
-> 支持 MCP 的 AI agent 都可以接入。
-> 以 Claude Code 为例，你在 `.mcp.json` 里给它起的名字（`mcpServers.remote-debug`）就是它在 `/mcp` 里显示的名字。
->
-> 想要 `/remote-debug <code>` 这种 slash 命令式的一键体验，可以在支持 skill / slash 命令的客户端（如 Claude Code）里**另外**写一个 skill 去封装它——
-> 但底层能力来自这个 MCP server，本文档讲的就是这一层。
+`remote-debug` 是一个 **stdio MCP Server**（不是 skill / plugin），由 `remote-assist-cli help --mcp-stdio`
+提供。任何支持 MCP 的 AI agent（Claude Code、Codex、Cursor 等）接入后，就能在远端机器上
+执行命令、读写文件、看进程、翻日志。
 
-本文是接入速查表；面向「为什么用、怎么宣传」的整体介绍见 [`远程调试工具分享.md`](远程调试工具分享.md)。
+```
+AI agent ──MCP stdio──▶ remote-assist-cli help --mcp-stdio ──TLS / P2P──▶ remote-assist-cli share（远端）
+```
 
 ---
 
-## 1. 它是什么 / 怎么跑起来的
+## 1. 安装
+
+从 [GitHub Releases](https://github.com/kegechen/remote-assist-tool/releases/latest) 下载对应平台的客户端：
 
 ```
-AI agent（MCP 客户端，如 Claude Code / Codex）
-   │  MCP over stdio
-   ▼
-remote help --mcp-stdio   ← 这就是 "remote-debug" MCP server（本地进程）
-   │  TLS 隧道 / P2P / standalone loopback
-   ▼
-remote share              ← 远端被调试机器（提供协助码 + 沙箱）
+remote-assist-cli-<os>-<arch>[.exe]
+                  │     └─ amd64 | arm64
+                  └─ windows | linux | darwin
 ```
 
-- MCP server = 本地 `remote help --mcp-stdio`。
-- 它向 AI agent 暴露 **12 个工具**：`connect` + 9 个作用于远端的真实工具 + `upload_file` / `download_file` 两个文件传输工具（在 help 端循环调用 `write_file` / `read_file` 实现）。
-- 启动时**不连任何远端**；直到 agent 调用 `connect(code)` 才完成配对。
+- `remote-assist-cli`：客户端，**两端用同一个文件**——远端跑 `share`，本地跑 `help`。
+- 同一 Release 里的 `remote-assist-relay-*` 是中转服务器，只有自建 relay 才需要；`remote-assist-webui-*` 是浏览器控制台，它在后台拉起 `remote-assist-cli help --mcp-stdio`，用同一套 MCP 工具，只是改由人在网页上操作，接入 AI agent 不需要它。
+
+也可以用一键脚本（Linux、macOS，或 Windows 的 Git Bash / MSYS2 / Cygwin）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | sh
+```
+
+脚本会自动识别系统和架构，下载对应文件并校验 `SHA256SUMS`，然后：
+
+- 改名为 `remote`（Windows 为 `remote.exe`），Linux / macOS 自动加可执行权限；
+- 默认装到 `~/.local/bin`（可用环境变量 `REMOTE_INSTALL_DIR` 指定目录）；**不会自动加进 PATH**，没加的话 MCP 配置里请写绝对路径。
 
 ---
 
-## 2. 配置 `.mcp.json`（bootstrap 模式，推荐）
+## 2. 配置 MCP Server
 
-以 Claude Code 为例，写在项目根 `.mcp.json` 或 `~/.claude/mcp.json`：
+最简配置只需要两个参数，**不要写 `--code`、`--server`**——协助码和 relay 地址都在每次会话里通过 `connect` 传入：
 
-```jsonc
+### Claude Code（项目根 `.mcp.json` 或 `~/.claude.json`）
+
+```json
 {
   "mcpServers": {
     "remote-debug": {
-      "command": "D:\\path\\to\\remote-windows-amd64.exe",
-      "args": ["help", "--server", "relay.example.com:8443", "--mcp-stdio", "--insecure"]
+      "command": "D:\\tools\\remote-assist-cli-windows-amd64.exe",
+      "args": ["help", "--mcp-stdio"]
     }
   }
 }
 ```
 
-| 要点 | 说明 |
+或一条命令：`claude mcp add --scope user remote-debug -- <二进制路径> help --mcp-stdio`
+
+### Codex（`~/.codex/config.toml`）
+
+```toml
+[mcp_servers.remote-debug]
+command = "/usr/local/bin/remote-assist-cli-linux-amd64"
+args = ["help", "--mcp-stdio"]
+```
+
+或一条命令：`codex mcp add remote-debug -- <二进制路径> help --mcp-stdio`
+
+### 其他客户端
+
+Cursor、Trae、Cline 等大多沿用与 Claude Code 相同的 `mcpServers` JSON 结构，只是文件位置不同；
+核心永远是：**command = 二进制路径，args = `["help", "--mcp-stdio"]`**。
+
+> 用 `install.sh` 装过且安装目录已在 PATH 中，`command` 直接写 `remote` 即可。改完配置需重启客户端（或其 MCP 连接）生效。
+
+---
+
+## 3. 连接流程
+
+1. **远端**直接运行（或双击）`remote-assist-cli`，得到协助码（如 `ABCD-EFGHIJ`，默认 30 分钟有效），整段协助信息已复制到剪贴板。
+   - 不带任何参数时默认就是 `share`，连默认公共 relay；
+   - 要带参数（如 `--server`、`--standalone`、`--root`）就必须写出子命令：`remote-assist-cli share --server relay.example.com:8443`；
+   - 想双击也连自建 relay，可设置环境变量 `REMOTE_RELAY_SERVER=host:8443`；
+   - 同一台机器默认只能运行一个 share，再启动会提示「已有 share 正在运行」；确实要再开一个，用 `remote-assist-cli share --new-instance`，它会生成一个独立的新协助码。
+2. **本地**把这段信息粘贴给 AI agent，或者说「协助码 ABCD-EFGHIJ，连上去」。
+3. agent 调用 `connect`，成功后即可使用其余工具。确认返回的 `peer_host` 与分享信息中的「本机标识」一致。
+4. 码过期、换机器、隧道断开：远端重跑 `share`，把新码再说一次即可，**不用重启 agent**。
+
+`connect` 的几种写法：
+
+| 场景 | 调用 |
 |---|---|
-| **不写 `--code`** | bootstrap 模式：协助码每次会话由 `connect` 工具临时提供，换机器/换会话**不用重启 AI agent** |
-| `--server` | 默认 relay 地址；可被 `connect(server=...)` 临时覆盖（standalone/LAN 场景） |
-| `--insecure` | 自签名证书时跳过 TLS 校验；正式 CA 证书可去掉 |
-| `--plain` | 仅当 relay 跑在明文模式时才用（如局域网）；公网请用 TLS |
-
-> **旧写法（写死协助码）** 仍支持：args 里加 `"--code", "ABCD-EFGHIJ"`，跳过 bootstrap，启动即连。
-> 缺点是换码必须改配置 + 重启 MCP 客户端，所以日常推荐 bootstrap。
-
-其他支持 stdio MCP server 的 agent（如 Codex、豆包等）：按各自的配置方式，把命令 `remote`、参数
-`help --mcp-stdio`（可带 `--server host:port` 等上表参数）配成一个名为 `remote-debug` 的 MCP server 即可。
+| 默认公共 relay | `connect(code="ABCD-EFGHIJ")` |
+| 自建 relay / LAN standalone | `connect(code="ABCD-EFGHIJ", server="192.168.1.50:8443")`（只写 `host:port`，不能带 `http://`） |
+| 对端是 0.0.x 旧版且用户同意降级 | 加 `min_proto="1"`（关闭防重放等保护，仅限可信网络） |
 
 ---
 
-## 3. 连接流程（一次会话）
+## 4. 网络模式与安全取舍
 
-1. **远端**跑 `remote share`，拿到协助码（如 `ABCD-EFGHIJ`，30 分钟有效）。
-2. **本地**对你的 AI 助手说一句话：
-   - 公网/默认 relay：`协助码 ABCD-EFGHIJ，连上去`
-   - standalone/LAN：`协助码 ABCD-EFGHIJ 在 192.168.1.50:8443`
-3. AI agent 调 `connect(...)` 完成握手，之后远端工具和文件传输都可以直接用。
-4. 协助码过期/换机器：远端重跑 `share`，再说一句新码即可（无需重启）。
-
----
-
-## 4. 工具清单（参数以实现 `internal/mcp/schema.go` 为准）
-
-> ⚠️ **v1 现状**：`exec` **不支持流式**（执行完一次性返回）；`tail_log` **不支持 follow**（只读末尾 N 行）。设计稿里提过的 stream/follow 尚未落地，文档以实际实现为准。
-
-| 工具 | 必填 | 可选 | 说明 |
+| 模式 | 怎么用 | 适用场景 | 注意 |
 |---|---|---|---|
-| `connect` | `code` | `server` | 配对，必须**最先调用**；未连接时其他工具返回 `not_connected`。`server` 可临时覆盖 relay 地址（standalone/LAN） |
-| `exec` | `argv` (string[]) | `cwd`, `timeout_ms` | 走 argv **不过 shell**；要 shell 展开得显式 `exec("bash",["-c","..."])`，且受 deny-exec 限制 |
-| `read_file` | `path` | `offset`, `length` | 单次最多 **1 MiB**；用 `offset` 翻页直到 `eof=true` |
-| `write_file` | `path`, `content` | `append` | `content` 为 **base64** 编码；`append=true` 追加 |
-| `list_dir` | `path` | `recursive`, `glob` | 列目录 |
-| `stat` | `path` | - | 查路径元信息（类型/大小/mtime/mode） |
-| `glob` | `pattern` | `root` | 按 glob 找文件 |
-| `grep` | `pattern` | `root`, `glob`, `ignore_case` | 远端正则搜索 |
-| `process_list` | - | `filter` | 远端进程清单 |
-| `tail_log` | `path` | `lines` | 读日志末尾 N 行（默认 **100**） |
+| **默认公共 relay** | 什么都不配 | 临时试用、非敏感环境 | 地址 `23.95.78.14:8443`，部署在**海外**，部分网络会慢或连不上。relay 是可信边界：它生成协助码、能推导出工具通道的会话密钥 |
+| **自建 relay** | 部署 `remote-assist-relay`，`connect(server="host:8443")` | 公司内网、敏感环境（推荐） | 信任边界在自己手里。用正式 CA 证书时，可在 args 加 `--insecure=false` 或 `--ca <文件>` 开启证书校验 |
+| **LAN standalone** | 远端 `share --standalone`，`connect(server="远端IP:8443")` | 两端在同一局域网 | 不经任何第三方；share 进程内嵌 relay，使用自签证书，**必须保持默认的跳过校验**（证书只覆盖 localhost） |
 
-**沙箱默认拒绝**（由远端 `share` 的参数控制，见下）：
-- 远端传了 `--root` 且路径超出其子树 → `path_outside_root`（默认不传则无此限制）
-- `exec` 的 `argv[0]` 命中 `--deny-exec`（默认 `rm,shutdown,reboot,mkfs,dd`），或设了 `--allow-exec` 白名单却不在其中 → `exec_denied`
+几个开关的判断标准：
+
+- **`--insecure`（默认 true）**：跳过证书的 CA 校验，是为了让内置 / standalone 的自签证书开箱即用。首次连接会记录证书指纹，之后指纹变化会被拒绝（relay 正当换证书时加 `--trust-new-cert`）。工具内容另有 AEAD 加密，所以默认值对公共 relay 和 standalone 都可接受；自建且有正式证书时建议关掉。
+- **`--plain`**：relay 以明文模式运行时才需要。协助码会明文过网，路径上的旁观者拿到它就能解开工具通道——**只用于开发调试或物理隔离网络**。
+- **`--no-auth`**：不需要协助码，网络里任何能连到 relay 的设备都能控制远端——**只用于完全可信的私网**。
 
 ---
 
-## 5. 远端 `share` 侧的相关开关（决定工具能做什么）
+## 5. 工具清单
+
+> `exec` 不支持流式（执行完一次性返回）；`tail_log` 不支持 follow（只读末尾 N 行）。
+
+| 工具 | 必填 | 常用可选 | 说明 |
+|---|---|---|---|
+| `connect` | `code` | `server`, `no_auth`, `min_proto` | 配对，必须**最先调用** |
+| `exec` | `argv` | `cwd`, `timeout_ms`, `max_output_bytes` | **不经过 shell**：管道、重定向、`cd`/`dir` 等内建命令要显式包一层 `["sh","-c","..."]` 或 `["powershell","-NoProfile","-Command","..."]`；输出默认每流 32 KiB，保留首尾 |
+| `read_file` | `path` | `offset`, `length`, `as_text` | 默认 64 KiB/次，最大 1 MiB；`offset += bytes_len` 循环到 `eof=true` |
+| `write_file` | `path`, `content` | `create`, `append` | 写小段内容（base64）；新建文件需 `create=true`，传本地文件用 `upload_file` |
+| `upload_file` | `local_path`, `remote_path` | `offset` | 本地 → 远端，512 KiB 分块，自动重试，可断点续传 |
+| `download_file` | `remote_path`, `local_path` | `offset` | 远端 → 本地，适合 dump、日志包 |
+| `list_dir` | `path` | `recursive`, `glob`, `max_entries` | 默认最多 200 项 |
+| `stat` | `path` | - | 类型 / 大小 / mtime / mode |
+| `glob` | `pattern` | `root` | 按通配符找文件 |
+| `grep` | `pattern` | `root`, `glob`, `ignore_case`, `max_matches` | 正则搜索，默认最多 1000 条 |
+| `process_list` | - | `filter`, `max_count` | 默认最多 50 个 |
+| `tail_log` | `path` | `lines` | 默认 100 行，上限 64 KiB（保留最新） |
+
+**远端 `share` 的护栏**（决定上述工具能做什么）：
 
 | 参数 | 默认 | 作用 |
 |---|---|---|
-| `--root <dir>` | 空 = 不限制 | 可选：把文件工具限制在该子树，越界拒绝。不约束 exec，只防手滑 |
-| `--allow-exec a,b` | 空 | exec 命令白名单（basename） |
-| `--deny-exec ...` | `rm,shutdown,reboot,mkfs,dd` | exec 命令黑名单 |
-| `--standalone` | false | 内嵌 relay，局域网零服务器（内嵌 relay 走 TLS 自签证书，忽略 `--plain`；relay 就在 share 进程内，没有第三方中转） |
-| `--elevate` | false | Windows 启动时 UAC 提权 |
-| `--unsafe-exec` | false | **关闭 exec 黑/白名单**，启动强制 5 秒红色倒计时确认；不影响 `--root` |
+| `--deny-exec` | `rm,shutdown,reboot,mkfs,dd` | exec 黑名单（按 basename） |
+| `--allow-exec` | 空 | exec 白名单，设置后只允许名单内命令 |
+| `--root <dir>` | 空 = 不限制 | 把文件工具限制在该子树内；防手滑，不约束 exec，不是安全边界 |
+| `--unsafe-exec` | false | 关闭黑/白名单，启动时有 5 秒确认倒计时 |
+| `--elevate` | false | Windows 下以 UAC 提权启动 |
 
 ---
 
-## 6. 错误码（统一返回给 MCP 客户端）
+## 6. 错误码与排错
 
-```
-path_outside_root   exec_denied        timeout         tunnel_lost
-file_not_found      permission_denied  cancelled       remote_panic
-deadline_exceeded   too_large          session_expired version_mismatch
-not_connected       （未先调用 connect 时其他工具返回）
-```
-
----
-
-## 7. 排错速查
-
-| 现象 | 多半原因 / 处理 |
+| 错误码 / 现象 | 含义与处理 |
 |---|---|
-| 工具都报 `not_connected` | 还没调 `connect`，或上次会话已断；说一句「协助码 XXXX 连上去」重连 |
-| `connect` 直接报 `Transport closed`，且没有连接结果 | MCP 宿主持有的 stdio transport 已关闭，请求通常未到达 CLI。检查报错客户端自身的 MCP 子进程和宿主日志；若工具调用前已有 `rmcp::service ... task cancelled`，重启受影响的 MCP 客户端（宿主）进程后用同一码重试。不要用其他客户端下仍存活的同名进程判断当前句柄健康 |
-| `connect` 报 `join failed` / `relay connect failed` | relay 地址/端口不对，或 relay 没起；standalone 场景确认带了 `server=LAN_IP:port` |
-| `path_outside_root` | 远端显式传了 `--root`，目标不在其子树内（默认不传 = 不限制，不会遇到）；让远端换更大的 `--root` 或直接不传 |
-| `exec_denied` | 命中 deny-exec 黑名单；确属需要可让远端调整 `--allow-exec`/`--deny-exec` |
-| 连一会就 `tunnel_lost` | 网络中断导致隧道断开（不会自动重连）；重新说一句「协助码 XXXX 连上去」重新握手，码已过期则远端重跑 share |
-| 协助码失效 | 默认 30 分钟 TTL，过期重新生成 |
-
-`Transport closed` 与 CLI 返回的 `join failed` / `relay connect failed` 不同：前者可能发生在
-JSON-RPC 请求进入 MCP server 之前。直接运行 `remote help --code <协助码>` 成功，只能证明
-relay Join 可用，不能证明报错会话的 MCP stdio 句柄仍然存活。可用全新客户端进程执行
-`initialize -> connect -> ping -> process_list` 作为对照；若该路径成功，应恢复或重启宿主，
-而不是继续修改协助码或远端配置。
+| `not_connected` | 还没调 `connect`，或上次会话已断开；重新提供协助码 |
+| `tunnel_lost` | 网络中断，隧道不会自动重连；重新 `connect`，码已过期就让远端重跑 `share` |
+| `exec_denied` | 命中黑名单或不在白名单；让远端调整 `--allow-exec` / `--deny-exec` |
+| `path_outside_root` | 远端设了 `--root` 且目标在子树外 |
+| `file_not_found` / `permission_denied` | 远端路径不存在 / 无权限 |
+| `deadline_exceeded` / `cancelled` | 工具执行超时 / 被取消；`exec` 可调大 `timeout_ms` |
+| `server_busy` | 远端 share 同时收到的请求太多，稍后重试即可 |
+| `unknown_tool` | 远端 share 版本较旧，没有这个工具；升级远端的 `remote-assist-cli` |
+| `unauthenticated` / `decrypt_failed` / `replayed` | 工具通道的加密校验失败（会话密钥不一致、请求被篡改或重放）；重新 `connect`，仍失败就让远端重跑 `share` |
+| `remote_panic` / `internal_error` | 远端工具异常，带上错误信息反馈 |
+| `join failed` / `relay connect failed` | relay 地址或端口不对、relay 未运行；standalone 场景确认传了 `server=LAN_IP:8443` |
+| `connect` 只报 `Transport closed`，无任何连接结果 | 请求没到达 CLI，是 MCP 客户端的 stdio 连接已失效，与协助码和 relay 无关。**重启 AI agent 客户端**后用同一码重试；详细排查见 [`MCP_SETUP.md`](../MCP_SETUP.md#4-排查-transport-closed) |
 
 ---
 
-> 一句话记忆：**`remote-debug` 是一个 MCP server（`remote help --mcp-stdio`），不是 skill。**
-> 远端 `remote share`，本地对你的 AI 助手说「协助码 XXXX 连上去」，它就能 exec / 读写文件 / 看进程 / 翻日志地帮你定位远端问题。
+## 7. 局域网直连（不经任何 relay）
+
+两台机器在同一局域网、连不上公共 relay 或不希望流量出网时使用：
+
+1. **远端**运行：
+
+   ```bash
+   remote-assist-cli share --standalone
+   ```
+
+   它会在本机启动内嵌 relay（默认监听 `:8443`，可用 `--standalone-listen :9443` 换端口），并打印协助码和本机局域网地址，例如 `192.168.1.50:8443`。远端防火墙需放行该 TCP 端口。
+
+2. **本地**对 AI agent 说「协助码 ABCD-EFGHIJ 在 192.168.1.50:8443」，agent 会调用：
+
+   ```
+   connect(code="ABCD-EFGHIJ", server="192.168.1.50:8443")
+   ```
+
+MCP 配置不用改，仍是 `["help", "--mcp-stdio"]`。内嵌 relay 使用自签证书，保持默认设置即可，不要加 `--insecure=false`。
+
+---
+
+更完整的产品介绍与使用场景见 [`远程调试工具指南.md`](远程调试工具指南.md)。
