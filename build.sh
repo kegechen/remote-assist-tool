@@ -13,7 +13,9 @@ echo "Version: ${VERSION}"
 #   0.0.6              -> 0.0.6.0
 #   0.0.6-15-gbe27eca  -> 0.0.6.15   （第 4 段 = 距 tag 的提交数）
 #   0.0.6-dirty        -> 0.0.6.0    （dirty 不是数字，按 0 处理）
+#   v1.1.0             -> 1.1.0.0    （从 v1.0.1 起 tag 带 v 前缀，先去掉，否则主版本被当成非数字归 0）
 VNUM=${VERSION%%-*}
+VNUM=${VNUM#v}
 VBUILD=$(echo "${VERSION}" | cut -s -d- -f2)
 case "${VBUILD}" in ''|*[!0-9]*) VBUILD=0 ;; esac
 VMAJ=$(echo "${VNUM}" | cut -d. -f1)

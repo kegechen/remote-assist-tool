@@ -27,6 +27,8 @@ for /f "tokens=1,2 delims=-" %%a in ("%VERSION%") do (
     set VNUM=%%a
     set VB=%%b
 )
+rem   v1.1.0            -> 1.1.0.0    (tags carry a "v" prefix since v1.0.1; strip it or major becomes 0)
+if /i "!VNUM:~0,1!"=="v" set VNUM=!VNUM:~1!
 echo !VB!| findstr /r "^[0-9][0-9]*$" >nul && set VBUILD=!VB!
 for /f "tokens=1,2,3 delims=." %%a in ("!VNUM!") do (
     echo %%a| findstr /r "^[0-9][0-9]*$" >nul && set VMAJ=%%a
