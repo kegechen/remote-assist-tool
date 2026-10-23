@@ -176,8 +176,8 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.BoolVar(&opts.noAuth, "no-auth", false, "Use fixed code (no assist code exchange needed). DANGER: trusted private LANs only")
 	fs.BoolVar(&opts.showVersion, "version", false, "Show version information")
 	fs.StringVar(&opts.latestVersion, "latest-version", "", "Latest client version announced to clients for upgrade hints (empty: this relay's own version; \"none\": disable)")
-	fs.StringVar(&opts.downloadURL, "download-url", opts.downloadURL, "Client download URL template for upgrade hints; {os}/{arch}/{ext} are expanded per client platform")
-	fs.StringVar(&opts.releasePage, "release-page", opts.releasePage, "Fallback download page when a client's platform is unknown")
+	fs.StringVar(&opts.downloadURL, "download-url", opts.downloadURL, "Client download URL template (https) for upgrade hints; {version}/{os}/{arch}/{ext} are expanded per client platform")
+	fs.StringVar(&opts.releasePage, "release-page", opts.releasePage, "Fallback download page (https; {version} expanded) when a client's platform is unknown or has no released asset")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
 		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
