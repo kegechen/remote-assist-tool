@@ -41,7 +41,7 @@
 
 ### P1-2：Join 失败仍会泄露会话状态，限流拒绝是否计入连接失败次数未定义
 
-风险评估 `docs/SECURITY_RISK_ASSESSMENT.md:198-210` 要求单连接失败达到阈值后关闭，且失败响应不泄露不必要的会话状态。第五版第 114-120 行定义了三层限制，但没有修改当前普通 Join 失败响应，也没有定义各失败分支如何统一累计 `joinFailures`。
+风险评估 `docs/security/SECURITY_RISK_ASSESSMENT.md:198-210` 要求单连接失败达到阈值后关闭，且失败响应不泄露不必要的会话状态。第五版第 114-120 行定义了三层限制，但没有修改当前普通 Join 失败响应，也没有定义各失败分支如何统一累计 `joinFailures`。
 
 当前 `internal/relay/server.go:366-374` 直接把 `JoinSession` 的 `err.Error()` 返回客户端，攻击者可以区分：
 

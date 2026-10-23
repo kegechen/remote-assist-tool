@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.21+, JSON 顶层 proto，`golang.org/x/crypto/chacha20poly1305` (AEAD), `golang.org/x/crypto/hkdf` (KDF), `github.com/fsnotify/fsnotify` (tail_log follow)，最小自实现 MCP JSON-RPC subset（initialize / tools/list / tools/call / notifications/cancelled），现有 `internal/proto` `internal/client` `internal/logger/audit`。
 
-**Spec：** `docs/superpowers/specs/2026-05-13-claude-remote-debug-design.md`
+**Spec：** `docs/design/specs/2026-05-13-claude-remote-debug-design.md`
 
 ---
 

@@ -4,7 +4,7 @@
 
 ## 构建产物
 
-在仓库根目录运行 `build.bat`（Windows）或 `build.sh`（Linux/macOS），产物位于 `bin/`：
+运行 `scripts\build.bat`（Windows）或 `scripts/build.sh`（Linux/macOS），产物位于 `bin/`：
 
 - `remote-assist-relay-<os>-<arch>`：relay 服务端；
 - `remote-assist-cli-<os>-<arch>`：share/help 客户端；

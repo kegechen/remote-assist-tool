@@ -384,7 +384,7 @@ nmap -sU -p 3478 relay.example.com
 | XChaCha20-Poly1305 | `internal/proto/aead.go` |
 | Share 文件/命令护栏 | `internal/agent/sandbox.go` |
 | 限流运维说明 | `docs/RELAY_LIMITS.md` |
-| Relay 信任模型决策 | `docs/SECURITY_SR005_TRUST_MODEL.md` |
+| Relay 信任模型决策 | `docs/security/SECURITY_SR005_TRUST_MODEL.md` |
 
 ---
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.21+，标准库，零外部依赖。
 
-**Design Doc:** `docs/plans/2026-03-06-p2p-direct-connection-design.md`
+**Design Doc:** `docs/design/plans/2026-03-06-p2p-direct-connection-design.md`
 
 ---
 

@@ -4,7 +4,7 @@
 // 一律看不见它。语法错、拿路径当 CSS 选择器、base64 编码写错——这些只有在浏览器里
 // 点到才会暴露。这个脚本把最容易静默回归的几条钉住。
 //
-// 无 node 时 run_tests 会跳过本检查，因此不给这个纯 Go 项目引入硬依赖。
+// 无 node 时 scripts/test.* 会跳过本检查，因此不给这个纯 Go 项目引入硬依赖。
 //
 // 跑法：node tests/frontend/check_gui_assets.js
 

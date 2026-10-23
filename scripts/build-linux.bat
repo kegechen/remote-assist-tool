@@ -1,6 +1,8 @@
 @echo off
 setlocal
-rem Usage: build-linux.bat [amd64|arm64]  (defaults to amd64)
+rem Run from the repo root no matter where this is invoked from; setlocal restores the caller's cwd.
+cd /d "%~dp0.."
+rem Usage: scripts\build-linux.bat [amd64|arm64]  (defaults to amd64)
 rem NOTE: keep comments ASCII-only here - cmd.exe reads .bat in the OEM codepage,
 rem so UTF-8 Chinese misaligns and can split a comment into commands. See build.bat.
 set GOARCH=%1

@@ -49,7 +49,7 @@ key = HKDF-SHA256(
 
 ### 3.2 改造范围
 
-- **文档与产品描述修正**：删除或修正一切"Relay 被攻破也无法解密/伪造"的表述，改为"Relay 是可信边界，Relay 失陷可读取和伪造活动会话工具数据"。更新威胁模型（`docs/SECURITY_RISK_ASSESSMENT.md` 4.3 信任决策）。
+- **文档与产品描述修正**：删除或修正一切"Relay 被攻破也无法解密/伪造"的表述，改为"Relay 是可信边界，Relay 失陷可读取和伪造活动会话工具数据"。更新威胁模型（`docs/security/SECURITY_RISK_ASSESSMENT.md` 4.3 信任决策）。
 - **独立主机部署**：使用独立、无其他业务数据的 Relay 云主机（与 SR-007 混部整改协同）。
 - **主机加固**：严格 systemd 沙箱（`NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome`、`PrivateTmp`、能力/设备/资源边界）、最小权限服务账号、及时补丁、集中审计与监控。
 - **风险接受流程**：由安全负责人对"Relay 失陷影响活动会话"完成书面风险接受。

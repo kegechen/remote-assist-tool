@@ -2,7 +2,7 @@
 
 日期：2026-07-23
 
-复核范围：`docs/SECURITY_ADVERSARIAL_REVIEW.md` 列出的 5 个主要发现和 3 个低危建议，基于当前工作区代码逐项验证。
+复核范围：`docs/security/SECURITY_ADVERSARIAL_REVIEW.md` 列出的 5 个主要发现和 3 个低危建议，基于当前工作区代码逐项验证。
 
 ## 结论
 

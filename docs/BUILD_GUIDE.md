@@ -8,19 +8,19 @@
 
 ## 快速构建
 
-在仓库根目录运行脚本：
+构建脚本在 `scripts/` 下，从任何目录调用都会自动切到仓库根目录执行：
 
 ### Windows
 
 ```cmd
-build.bat
+scripts\build.bat
 ```
 
 ### Linux / macOS
 
 ```bash
-chmod +x build.sh
-./build.sh
+chmod +x scripts/build.sh
+./scripts/build.sh
 ```
 
 脚本会构建 relay、CLI 和 web UI。主要产物为：

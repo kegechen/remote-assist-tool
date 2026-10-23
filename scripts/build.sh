@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 统一以仓库根目录为工作目录，从任何位置调用都一样（bin/、./internal/... 都按根目录解析）
+cd "$(dirname "$0")/.." || exit 1
+
 echo "Building Remote Assist Tool..."
 
 mkdir -p bin

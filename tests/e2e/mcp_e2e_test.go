@@ -270,7 +270,7 @@ func binDir(repo string) string {
 	return filepath.Join(repo, "bin")
 }
 
-// 产物名带 os-arch 后缀（见 build.sh / build.bat），这里照着拼——写死 "remote.exe"
+// 产物名带 os-arch 后缀（见 scripts/build.sh / scripts/build.bat），这里照着拼——写死 "remote.exe"
 // 会让 e2e 在找不到文件时**静默 skip**，看起来像全绿，其实一条都没跑。
 func cliBin(repo string) string {
 	return filepath.Join(binDir(repo), "remote-assist-cli-"+runtime.GOOS+"-"+runtime.GOARCH+exeExt())

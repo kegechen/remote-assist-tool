@@ -1,4 +1,7 @@
 @echo off
+setlocal
+rem Run from the repo root no matter where this is invoked from; setlocal restores the caller's cwd.
+cd /d "%~dp0.."
 echo ==========================================
 echo Remote Assist Tool - Test Runner
 echo ==========================================

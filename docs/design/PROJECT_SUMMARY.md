@@ -46,8 +46,8 @@
 | `SECURITY_TEST.md` | 安全测试指南 |
 | `TEST_REPORT.md` | 测试报告模板 |
 | `PROJECT_SUMMARY.md` | 项目总结（本文件） |
-| `build.bat` / `build.sh` | 构建脚本 |
-| `run_tests.bat` / `run_tests.sh` | 测试脚本 |
+| `scripts/build.bat` / `scripts/build.sh` | 构建脚本 |
+| `scripts/test.bat` / `scripts/test.sh` | 测试脚本 |
 
 ## 项目结构
 
@@ -62,8 +62,7 @@ remote-assist-tool/
 ├── PROJECT_SUMMARY.md           # 项目总结
 ├── .gitignore
 ├── go.mod
-├── build.bat / build.sh
-├── run_tests.bat / run_tests.sh
+├── scripts/                     # 构建 / 测试脚本
 ├── cmd/
 │   ├── relay/
 │   │   └── main.go            # 服务器入口

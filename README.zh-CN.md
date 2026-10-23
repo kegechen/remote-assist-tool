@@ -55,11 +55,11 @@ sha256sum -c SHA256SUMS --ignore-missing   # macOS: shasum -a 256 -c SHA256SUMS 
 
 ```bash
 # Windows
-build.bat
+scripts\build.bat
 # Linux / macOS
-./build.sh
+./scripts/build.sh
 # 在 Windows 上交叉编译 Linux 产物
-build-linux.bat
+scripts\build-linux.bat
 ```
 
 产物都带平台后缀（`<组件>-<os>-<arch>`），一眼看得出这个二进制给谁跑，也不会跟 PATH 里
@@ -70,7 +70,7 @@ build-linux.bat
 | `bin/remote-assist-cli-windows-amd64.exe` | 客户端，share / help 两种角色，也是 MCP 入口 |
 | `bin/remote-assist-webui-windows-amd64.exe` | 浏览器控制台（会去同目录/`bin/` 找上面那个 cli） |
 | `bin/remote-assist-relay-windows-amd64.exe` | 中转服务器 |
-| `bin/remote-assist-{cli,relay}-linux-{amd64,arm64}` | `build-linux.bat` 交叉编译产出 |
+| `bin/remote-assist-{cli,relay}-linux-{amd64,arm64}` | `scripts/build-linux.bat` 交叉编译产出 |
 
 Windows 产物内嵌产品信息（右键属性可见产品名/描述/版本），由 `goversioninfo` 按
 `git describe` 生成。该工具已用 `tools.go` 钉进 `go.mod`：`go mod download` 一次之后
@@ -337,7 +337,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 - relay 链路 TLS（自签或受信 CA）；`--insecure` 控制是否校验。跳过校验时退化为 TOFU 指纹钉扎（`~/.remote_assist_known_hosts`），把中间人窗口从「永远」压到「仅首次连接」；回环地址不钉扎。
 - MCP 工具通道以协助码派生 session key（HKDF-SHA256）做 XChaCha20-Poly1305 AEAD：relay 之外的网络路径看不到、也改不了工具内容。
-- **relay 是可信边界，不是不可信的管道**。协助码由 relay 生成，握手双方的 nonce 也经它转发 —— 派生会话密钥的全部输入在 relay 侧都看得到。因此控制了 relay 进程的人可以自行推导密钥，解密、伪造活动会话的工具数据。AEAD 挡得住 relay 的普通转发逻辑误读误改，挡不住失陷的 relay。结论：**只用自己部署、自己信得过的 relay**；局域网用 `--standalone` 时 relay 就跑在 share 进程里，没有第三方。详见 [docs/SECURITY_SR005_TRUST_MODEL.md](docs/SECURITY_SR005_TRUST_MODEL.md)。
+- **relay 是可信边界，不是不可信的管道**。协助码由 relay 生成，握手双方的 nonce 也经它转发 —— 派生会话密钥的全部输入在 relay 侧都看得到。因此控制了 relay 进程的人可以自行推导密钥，解密、伪造活动会话的工具数据。AEAD 挡得住 relay 的普通转发逻辑误读误改，挡不住失陷的 relay。结论：**只用自己部署、自己信得过的 relay**；局域网用 `--standalone` 时 relay 就跑在 share 进程里，没有第三方。详见 [docs/security/SECURITY_SR005_TRUST_MODEL.md](docs/security/SECURITY_SR005_TRUST_MODEL.md)。
 - 工具通道协议 v2 在 AEAD 之上补了三件事（**与 v1 不兼容**，见下）：
   - **AAD 绑定明文字段**：`tool` / `id` / `deadline_ms`、响应的 `ok` / `error_code` / `error_msg`、流帧的 `seq` / `stream` 都是外层明文。它们进 AAD 之后，把一条捕获的密文改挂到别的工具（比如把 `read_file` 的参数挂到 `write_file`，让远端把文件截断成 0 字节）、改 ID、改超时、把成功翻成失败、把流帧重排或跨流投递，全部会解密失败。
   - **每条响应都要加封**（包括结果为空的错误响应），接收侧先验真再看 `ok`。否则中间人只要把一次成功的 `read_file` 的 `result` 清空，调用方就会拿到「空结果 + 成功」—— AI 会据此得出「这个文件是空的」，而它没有任何别的办法察觉。

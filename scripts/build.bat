@@ -1,5 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
+rem Run from the repo root no matter where this is invoked from; setlocal restores the caller's cwd.
+cd /d "%~dp0.."
 echo Building Remote Assist Tool...
 
 rem NOTE: keep this file's comments ASCII-only. cmd.exe reads .bat bytes in the OEM
