@@ -47,6 +47,17 @@ type RegisterRequest struct {
 type RegisterResponse struct {
 	Code      string `json:"code"`
 	ExpiresAt int64  `json:"expires_at"`
+	UpdateInfo
+}
+
+// UpdateInfo relay 下发的新版本软提示（旧 relay 不发、旧客户端忽略）。只用于提示，
+// 客户端与自身版本比较后决定是否打印，从不因此拒绝连接。
+type UpdateInfo struct {
+	LatestVersion string `json:"latest_version,omitempty"`
+	// DownloadURL 下载链接模板，支持 {os}/{arch}/{ext} 占位，由客户端按目标平台展开。
+	DownloadURL string `json:"download_url,omitempty"`
+	// ReleasePage 平台推断不出来时的兜底链接。
+	ReleasePage string `json:"release_page,omitempty"`
 }
 
 // JoinRequest 协助端加入请求
@@ -63,6 +74,7 @@ type JoinResponse struct {
 	Error       string `json:"error,omitempty"`
 	PeerVersion string `json:"peer_version,omitempty"`
 	PeerHost    string `json:"peer_host,omitempty"` // share 端身份串（同 RegisterRequest.Host；旧 relay 不发）
+	UpdateInfo
 }
 
 // TunnelData 隧道数据

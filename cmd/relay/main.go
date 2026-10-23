@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/remote-assist/tool/internal/crypto"
+	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/relay"
+	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/version"
 )
 
@@ -35,6 +37,9 @@ type relayOptions struct {
 	printLimits   bool
 	noAuth        bool
 	showVersion   bool
+	latestVersion string
+	downloadURL   string
+	releasePage   string
 }
 
 func main() {
@@ -93,6 +98,11 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		}
 	}
 
+	updateInfo, err := resolveUpdateInfo(opts)
+	if err != nil {
+		return err
+	}
+
 	cfg := &relay.Config{
 		ListenAddr:            opts.listenAddr,
 		TLSCertFile:           opts.certFile,
@@ -105,6 +115,7 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		NoAuth:                opts.noAuth,
 		DisableSourceIPLimits: !opts.trustSourceIP,
 		Limits:                limits,
+		Update:                updateInfo,
 	}
 
 	if opts.noAuth {
@@ -120,6 +131,11 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 
 	log.Printf("Relay server version: %s", version.Info())
+	if cfg.Update.LatestVersion != "" {
+		log.Printf("Update notice: latest client version %s, download %s", cfg.Update.LatestVersion, cfg.Update.DownloadURL)
+	} else {
+		log.Printf("Update notice: disabled")
+	}
 	if opts.plain {
 		log.Printf("WARNING: Running in plain mode (INSECURE - for development only)")
 	}
@@ -138,6 +154,8 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 		certsDir:      "./certs",
 		trustSourceIP: true,
 		limitsFile:    strings.TrimSpace(os.Getenv("REMOTE_RELAY_LIMITS_FILE")),
+		downloadURL:   update.DefaultDownloadURL,
+		releasePage:   update.DefaultReleasePage,
 	}
 
 	fs := flag.NewFlagSet("relay", flag.ContinueOnError)
@@ -157,6 +175,9 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.BoolVar(&opts.printLimits, "print-default-limits", false, "Print default rate-limit JSON and exit")
 	fs.BoolVar(&opts.noAuth, "no-auth", false, "Use fixed code (no assist code exchange needed). DANGER: trusted private LANs only")
 	fs.BoolVar(&opts.showVersion, "version", false, "Show version information")
+	fs.StringVar(&opts.latestVersion, "latest-version", "", "Latest client version announced to clients for upgrade hints (empty: this relay's own version; \"none\": disable)")
+	fs.StringVar(&opts.downloadURL, "download-url", opts.downloadURL, "Client download URL template for upgrade hints; {os}/{arch}/{ext} are expanded per client platform")
+	fs.StringVar(&opts.releasePage, "release-page", opts.releasePage, "Fallback download page when a client's platform is unknown")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
 		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
@@ -179,6 +200,36 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 		return relayOptions{}, fmt.Errorf("cert and key must be specified together")
 	}
 	return opts, nil
+}
+
+// resolveUpdateInfo 决定下发的新版本提示。未显式指定时用 relay 自身版本——relay 与客户端
+// 同仓同 tag 发布，relay 升级即代表有新客户端；自身不是正式 tag（dev、git describe
+// 带提交后缀、预发布、纯 commit 哈希）时不下发。显式给出的非法值直接报错，不静默关闭。
+// 只是软提示：客户端版本不低于它就什么都不显示，不会拒绝任何连接。
+func resolveUpdateInfo(opts relayOptions) (proto.UpdateInfo, error) {
+	latest := strings.TrimSpace(opts.latestVersion)
+	switch {
+	case strings.EqualFold(latest, "none"):
+		return proto.UpdateInfo{}, nil
+	case latest == "":
+		if !update.IsRelease(version.Version) {
+			return proto.UpdateInfo{}, nil
+		}
+		latest = version.Version
+	case !update.IsRelease(latest):
+		return proto.UpdateInfo{}, fmt.Errorf("latest-version %q must be a release version like v1.2.3 (or \"none\")", latest)
+	}
+	info := proto.UpdateInfo{
+		LatestVersion: latest,
+		DownloadURL:   strings.TrimSpace(opts.downloadURL),
+		ReleasePage:   strings.TrimSpace(opts.releasePage),
+	}
+	for name, u := range map[string]string{"download-url": info.DownloadURL, "release-page": info.ReleasePage} {
+		if !update.SafeURL(u) {
+			return proto.UpdateInfo{}, fmt.Errorf("%s %q must be an https URL without spaces or control characters", name, u)
+		}
+	}
+	return info, nil
 }
 
 func configureTLS(cfg *relay.Config, opts relayOptions) error {

@@ -253,6 +253,9 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--stun` | empty | STUN/UDP relay listen address; e.g. `:3478`, empty disables it |
 | `--trust-source-ip` | `true` | Whether the relay can see the real source IP from the TCP connection; set to `false` for SNAT backends |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON rate-limit configuration file; if unset, safe defaults are used |
+| `--latest-version` | relay's own version | Latest version announced to clients; older clients print an upgrade hint (hint only, never rejects). Must be a release tag like `v1.2.3`; a non-release relay build announces nothing. `none` disables |
+| `--download-url` | GitHub asset of that version | https URL template for the hint; `{version}`/`{os}`/`{arch}`/`{ext}` are expanded for the client's (or the shared peer's) platform. Verify links with `go test -tags network ./internal/update -run TestReleaseURLsExist` |
+| `--release-page` | GitHub release page of that version | Fallback link when the platform is unknown or has no released asset |
 | `--print-default-limits` | `false` | Print the complete default rate-limit JSON and exit |
 | `--no-auth` | `false` | Fixed-code mode without authentication, only for fully trusted private networks |
 | `--plain` | `false` | Non-TLS mode (development and testing only) |

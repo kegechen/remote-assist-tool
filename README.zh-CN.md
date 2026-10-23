@@ -254,6 +254,9 @@ MCP server 名建议用 `remote-debug`。
 | `--trust-source-ip` | `true` | Relay 是否能从 TCP 连接看到真实来源 IP；SNAT 后端设为 `false` |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON 限流配置文件；未设置则使用安全默认值 |
 | `--print-default-limits` | `false` | 输出完整默认限流 JSON 后退出 |
+| `--latest-version` | relay 自身版本 | 下发给客户端的最新版本号；客户端版本更低时打印升级提示（只提示，不拒绝连接）。必须是 `v1.2.3` 这样的正式 tag，非正式构建的 relay 不下发。`none` 关闭 |
+| `--download-url` | GitHub 该版本产物 | 升级提示里的 https 下载链接模板，`{version}`/`{os}`/`{arch}`/`{ext}` 由客户端按自身（或被协助端）平台展开。可用 `go test -tags network ./internal/update -run TestReleaseURLsExist` 实测链接 |
+| `--release-page` | GitHub 该版本 Release 页 | 平台未知或该平台无发布产物时的兜底链接 |
 | `--no-auth` | `false` | 固定码无鉴权模式，仅限完全可信私网 |
 | `--plain` | `false` | 非 TLS 模式（仅开发测试） |
 | `--gen-certs` | `false` | 生成自签证书后退出 |

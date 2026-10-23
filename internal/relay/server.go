@@ -121,6 +121,8 @@ type Config struct {
 	// 仅用于无法恢复真实源 IP 的 SNAT 部署；per-connection 与 global 限制始终生效。
 	DisableSourceIPLimits bool
 	Limits                Limits
+	// Update 随注册/加入响应下发的新版本软提示；LatestVersion 为空时不下发。
+	Update proto.UpdateInfo
 }
 
 // Server 中转服务器
@@ -304,6 +306,15 @@ func (s *Server) acquireConnSlot(ip string) bool {
 // sourceIPLimitsDisabled 保持 Server 零值安全：nil config 与配置零值都表示启用限制。
 func (s *Server) sourceIPLimitsDisabled() bool {
 	return s.config != nil && s.config.DisableSourceIPLimits
+}
+
+// updateInfo 返回要下发的新版本提示；是否启用由 cmd/relay 的 resolveUpdateInfo 一处决定，
+// 未启用时为零值（字段 omitempty，不上线）。
+func (s *Server) updateInfo() proto.UpdateInfo {
+	if s.config == nil {
+		return proto.UpdateInfo{}
+	}
+	return s.config.Update
 }
 
 func (s *Server) logSampled(format string, args ...interface{}) {
@@ -699,8 +710,9 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	client.Type = connStateShare
 
 	resp := &proto.RegisterResponse{
-		Code:      code,
-		ExpiresAt: expiresAt.Unix(),
+		Code:       code,
+		ExpiresAt:  expiresAt.Unix(),
+		UpdateInfo: s.updateInfo(),
 	}
 
 	msg, _ := proto.NewMessage(proto.MsgRegisterResponse, resp)
@@ -761,6 +773,7 @@ func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 		SessionID:   joinResult.SessionID,
 		PeerVersion: joinResult.ShareVersion,
 		PeerHost:    joinResult.ShareHost,
+		UpdateInfo:  s.updateInfo(),
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)

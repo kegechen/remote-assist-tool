@@ -17,6 +17,7 @@ import (
 	"github.com/remote-assist/tool/internal/mcp"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/version"
 )
 
@@ -264,6 +265,11 @@ type connectResult struct {
 	// 看不到，只有放进结果里，它才能如实转告用户当前处在兼容模式。
 	ProtoVersion string `json:"proto_version,omitempty"`
 	Warning      string `json:"warning,omitempty"`
+	// UpdateNotice / PeerUpdateNotice 本机 / 被协助端版本落后于 relay 下发的最新版本时给出，
+	// 附带按各自平台展开的下载链接。只是建议，连接照常可用；同 Warning，放进结果才能让
+	// AI 转告用户。
+	UpdateNotice     *update.Notice `json:"update_notice,omitempty"`
+	PeerUpdateNotice *update.Notice `json:"peer_update_notice,omitempty"`
 }
 
 type connectTarget struct {
@@ -499,6 +505,13 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	}
 	if sess.Version == proto.ToolProtocolVersionV1 {
 		result.Warning = v1CompatWarning
+	}
+	result.UpdateNotice, result.PeerUpdateNotice = updateNotices(resp)
+	if n := result.UpdateNotice; n != nil {
+		fmt.Fprintf(os.Stderr, "MCP: %s\n", n)
+	}
+	if n := result.PeerUpdateNotice; n != nil {
+		fmt.Fprintf(os.Stderr, "MCP: %s\n", n.PeerString())
 	}
 
 	// 必须在启动读循环前发布活动状态。否则连接若立即断开，teardown 可能先运行却

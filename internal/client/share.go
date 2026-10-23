@@ -16,6 +16,7 @@ import (
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/sysinfo"
+	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/version"
 )
 
@@ -39,6 +40,7 @@ type ShareMode struct {
 	newInstance    bool
 	clientID       string
 	conflictHinted bool // 本轮冲突的醒目提示已打印过；注册成功后复位
+	updateHinted   bool // 新版本提示已打印过；重连再注册不重复刷屏
 	codeFile       string
 	mirrorCodeFile string
 	code           string
@@ -430,6 +432,13 @@ func (s *ShareMode) register() error {
 	// 首次注册与重连刷新 code 都走到这里，剪贴板始终包含最新协助信息。
 	if err := copyToClipboard(instructions); err == nil {
 		s.println("（以上协助信息已复制到剪贴板）")
+	}
+	// 升级提示放在协助信息块之外：不进剪贴板，避免被原样转给协助端。
+	if !s.updateHinted {
+		if n, ok := update.CheckSelf(version.Info(), resp.LatestVersion, resp.DownloadURL, resp.ReleasePage); ok {
+			s.updateHinted = true
+			s.printf("\n[提示] %s\n\n", n)
+		}
 	}
 	s.println("等待协助端连接...")
 	s.writeCodeFile()

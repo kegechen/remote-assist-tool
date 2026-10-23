@@ -14,6 +14,7 @@ import (
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/sysinfo"
+	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/version"
 )
 
@@ -74,6 +75,19 @@ func (h *HelpMode) join() (*proto.JoinResponse, error) {
 	return &resp, nil
 }
 
+// updateNotices 根据 relay 下发的最新版本，分别检查本机与被协助端是否需要升级。
+// 被协助端的下载链接按其身份串推断平台（老用户多在被协助端，这条最有用）；
+// 推断不出平台时退回 Release 页。relay 未下发时两者都为 nil。
+func updateNotices(resp *proto.JoinResponse) (self, peer *update.Notice) {
+	if n, ok := update.CheckSelf(version.Info(), resp.LatestVersion, resp.DownloadURL, resp.ReleasePage); ok {
+		self = &n
+	}
+	if n, ok := update.CheckPeer(resp.PeerVersion, resp.PeerHost, resp.LatestVersion, resp.DownloadURL, resp.ReleasePage); ok {
+		peer = &n
+	}
+	return self, peer
+}
+
 // Run 运行协助模式
 func (h *HelpMode) Run() error {
 	if err := h.client.Connect(); err != nil {
@@ -104,6 +118,13 @@ func (h *HelpMode) Run() error {
 			printf("对端标识: %s\n", resp.PeerHost)
 		}
 		printf("会话ID: %s\n", resp.SessionID)
+		self, peer := updateNotices(resp)
+		if self != nil {
+			printf("\n[提示] %s\n", self)
+		}
+		if peer != nil {
+			printf("\n[提示] %s\n", peer.PeerString())
+		}
 
 		// MCP stdio 模式：跳过 SSH 监听，直接运行工具通道
 		if h.mcpStdio {
