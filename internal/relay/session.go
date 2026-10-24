@@ -57,9 +57,11 @@ type ClientConn struct {
 	ClientID string // 持久化客户端ID
 	Version  string // 客户端版本（已 sanitizePeerString）
 	Host     string // 客户端身份串 "user@host 系统 架构"（已 sanitizePeerString；旧客户端为空）
-	Conn     Conn
-	Send     chan []byte
-	writeMu  sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
+	// supportsUpdateNotice 在 register/join 时读取；发布会话前写入，relay 配对路径读取。
+	supportsUpdateNotice bool
+	Conn                 Conn
+	Send                 chan []byte
+	writeMu              sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
 
 	// joinFailures 本连接累计的 Join 失败次数（含限流拒绝）。仅由该连接的读循环 goroutine
 	// 单线程访问，无需加锁。达到 maxJoinFailures 即关闭连接；一次成功 Join 后清零。

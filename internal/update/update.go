@@ -75,6 +75,41 @@ func IsRelease(s string) bool {
 	return ok && suffix == ""
 }
 
+// NormalizeRelease returns the canonical release tag form used by published
+// artifacts. Configuration accepts both 1.2.3 and v1.2.3, while download and
+// release URLs must use the repository tag form with the leading v.
+func NormalizeRelease(s string) (string, bool) {
+	v, suffix, ok := parse(s)
+	if !ok || suffix != "" {
+		return "", false
+	}
+	return fmt.Sprintf("v%d.%d.%d", v.num[0], v.num[1], v.num[2]), true
+}
+
+// NormalizeDefaultURLVersion keeps the built-in GitHub fallback compatible
+// with release tags that use a leading v. Explicit templates, including a
+// template with a literal v1.2.3 tag or a fixed download URL, are left alone;
+// their owner is responsible for publishing a reachable URL.
+func NormalizeDefaultURLVersion(latest, downloadURL, releasePage string) string {
+	if (downloadURL != "" && downloadURL != DefaultDownloadURL && strings.Contains(downloadURL, "{version}")) ||
+		(releasePage != "" && releasePage != DefaultReleasePage && strings.Contains(releasePage, "{version}")) {
+		return latest
+	}
+	if normalized, ok := NormalizeRelease(latest); ok {
+		return normalized
+	}
+	return latest
+}
+
+func normalizeTemplateVersion(latest, template string) string {
+	if template == DefaultDownloadURL || template == DefaultReleasePage {
+		if normalized, ok := NormalizeRelease(latest); ok {
+			return normalized
+		}
+	}
+	return latest
+}
+
 // Newer 报告 latest 是否严格高于 current。latest 必须是正式版本；current 无法解析
 // （dev 构建）返回 false。同号时预发布版（-rc1）低于正式版。
 func Newer(latest, current string) bool {
@@ -110,6 +145,7 @@ func SafeURL(u string) bool {
 // ExpandURL 把模板中的 {version}/{os}/{arch}/{ext} 替换为目标版本与平台。
 // 平台不在已发布产物之列时返回 ""。
 func ExpandURL(template, ver, goos, goarch string) string {
+	goarch = normalizeArch(goarch)
 	if template == "" || !releasedPlatforms[goos+"/"+goarch] {
 		return ""
 	}
@@ -125,6 +161,21 @@ func expand(template, ver, goos, goarch, ext string) string {
 	return r.Replace(template)
 }
 
+// normalizeArch converts names commonly reported by system tools to the
+// architecture names used by release assets. Unknown names remain unchanged
+// so ExpandURL can reject them and fall back to the release page.
+func normalizeArch(arch string) string {
+	arch = strings.ToLower(strings.TrimSpace(arch))
+	switch arch {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	default:
+		return arch
+	}
+}
+
 // PlatformFromHost 从 sysinfo.Summary 身份串（"user@host Windows 11 amd64"、
 // "uos@pc uos arm64"）推断 GOOS/GOARCH。只看末尾：最后一个字段是架构，前面是
 // osName——Windows 为 "Windows <版本>"，其余平台为单个字段（Linux 是发行版 ID，
@@ -134,7 +185,7 @@ func PlatformFromHost(host string) (goos, goarch string, ok bool) {
 	if len(f) < 2 {
 		return "", "", false
 	}
-	goarch = f[len(f)-1]
+	goarch = normalizeArch(f[len(f)-1])
 	sys := f[:len(f)-1]
 	last := sys[len(sys)-1]
 	switch {
@@ -185,14 +236,21 @@ func Check(current, latest, urlTemplate, releasePage, goos, goarch string) (Noti
 	if !Newer(latest, current) {
 		return Notice{}, false
 	}
-	url := ExpandURL(urlTemplate, latest, goos, goarch)
+	urlVersion := latest
+	if urlTemplate == DefaultDownloadURL {
+		urlVersion = normalizeTemplateVersion(latest, urlTemplate)
+	}
+	url := ExpandURL(urlTemplate, urlVersion, goos, goarch)
 	if !SafeURL(url) {
-		url = ExpandURL(DefaultDownloadURL, latest, goos, goarch)
+		fallbackVersion := normalizeTemplateVersion(latest, DefaultDownloadURL)
+		url = ExpandURL(DefaultDownloadURL, fallbackVersion, goos, goarch)
 	}
 	if url == "" {
-		url = expand(releasePage, latest, "", "", "")
+		releaseVersion := normalizeTemplateVersion(latest, releasePage)
+		url = expand(releasePage, releaseVersion, "", "", "")
 		if !SafeURL(url) {
-			url = expand(DefaultReleasePage, latest, "", "", "")
+			fallbackVersion := normalizeTemplateVersion(latest, DefaultReleasePage)
+			url = expand(DefaultReleasePage, fallbackVersion, "", "", "")
 		}
 	}
 	return Notice{Current: printable(current), Latest: latest, URL: url}, true
@@ -217,4 +275,20 @@ func CheckSelf(current, latest, urlTemplate, releasePage string) (Notice, bool) 
 func CheckPeer(peerVersion, peerHost, latest, urlTemplate, releasePage string) (Notice, bool) {
 	goos, goarch, _ := PlatformFromHost(peerHost)
 	return Check(peerVersion, latest, urlTemplate, releasePage, goos, goarch)
+}
+
+// CheckUnknown 为没有上报版本号的旧客户端生成通用提示。早期 0.0.x 客户端没有
+// Version 字段，relay 无法判断它是否落后；只要 relay 明确宣布了正式版本，就给出
+// Release 页面，确保用户仍能看到可操作的升级入口。
+func CheckUnknown(latest, releasePage string) (Notice, bool) {
+	if !IsRelease(latest) {
+		return Notice{}, false
+	}
+	releaseVersion := normalizeTemplateVersion(latest, releasePage)
+	url := expand(releasePage, releaseVersion, "", "", "")
+	if !SafeURL(url) {
+		fallbackVersion := normalizeTemplateVersion(latest, DefaultReleasePage)
+		url = expand(DefaultReleasePage, fallbackVersion, "", "", "")
+	}
+	return Notice{Current: "旧版客户端", Latest: latest, URL: url}, true
 }

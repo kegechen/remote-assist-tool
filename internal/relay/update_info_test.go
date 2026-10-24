@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/remote-assist/tool/internal/proto"
+	"github.com/remote-assist/tool/internal/update"
 )
 
 // captureConn 记录 relay 写给客户端的每一帧（换行分隔 JSON）。
@@ -63,7 +64,7 @@ func registerAndJoin(t *testing.T, cfg *Config) (shareConn, helpConn *captureCon
 	}
 	helpConn = &captureConn{addr: "198.51.100.9:2"}
 	help := &ClientConn{ID: "help1", Conn: helpConn}
-	join, _ := proto.NewMessage(proto.MsgJoinRequest, &proto.JoinRequest{Code: code, Version: "v1.1.0"})
+	join, _ := proto.NewMessage(proto.MsgJoinRequest, &proto.JoinRequest{Code: code, Version: "v1.1.0", SupportsUpdateNotice: true})
 	srv.handleMessage(help, join)
 	return shareConn, helpConn
 }
@@ -94,6 +95,37 @@ func TestResponsesCarryUpdateInfo(t *testing.T) {
 	}
 	if join.PeerHost != "u@pc Windows 10 amd64" || join.PeerVersion != "0.0.7" {
 		t.Errorf("peer fields lost: %+v", join)
+	}
+}
+
+func TestResponsesNormalizeBuiltInReleaseTag(t *testing.T) {
+	shareConn, helpConn := registerAndJoin(t, &Config{ListenAddr: "127.0.0.1:0", Update: proto.UpdateInfo{
+		LatestVersion: "1.1.0", DownloadURL: "https://github.com/kegechen/remote-assist-tool/releases/download/{version}/remote-assist-cli-{os}-{arch}{ext}", ReleasePage: "https://github.com/kegechen/remote-assist-tool/releases/tag/{version}",
+	}})
+	var reg proto.RegisterResponse
+	if err := json.Unmarshal(shareConn.frame(t, proto.MsgRegisterResponse), &reg); err != nil {
+		t.Fatal(err)
+	}
+	if reg.LatestVersion != "v1.1.0" {
+		t.Fatalf("built-in release tag was not normalized: %+v", reg.UpdateInfo)
+	}
+	var join proto.JoinResponse
+	if err := json.Unmarshal(helpConn.frame(t, proto.MsgJoinResponse), &join); err != nil {
+		t.Fatal(err)
+	}
+	if join.LatestVersion != "v1.1.0" {
+		t.Fatalf("join response release tag was not normalized: %+v", join.UpdateInfo)
+	}
+}
+
+func TestNormalizeLiteralDownloadWithDefaultReleasePage(t *testing.T) {
+	info := normalizeUpdateInfo(proto.UpdateInfo{
+		LatestVersion: "1.1.0",
+		DownloadURL:   "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-{os}-{arch}{ext}",
+		ReleasePage:   update.DefaultReleasePage,
+	})
+	if info.LatestVersion != "v1.1.0" {
+		t.Fatalf("mixed literal/default announcement was not normalized: %+v", info)
 	}
 }
 

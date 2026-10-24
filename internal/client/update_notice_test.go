@@ -1,14 +1,70 @@
 package client
 
 import (
+	"encoding/json"
+	"net"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/remote-assist/tool/internal/agent"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/version"
 )
+
+// Capture actual requests: a client that can render UpdateInfo must opt out of legacy display.
+func TestClientsAdvertiseUpdateNoticeSupport(t *testing.T) {
+	for _, role := range []string{"share", "help"} {
+		t.Run(role, func(t *testing.T) {
+			local, remote := net.Pipe()
+			defer local.Close()
+			defer remote.Close()
+			_ = remote.SetDeadline(time.Now().Add(3 * time.Second))
+			client := &Client{conn: local, enc: json.NewEncoder(local), dec: json.NewDecoder(local)}
+			captured := make(chan proto.Message, 1)
+			go func() {
+				var request proto.Message
+				if err := json.NewDecoder(remote).Decode(&request); err != nil {
+					return
+				}
+				captured <- request
+				// Reject before registration UI/clipboard work; only the request capability is under test.
+				response, _ := proto.NewMessage(proto.MsgJoinResponse, &proto.JoinResponse{Error: "test complete"})
+				if role == "share" {
+					response, _ = proto.NewMessage(proto.MsgError, &proto.ErrorMessage{Code: "TEST", Message: "test complete"})
+				}
+				_ = json.NewEncoder(remote).Encode(response)
+			}()
+			if role == "share" {
+				s := NewShareMode(&Config{}, "127.0.0.1:0", true, agent.SandboxConfig{}, "", "")
+				s.client = client
+				if err := s.register(); err == nil {
+					t.Fatal("expected test rejection")
+				}
+			} else {
+				h := NewHelpMode(&Config{}, "TESTCODE", "127.0.0.1:0")
+				h.client = client
+				if _, err := h.join(); err == nil {
+					t.Fatal("expected test rejection")
+				}
+			}
+			select {
+			case request := <-captured:
+				var fields map[string]any
+				if err := json.Unmarshal(request.Payload, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if fields["supports_update_notice"] != true {
+					t.Fatalf("missing native notice capability: %+v", fields)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("request not captured")
+			}
+		})
+	}
+}
 
 func TestUpdateNotices(t *testing.T) {
 	orig := version.Version

@@ -387,7 +387,7 @@ func (s *ShareMode) register() error {
 		return err
 	}
 	hostInfo := sysinfo.Summary()
-	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: hostInfo}); err != nil {
+	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: hostInfo, SupportsUpdateNotice: true}); err != nil {
 		return err
 	}
 

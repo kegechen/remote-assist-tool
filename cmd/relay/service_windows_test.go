@@ -67,6 +67,9 @@ func TestWindowsServiceConfigDefaultsAndStrictDecode(t *testing.T) {
 	if !cfg.TrustSourceIP || cfg.AuditLog != paths.auditFile || cfg.CertsDir != paths.certsDir {
 		t.Fatalf("unexpected service defaults: %+v", cfg)
 	}
+	if cfg.UpdateInfoFile != filepath.Join(paths.dataDir, "update-info.json") {
+		t.Fatalf("unexpected update info file default: %q", cfg.UpdateInfoFile)
+	}
 
 	unknown := filepath.Join(root, "unknown.json")
 	if err := os.WriteFile(unknown, []byte(`{"listen":":8443","unknown":true}`), 0600); err != nil {
@@ -160,6 +163,50 @@ func TestWindowsServiceConfigRelayArgsRoundTrip(t *testing.T) {
 	}
 	if opts.listenAddr != cfg.ListenAddr || opts.codeTTL != time.Hour || opts.codeLength != 12 || opts.trustSourceIP {
 		t.Fatalf("round trip mismatch: %+v", opts)
+	}
+}
+
+func TestWindowsServiceConfigUpgradeNoticeRoundTrip(t *testing.T) {
+	cfg := windowsServiceConfig{
+		ListenAddr:     "127.0.0.1:9443",
+		CodeTTL:        "1h",
+		CodeLength:     12,
+		AuditLog:       "C:\\ProgramData\\RemoteAssistRelay\\logs\\audit.jsonl",
+		CertsDir:       "C:\\ProgramData\\RemoteAssistRelay\\certs",
+		TrustSourceIP:  true,
+		LatestVersion:  "1.1.0",
+		DownloadURL:    "https://example.com/{version}/remote-assist-cli-{os}-{arch}{ext}",
+		ReleasePage:    "https://example.com/releases/tag/{version}",
+		UpdateInfoFile: "C:\\ProgramData\\RemoteAssistRelay\\update-info.json",
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := parseRelayOptions(cfg.relayArgs(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.latestVersion != cfg.LatestVersion || opts.downloadURL != cfg.DownloadURL ||
+		opts.releasePage != cfg.ReleasePage || opts.updateInfoFile != cfg.UpdateInfoFile {
+		t.Fatalf("upgrade notice round trip: %+v", opts)
+	}
+}
+
+func TestWindowsServiceConfigRejectsInvalidUpgradeNotice(t *testing.T) {
+	cfg := windowsServiceConfig{
+		ListenAddr:    ":8443",
+		CodeTTL:       "30m",
+		CodeLength:    10,
+		CertsDir:      "C:\\certs",
+		LatestVersion: "dev",
+	}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("invalid latest_version accepted")
+	}
+	cfg.LatestVersion = "v1.1.0"
+	cfg.DownloadURL = "http://insecure/{version}"
+	if err := cfg.validate(); err == nil {
+		t.Fatal("insecure download_url accepted")
 	}
 }
 

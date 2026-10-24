@@ -22,24 +22,25 @@ import (
 )
 
 type relayOptions struct {
-	listenAddr    string
-	certFile      string
-	keyFile       string
-	codeTTL       time.Duration
-	codeLength    int
-	auditLog      string
-	plain         bool
-	genCerts      bool
-	certsDir      string
-	stunAddr      string
-	trustSourceIP bool
-	limitsFile    string
-	printLimits   bool
-	noAuth        bool
-	showVersion   bool
-	latestVersion string
-	downloadURL   string
-	releasePage   string
+	listenAddr     string
+	certFile       string
+	keyFile        string
+	codeTTL        time.Duration
+	codeLength     int
+	auditLog       string
+	plain          bool
+	genCerts       bool
+	certsDir       string
+	stunAddr       string
+	trustSourceIP  bool
+	limitsFile     string
+	printLimits    bool
+	noAuth         bool
+	showVersion    bool
+	latestVersion  string
+	downloadURL    string
+	releasePage    string
+	updateInfoFile string
 }
 
 func main() {
@@ -116,6 +117,7 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		DisableSourceIPLimits: !opts.trustSourceIP,
 		Limits:                limits,
 		Update:                updateInfo,
+		UpdateInfoFile:        opts.updateInfoFile,
 	}
 
 	if opts.noAuth {
@@ -178,6 +180,7 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.StringVar(&opts.latestVersion, "latest-version", "", "Latest client version announced to clients for upgrade hints (empty: this relay's own version; \"none\": disable)")
 	fs.StringVar(&opts.downloadURL, "download-url", opts.downloadURL, "Client download URL template (https) for upgrade hints; {version}/{os}/{arch}/{ext} are expanded per client platform")
 	fs.StringVar(&opts.releasePage, "release-page", opts.releasePage, "Fallback download page (https; {version} expanded) when a client's platform is unknown or has no released asset")
+	fs.StringVar(&opts.updateInfoFile, "update-info-file", "", "JSON upgrade announcement file to reload without restarting the relay")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
 		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
@@ -224,6 +227,7 @@ func resolveUpdateInfo(opts relayOptions) (proto.UpdateInfo, error) {
 		DownloadURL:   strings.TrimSpace(opts.downloadURL),
 		ReleasePage:   strings.TrimSpace(opts.releasePage),
 	}
+	info.LatestVersion = update.NormalizeDefaultURLVersion(info.LatestVersion, info.DownloadURL, info.ReleasePage)
 	for name, u := range map[string]string{"download-url": info.DownloadURL, "release-page": info.ReleasePage} {
 		if !update.SafeURL(u) {
 			return proto.UpdateInfo{}, fmt.Errorf("%s %q must be an https URL without spaces or control characters", name, u)

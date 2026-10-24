@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/remote-assist/tool/internal/update"
 )
 
 const (
@@ -30,18 +33,22 @@ type windowsServicePaths struct {
 }
 
 type windowsServiceConfig struct {
-	ListenAddr    string `json:"listen"`
-	CertFile      string `json:"cert,omitempty"`
-	KeyFile       string `json:"key,omitempty"`
-	CodeTTL       string `json:"ttl"`
-	CodeLength    int    `json:"length"`
-	AuditLog      string `json:"audit"`
-	Plain         bool   `json:"plain"`
-	CertsDir      string `json:"certs_dir"`
-	STUNAddr      string `json:"stun,omitempty"`
-	TrustSourceIP bool   `json:"trust_source_ip"`
-	LimitsFile    string `json:"limits_file,omitempty"`
-	NoAuth        bool   `json:"no_auth"`
+	ListenAddr     string `json:"listen"`
+	CertFile       string `json:"cert,omitempty"`
+	KeyFile        string `json:"key,omitempty"`
+	CodeTTL        string `json:"ttl"`
+	CodeLength     int    `json:"length"`
+	AuditLog       string `json:"audit"`
+	Plain          bool   `json:"plain"`
+	CertsDir       string `json:"certs_dir"`
+	STUNAddr       string `json:"stun,omitempty"`
+	TrustSourceIP  bool   `json:"trust_source_ip"`
+	LimitsFile     string `json:"limits_file,omitempty"`
+	NoAuth         bool   `json:"no_auth"`
+	LatestVersion  string `json:"latest_version,omitempty"`
+	DownloadURL    string `json:"download_url,omitempty"`
+	ReleasePage    string `json:"release_page,omitempty"`
+	UpdateInfoFile string `json:"update_info_file,omitempty"`
 }
 
 func defaultWindowsServicePaths() (windowsServicePaths, error) {
@@ -66,13 +73,20 @@ func defaultWindowsServicePaths() (windowsServicePaths, error) {
 }
 
 func defaultWindowsServiceConfig(paths windowsServicePaths) windowsServiceConfig {
+	updateInfoFile := ""
+	if paths.dataDir != "" {
+		updateInfoFile = filepath.Join(paths.dataDir, "update-info.json")
+	} else if paths.configFile != "" {
+		updateInfoFile = filepath.Join(filepath.Dir(paths.configFile), "update-info.json")
+	}
 	return windowsServiceConfig{
-		ListenAddr:    ":8443",
-		CodeTTL:       "30m",
-		CodeLength:    10,
-		AuditLog:      paths.auditFile,
-		CertsDir:      paths.certsDir,
-		TrustSourceIP: true,
+		ListenAddr:     ":8443",
+		CodeTTL:        "30m",
+		CodeLength:     10,
+		AuditLog:       paths.auditFile,
+		CertsDir:       paths.certsDir,
+		TrustSourceIP:  true,
+		UpdateInfoFile: updateInfoFile,
 	}
 }
 
@@ -119,12 +133,21 @@ func (cfg windowsServiceConfig) validate() error {
 	if !cfg.Plain && cfg.CertFile == "" && cfg.CertsDir == "" {
 		return errors.New("certs_dir must be a non-empty absolute path when TLS certificates are generated automatically")
 	}
+	if cfg.LatestVersion != "" && !strings.EqualFold(cfg.LatestVersion, "none") && !update.IsRelease(cfg.LatestVersion) {
+		return fmt.Errorf("latest_version must be a release version or none: %q", cfg.LatestVersion)
+	}
+	for name, value := range map[string]string{"download_url": cfg.DownloadURL, "release_page": cfg.ReleasePage} {
+		if value != "" && !update.SafeURL(value) {
+			return fmt.Errorf("%s must be an https URL without spaces or control characters", name)
+		}
+	}
 	paths := map[string]string{
-		"cert":        cfg.CertFile,
-		"key":         cfg.KeyFile,
-		"audit":       cfg.AuditLog,
-		"certs_dir":   cfg.CertsDir,
-		"limits_file": cfg.LimitsFile,
+		"cert":             cfg.CertFile,
+		"key":              cfg.KeyFile,
+		"audit":            cfg.AuditLog,
+		"certs_dir":        cfg.CertsDir,
+		"limits_file":      cfg.LimitsFile,
+		"update_info_file": cfg.UpdateInfoFile,
 	}
 	for name, path := range paths {
 		if path != "" && !filepath.IsAbs(path) {
@@ -157,6 +180,18 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 	}
 	if cfg.NoAuth {
 		args = append(args, "--no-auth")
+	}
+	if cfg.LatestVersion != "" {
+		args = append(args, "--latest-version", cfg.LatestVersion)
+	}
+	if cfg.DownloadURL != "" {
+		args = append(args, "--download-url", cfg.DownloadURL)
+	}
+	if cfg.ReleasePage != "" {
+		args = append(args, "--release-page", cfg.ReleasePage)
+	}
+	if cfg.UpdateInfoFile != "" {
+		args = append(args, "--update-info-file", cfg.UpdateInfoFile)
 	}
 	return args
 }

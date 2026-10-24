@@ -41,6 +41,8 @@ type RegisterRequest struct {
 	ClientID string `json:"client_id,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Host     string `json:"host,omitempty"` // 身份串 "user@host 系统 架构"（sysinfo.Summary），看板展示用；旧客户端不发
+	// SupportsUpdateNotice 表示能自行显示 UpdateInfo，relay 不再发送旧版兼容提示。
+	SupportsUpdateNotice bool `json:"supports_update_notice,omitempty"`
 }
 
 // RegisterResponse 注册响应
@@ -62,9 +64,10 @@ type UpdateInfo struct {
 
 // JoinRequest 协助端加入请求
 type JoinRequest struct {
-	Code    string `json:"code"`
-	Version string `json:"version,omitempty"`
-	Host    string `json:"host,omitempty"` // 同 RegisterRequest.Host
+	Code                 string `json:"code"`
+	Version              string `json:"version,omitempty"`
+	Host                 string `json:"host,omitempty"` // 同 RegisterRequest.Host
+	SupportsUpdateNotice bool   `json:"supports_update_notice,omitempty"`
 }
 
 // JoinResponse 加入响应

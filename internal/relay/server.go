@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,7 +123,9 @@ type Config struct {
 	DisableSourceIPLimits bool
 	Limits                Limits
 	// Update 随注册/加入响应下发的新版本软提示；LatestVersion 为空时不下发。
-	Update proto.UpdateInfo
+	Update                 proto.UpdateInfo
+	UpdateInfoFile         string
+	UpdateInfoPollInterval time.Duration
 }
 
 // Server 中转服务器
@@ -158,6 +161,12 @@ type Server struct {
 	p2pSampleCtr             uint64                  // P2P 协商信息独立采样，避免污染拒绝计数
 	toolThrottleSampleCtr    uint64                  // 工具通道节流独立采样：节流是背压不是拒绝，同样不该污染拒绝计数
 	limits                   Limits
+	updateInfoValue          atomic.Value
+	updateInfoBase           proto.UpdateInfo
+	updateInfoFile           string
+	updateInfoPollInterval   time.Duration
+	updateInfoFileMu         sync.Mutex
+	updateInfoFileState      updateInfoFileState
 }
 
 // NewServer 创建服务器
@@ -178,8 +187,16 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, fmt.Errorf("invalid relay limits: %w", err)
 	}
 	cfg.Limits = limits
+	if cfg.UpdateInfoPollInterval <= 0 {
+		cfg.UpdateInfoPollInterval = 5 * time.Second
+	}
+	if cfg.UpdateInfoFile != "" && !filepath.IsAbs(cfg.UpdateInfoFile) {
+		return nil, fmt.Errorf("update info file must be an absolute path: %s", cfg.UpdateInfoFile)
+	}
 	limiterIdleDuration := time.Duration(limits.LimiterIdleSeconds) * time.Second
 
+	baseUpdate := normalizeUpdateInfo(cfg.Update)
+	cfg.Update = baseUpdate
 	srv := &Server{
 		config:                   cfg,
 		sessions:                 NewSessionManager(),
@@ -199,6 +216,15 @@ func NewServer(cfg *Config) (*Server, error) {
 		toolLimiterPerConn:       ratelimit.NewKeyedLimiter(limits.ToolRateKiBPerConnection, limits.ToolBurstKiBPerConnection, limits.LimiterMaxKeys, limiterIdleDuration),
 		toolLimiterGlobal:        ratelimit.NewBucket(limits.ToolRateKiBGlobal, limits.ToolBurstKiBGlobal),
 		limits:                   limits,
+		updateInfoFile:           cfg.UpdateInfoFile,
+		updateInfoPollInterval:   cfg.UpdateInfoPollInterval,
+		updateInfoBase:           baseUpdate,
+	}
+	srv.updateInfoValue.Store(baseUpdate)
+	if srv.updateInfoFile != "" {
+		if err := srv.reloadUpdateInfoFile(); err != nil {
+			log.Printf("update info file not loaded: %v (keeping configured announcement)", err)
+		}
 	}
 	// Help 去抖计时器真正清掉 Help 槽时，把 share 从「等隧道数据」里叫醒。
 	// 复用既有的 PEER_DISCONNECTED 码：share 端 waitAndHandleTunnel 已经认它
@@ -261,6 +287,7 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 	log.Printf("Server starting on %s", s.config.ListenAddr)
 	log.Printf("Relay limits: %s", s.limits.JSON())
 	go s.cleanupLoop(ctx)
+	go s.updateInfoLoop(ctx)
 
 	// Close listener when context is cancelled
 	go func() {
@@ -311,10 +338,10 @@ func (s *Server) sourceIPLimitsDisabled() bool {
 // updateInfo 返回要下发的新版本提示；是否启用由 cmd/relay 的 resolveUpdateInfo 一处决定，
 // 未启用时为零值（字段 omitempty，不上线）。
 func (s *Server) updateInfo() proto.UpdateInfo {
-	if s.config == nil {
-		return proto.UpdateInfo{}
+	if v := s.updateInfoValue.Load(); v != nil {
+		return v.(proto.UpdateInfo)
 	}
-	return s.config.Update
+	return proto.UpdateInfo{}
 }
 
 func (s *Server) logSampled(format string, args ...interface{}) {
@@ -546,6 +573,7 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		client.ClientID = req.ClientID
 		client.Version = sanitizePeerString(req.Version)
 		client.Host = sanitizePeerString(req.Host)
+		client.supportsUpdateNotice = req.SupportsUpdateNotice
 		return s.handleRegister(client)
 	case proto.MsgJoinRequest:
 		// join 只能在 new 状态执行一次
@@ -561,6 +589,7 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		}
 		client.Version = sanitizePeerString(req.Version)
 		client.Host = sanitizePeerString(req.Host)
+		client.supportsUpdateNotice = req.SupportsUpdateNotice
 		return s.handleJoin(client, req.Code)
 	case proto.MsgTunnelData, proto.MsgHeartbeat, proto.MsgPeerAddrAdvertise, proto.MsgP2PConnected,
 		proto.MsgToolHello, proto.MsgToolHelloAck, proto.MsgToolReq, proto.MsgToolResp,
@@ -772,14 +801,14 @@ func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 		Success:     true,
 		SessionID:   joinResult.SessionID,
 		PeerVersion: joinResult.ShareVersion,
-		PeerHost:    joinResult.ShareHost,
+		PeerHost:    s.legacyHelpUpdateHost(client, joinResult.ShareVersion, joinResult.ShareHost),
 		UpdateInfo:  s.updateInfo(),
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 
 	// SessionReady 附带 help 端版本与身份串
-	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: joinResult.SessionID, PeerVersion: client.Version, PeerHost: client.Host})
+	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: joinResult.SessionID, PeerVersion: client.Version, PeerHost: s.legacyShareSessionReadyHost(joinResult.Share, client.Version, client.Host)})
 	sendMsg(joinResult.Share, readyMsg)
 
 	logger.LogSessionEstablished(joinResult.SessionID, code, client.ID, joinResult.ShareID)

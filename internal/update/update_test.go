@@ -1,6 +1,9 @@
 package update
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNewer(t *testing.T) {
 	cases := []struct {
@@ -47,6 +50,20 @@ func TestIsRelease(t *testing.T) {
 	}
 }
 
+func TestNormalizeRelease(t *testing.T) {
+	for input, want := range map[string]string{"1.1.0": "v1.1.0", "v1.1.0": "v1.1.0", " 1.2.3 ": "v1.2.3"} {
+		got, ok := NormalizeRelease(input)
+		if !ok || got != want {
+			t.Errorf("NormalizeRelease(%q) = %q, %v; want %q, true", input, got, ok, want)
+		}
+	}
+	for _, input := range []string{"dev", "v1.1.0-rc1", "v1.1"} {
+		if got, ok := NormalizeRelease(input); ok {
+			t.Errorf("NormalizeRelease(%q) = %q, true; want invalid", input, got)
+		}
+	}
+}
+
 func TestExpandURL(t *testing.T) {
 	const base = "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-"
 	if got := ExpandURL(DefaultDownloadURL, "v1.1.0", "windows", "amd64"); got != base+"windows-amd64.exe" {
@@ -54,6 +71,16 @@ func TestExpandURL(t *testing.T) {
 	}
 	if got := ExpandURL(DefaultDownloadURL, "v1.1.0", "linux", "arm64"); got != base+"linux-arm64" {
 		t.Errorf("linux: %s", got)
+	}
+	for _, p := range [][2]string{{"linux", "x86_64"}, {"linux", "aarch64"}, {"windows", "X86_64"}} {
+		canonical := map[string]string{"x86_64": "amd64", "X86_64": "amd64", "aarch64": "arm64"}[p[1]]
+		want := base + p[0] + "-" + canonical
+		if p[0] == "windows" {
+			want += ".exe"
+		}
+		if got := ExpandURL(DefaultDownloadURL, "v1.1.0", p[0], p[1]); got != want {
+			t.Errorf("%s/%s = %s, want %s", p[0], p[1], got, want)
+		}
 	}
 	// 未发布产物的平台不拼 404 链接
 	for _, p := range [][2]string{{"", "amd64"}, {"linux", "loong64"}, {"linux", "386"}, {"freebsd", "amd64"}} {
@@ -94,6 +121,8 @@ func TestPlatformFromHost(t *testing.T) {
 		{"Windows 10 amd64", "windows", "amd64", true},          // identity 采集失败
 		{"pc Windows amd64", "windows", "amd64", true},          // RtlGetVersion 失败
 		{"me@bsd freebsd amd64", "freebsd", "amd64", true},      // os_other 平台不当成 Linux
+		{"root@srv ubuntu x86_64", "linux", "amd64", true},      // system arch name
+		{"root@srv ubuntu aarch64", "linux", "arm64", true},     // system arch name
 		{"u@pc uos loong64", "linux", "loong64", true},          // 能推断，但 ExpandURL 会拒绝
 		{"", "", "", false},
 		{"amd64", "", "", false},
@@ -107,10 +136,39 @@ func TestPlatformFromHost(t *testing.T) {
 	}
 }
 
+func TestCheckUnknown(t *testing.T) {
+	n, ok := CheckUnknown("v1.1.0", "https://example.test/releases/{version}")
+	if !ok || n.Current != "旧版客户端" || n.URL != "https://example.test/releases/v1.1.0" {
+		t.Fatalf("unknown notice = %+v, ok=%v", n, ok)
+	}
+	if _, ok := CheckUnknown("dev", "https://example.test/releases/{version}"); ok {
+		t.Fatal("dev relay must not announce an unknown-client notice")
+	}
+	if n, ok := CheckUnknown("v1.1.0", "http://insecure/{version}"); !ok || n.URL != DefaultReleasePage[:strings.LastIndex(DefaultReleasePage, "{version}")]+"v1.1.0" {
+		t.Fatalf("unsafe release page must fall back to default: %+v, ok=%v", n, ok)
+	}
+}
+
 func TestCheck(t *testing.T) {
 	n, ok := Check("0.0.7", "v1.1.0", DefaultDownloadURL, DefaultReleasePage, "linux", "amd64")
 	if !ok || n.URL != "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-linux-amd64" {
 		t.Fatalf("got %+v %v", n, ok)
+	}
+	n, ok = Check("0.0.7", "1.1.0", DefaultDownloadURL, DefaultReleasePage, "windows", "amd64")
+	if !ok || n.Latest != "1.1.0" || n.URL != "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-windows-amd64.exe" {
+		t.Fatalf("unprefixed release should use canonical tag: %+v %v", n, ok)
+	}
+	n, ok = Check("0.0.7", "1.1.0", "https://mirror.example/{version}/{os}-{arch}{ext}", "https://mirror.example/releases/{version}", "windows", "amd64")
+	if !ok || n.Latest != "1.1.0" || n.URL != "https://mirror.example/1.1.0/windows-amd64.exe" {
+		t.Fatalf("custom template should preserve configured version: %+v %v", n, ok)
+	}
+	n, ok = Check("0.0.7", "1.1.0", "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-{os}-{arch}{ext}", "https://github.com/kegechen/remote-assist-tool/releases/tag/v1.1.0", "windows", "amd64")
+	if !ok || n.URL != "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-windows-amd64.exe" {
+		t.Fatalf("literal release tag template should remain unchanged: %+v %v", n, ok)
+	}
+	n, ok = CheckPeer("0.0.7", "u@pc unknown 386", "1.1.0", "https://github.com/kegechen/remote-assist-tool/releases/download/v1.1.0/remote-assist-cli-{os}-{arch}{ext}", DefaultReleasePage)
+	if !ok || n.URL != "https://github.com/kegechen/remote-assist-tool/releases/tag/v1.1.0" {
+		t.Fatalf("mixed literal download/default release page should use the canonical tag: %+v %v", n, ok)
 	}
 	if _, ok := Check("v1.1.0", "v1.1.0", DefaultDownloadURL, DefaultReleasePage, "linux", "amd64"); ok {
 		t.Fatal("同版本不应提示")

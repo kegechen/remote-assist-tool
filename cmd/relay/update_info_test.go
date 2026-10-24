@@ -43,6 +43,14 @@ func TestResolveUpdateInfo(t *testing.T) {
 	if latest, err := resolve("--latest-version", "1.2.0", "--download-url", "https://intranet/{version}/{os}-{arch}{ext}"); latest != "1.2.0" || err != nil {
 		t.Errorf("explicit: %q err=%v", latest, err)
 	}
+	if latest, err := resolve("--latest-version", "1.2.0", "--download-url", "https://intranet/v1.2.0/remote-assist-cli-{os}-{arch}{ext}", "--release-page", "https://intranet/releases/v1.2.0"); latest != "v1.2.0" || err != nil {
+		t.Errorf("literal-link explicit: %q err=%v", latest, err)
+	}
+	if opts, err := parseRelayOptions([]string{"--latest-version", "1.2.0"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	} else if info, err := resolveUpdateInfo(opts); err != nil || info.LatestVersion != "v1.2.0" {
+		t.Errorf("default GitHub fallback should use release tag: %+v err=%v", info, err)
+	}
 
 	// none 关闭
 	for _, v := range []string{"none", "NONE"} {
