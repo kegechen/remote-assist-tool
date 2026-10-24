@@ -255,13 +255,16 @@ MCP server 名建议用 `remote-debug`。
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON 限流配置文件；未设置则使用安全默认值 |
 | `--print-default-limits` | `false` | 输出完整默认限流 JSON 后退出 |
 | `--latest-version` | relay 自身版本 | 下发给客户端的最新版本号；客户端版本更低时打印升级提示（只提示，不拒绝连接）。必须是 `v1.2.3` 这样的正式 tag，非正式构建的 relay 不下发。`none` 关闭 |
-| `--download-url` | GitHub 该版本产物 | 升级提示里的 https 下载链接模板，`{version}`/`{os}`/`{arch}`/`{ext}` 由客户端按自身（或被协助端）平台展开。可用 `go test -tags network ./internal/update -run TestReleaseURLsExist` 实测链接 |
+| `--download-url` | GitHub 该版本产物 | 升级提示里的 HTTPS 下载链接模板；建议把版本 tag 直接写入链接（例如 `v1.1.0`），只保留 `{os}`/`{arch}`/`{ext}` 占位符，配置者需确保最终 URL 可访问。
 | `--release-page` | GitHub 该版本 Release 页 | 平台未知或该平台无发布产物时的兜底链接 |
+| `--update-info-file` | 空 | 独立加载升级公告 JSON 文件；relay 每 5 秒检查元数据，文件变更后重新解析，删除文件时恢复启动时配置。
 | `--no-auth` | `false` | 固定码无鉴权模式，仅限完全可信私网 |
 | `--plain` | `false` | 非 TLS 模式（仅开发测试） |
 | `--gen-certs` | `false` | 生成自签证书后退出 |
 | `--certs-dir` | `./certs` | 证书目录（未指定 cert/key 时自动在此生成自签证书） |
 | `--version` | `false` | 显示版本 |
+
+新版客户端通过能力位声明可直接显示结构化升级提示。1.0.0 之前的客户端（包括 0.0.7）会把兼容提示附加到已有的对端标识字段：share 使用 SessionReady.PeerHost，help 使用 JoinResponse.PeerHost；这些字段会被 0.0.7 CLI 打印。已发布的 1.x 客户端即使没有新能力位，也保留原始对端标识，避免重复提示。
 
 Relay 的来源 IP 判断、完整限流参数、默认值依据、公共 STUN 行为和部署监控方法见 [Relay 来源 IP、限流与监控指南](docs/RELAY_LIMITS.md)。
 

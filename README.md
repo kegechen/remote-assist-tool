@@ -254,14 +254,17 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--trust-source-ip` | `true` | Whether the relay can see the real source IP from the TCP connection; set to `false` for SNAT backends |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON rate-limit configuration file; if unset, safe defaults are used |
 | `--latest-version` | relay's own version | Latest version announced to clients; older clients print an upgrade hint (hint only, never rejects). Must be a release tag like `v1.2.3`; a non-release relay build announces nothing. `none` disables |
-| `--download-url` | GitHub asset of that version | https URL template for the hint; `{version}`/`{os}`/`{arch}`/`{ext}` are expanded for the client's (or the shared peer's) platform. Verify links with `go test -tags network ./internal/update -run TestReleaseURLsExist` |
+| `--download-url` | GitHub asset of that version | HTTPS URL template for the hint; put the published tag directly in the URL (for example `v1.1.0`) and keep only `{os}`/`{arch}`/`{ext}` for client-side expansion. The operator must verify the final URL. Verify links with `go test -tags network ./internal/update -run TestReleaseURLsExist` |
 | `--release-page` | GitHub release page of that version | Fallback link when the platform is unknown or has no released asset |
+| `--update-info-file` | empty | Reloadable JSON announcement file; the relay polls metadata every 5 seconds and reparses only when it changes, without restarting the service |
 | `--print-default-limits` | `false` | Print the complete default rate-limit JSON and exit |
 | `--no-auth` | `false` | Fixed-code mode without authentication, only for fully trusted private networks |
 | `--plain` | `false` | Non-TLS mode (development and testing only) |
 | `--gen-certs` | `false` | Generate self-signed certificates and exit |
 | `--certs-dir` | `./certs` | Certificate directory (a self-signed certificate is generated here automatically when cert/key are not specified) |
 | `--version` | `false` | Show version |
+
+New clients advertise support for the structured notice and render it cleanly. Clients before 1.0.0 receive a compatibility hint appended to the existing peer identity field (`SessionReady.PeerHost` for share and `JoinResponse.PeerHost` for help), which the 0.0.7 CLI already prints. The hint is sent only to pre-1.0.0 clients (or clients without a version); released 1.x clients keep the original peer identity even if they do not send the newer capability bit.
 
 For how the relay determines source IPs, the full rate-limit parameters, the rationale for the defaults, public STUN behavior, and deployment monitoring, see the [Relay Source IP, Rate Limiting and Monitoring Guide](docs/RELAY_LIMITS.md) (Chinese).
 
