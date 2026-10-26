@@ -2,7 +2,7 @@
 
 ## 前置条件
 
-1. 安装 Go 1.21 或更高版本，并确认 `go version` 可执行。
+1. 安装 Go 1.24 或更高版本，并确认 `go version` 可执行。
 2. 安装 Git（构建脚本用 `git describe` 写入版本信息）。
 3. Windows 构建脚本还会生成 VERSIONINFO 资源；首次构建时 Go 需要下载 `goversioninfo` 工具依赖。
 

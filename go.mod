@@ -1,6 +1,6 @@
 module github.com/remote-assist/tool
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/josephspurrier/goversioninfo v1.4.1
