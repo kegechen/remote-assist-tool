@@ -23,12 +23,10 @@ chmod +x scripts/build.sh
 ./scripts/build.sh
 ```
 
-脚本会构建 relay、CLI 和 web UI。主要产物为：
+本脚本只构建 relay；外部业务模块在独立仓库组装，公共 release 只包含 relay。
 
 ```text
 bin/remote-assist-relay-<os>-<arch>[.exe]
-bin/remote-assist-cli-<os>-<arch>[.exe]
-bin/remote-assist-webui-<os>-<arch>[.exe]
 ```
 
 版本号来自 `git describe --tags --always --dirty`。如果只需要临时本机构建，也可以直接指定输出文件：
@@ -36,8 +34,6 @@ bin/remote-assist-webui-<os>-<arch>[.exe]
 ```bash
 mkdir -p bin
 go build -o bin/remote-assist-relay-$(go env GOOS)-$(go env GOARCH) ./cmd/relay
-go build -o bin/remote-assist-cli-$(go env GOOS)-$(go env GOARCH) ./cmd/remote
-go build -o bin/remote-assist-webui-$(go env GOOS)-$(go env GOARCH) ./cmd/gui
 ```
 
 ## 自动检查
@@ -60,7 +56,7 @@ go tool cover -html=coverage.out
 
 ## 手动功能测试
 
-下面示例使用手动生成的 `bin/relay` 和 `bin/remote` 文件名；如果使用脚本构建，请替换为实际的 `remote-assist-relay-*` 和 `remote-assist-cli-*` 产物。
+下面示例使用手动生成的 `bin/relay` 文件名；如果使用脚本构建，请替换为实际的 `remote-assist-relay-*` 产物。
 
 ### 1. 启动 relay
 
@@ -166,12 +162,10 @@ remote-assist-tool/
 ├── cmd/
 │   ├── relay/       # relay 服务端和 Windows 服务入口
 │   ├── remote/      # share/help 客户端和 MCP 入口
-│   └── gui/         # web UI 入口
 ├── internal/
 │   ├── agent/       # 远端工具 daemon 和工具实现
 │   ├── client/      # share/help 会话与传输
 │   ├── crypto/      # TLS、TOFU 和工具通道加密
-│   ├── gui/         # GUI 后端
 │   ├── logger/       # 审计日志
 │   ├── mcp/         # MCP stdio server
 │   ├── p2p/         # STUN、打洞与 UDP relay
@@ -181,3 +175,10 @@ remote-assist-tool/
 └── tests/
     └── e2e/         # 端到端测试
 ```
+
+## relay 模块化构建
+
+`cmd/relay` 复用 `pkg/relayapp.Main()`，模块契约和注册表位于 `pkg/relay/module`。
+需要扩展 relay 的构建入口可以导入模块包后调用同一个 `Main()`；模块会在构建期注册，
+不使用动态库、运行时插件或独立进程。`--list-modules` 可检查编译进二进制的模块及兼容性，
+`--module-config` 用于加载模块配置。客户端仍可手动构建，不属于 relay-only 发布产物。

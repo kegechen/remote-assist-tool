@@ -1,8 +1,9 @@
 name: tests
 
 on:
+  workflow_dispatch:
   push:
-    branches: [master, main, "feat/**"]
+    branches: [master, main, "feat/**", "refactor/**"]
   pull_request:
     branches: [master, main]
 
@@ -30,7 +31,7 @@ jobs:
       - name: Race detector (internal packages)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: go test -race ./internal/... -timeout 180s
+        run: go test -race ./internal/... ./pkg/... -timeout 180s
       # install.sh 是 "curl | sh" 安装链上唯一一道校验，go 工具链看不到它
       - name: install.sh checksum verification
         shell: bash

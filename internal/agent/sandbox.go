@@ -79,7 +79,7 @@ func (s *Sandbox) ResolvePath(p string) (string, error) {
 }
 
 // execName 归一化 argv[0] 与配置项，用于名单比较：取 basename，Windows 上再转小写并剥掉
-// 可执行扩展名。Windows 是本项目的主平台（GUI、服务托管、--elevate 都是 Windows 专属），
+// 可执行扩展名。Windows 是本项目的主平台（服务托管、--elevate 都是 Windows 专属），
 // 而在那里文件名大小写不敏感、且 `git` 与 `git.exe` 指同一个程序——不归一化的话护栏是
 // 双向失效的：deny 列表里的 "shutdown" 拦不住 `shutdown.exe`/`SHUTDOWN.EXE`，allow 列表里的
 // "git" 又会把 AI 按 Windows 习惯发来的 `git.exe` 误拒。Unix 上大小写与扩展名都有意义，

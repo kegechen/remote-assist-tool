@@ -17,10 +17,10 @@ import (
 // 信息就没了，消费端只能猜。
 //
 // 作用范围仅限 exec 的**非流式**路径(cmd.Stdout/Stderr)，也就是 MCP 走的那条。
-// GUI 终端走 stream=true，用的是 StdoutPipe 而不是 cmd.Stdout，不经过这一层，仍然依赖
-// 前端 internal/gui/assets/assets.go 里 makeDecoder 的 UTF-8/GBK 嗅探。
+// 流式终端走 stream=true，用的是 StdoutPipe 而不是 cmd.Stdout，不经过这一层，调用方自行
+// 处理 UTF-8/GBK 嗅探。
 // 动它要先把这里的块边界缓存搬到 runStreaming 的 pump 里，是笔单独的账。
-// **在那之前不要删前端那个回退**，否则 GUI 在中文 Windows 上会立刻退回乱码。
+// **调用方需要保留相应的回退**，否则中文 Windows 输出可能退回乱码。
 //
 // 转码只在"确认不是 UTF-8"之后才发生：Windows 上 go / git / node / python 很多已经直接
 // 输出 UTF-8，无脑按 CP936 转会把本来正确的中文转成乱码。顺序必须是先验 UTF-8 再回退。

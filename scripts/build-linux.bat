@@ -20,7 +20,6 @@ rem No VERSIONINFO here: that resource is a Windows PE concept. The .syso files 
 rem cmd/* carry a _windows_amd64 suffix, so Go's build constraints skip them for linux.
 "C:\Program Files\Go\bin\go.exe" build -ldflags "%LDFLAGS%" -o bin/remote-assist-relay-linux-%GOARCH% ./cmd/relay
 if errorlevel 1 exit /b 1
-"C:\Program Files\Go\bin\go.exe" build -ldflags "%LDFLAGS%" -o bin/remote-assist-cli-linux-%GOARCH% ./cmd/remote
 if errorlevel 1 exit /b 1
 echo Done.
 dir bin\

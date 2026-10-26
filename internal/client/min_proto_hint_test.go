@@ -75,7 +75,7 @@ func TestSessionFromAckAcceptsLegacyWhenRelaxed(t *testing.T) {
 
 // P2P 断开回中转重新握手时，版本必须与首次握手一致。下限放宽到 v1 的会话里，一条
 // Version:"1" 的应答能过 sessionFromAck；照单全收的话会话就在中途悄悄掉到 v1，而
-// connect 结果、复用判断、GUI 状态都还以为是 v2。版本一致（本就是 v1 会话）时照常切回。
+// connect 结果和复用判断都还以为是 v2。版本一致（本就是 v1 会话）时照常切回。
 func TestDowngradeToRelayRejectsVersionChange(t *testing.T) {
 	if err := runDowngradeToRelay(t, proto.ToolProtocolVersionV2); !errors.Is(err, errVersionChangedMidSession) {
 		t.Fatalf("v2 会话回中转时谈出 v1 应拆除会话，实际 teardown=%v", err)

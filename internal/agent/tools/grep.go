@@ -86,7 +86,7 @@ func (t *GrepTool) Run(ctx context.Context, raw json.RawMessage, _ agent.StreamS
 		if err != nil {
 			return nil
 		}
-		// 调用方已经不等了（工具调用超时、隧道断了、GUI 关了）就立刻收工。一次覆盖大树的
+		// 调用方已经不等了（工具调用超时、隧道断了、连接关闭）就立刻收工。一次覆盖大树的
 		// grep 能跑好几分钟，结果早已无人接收，白白占着被协助端的 CPU 和磁盘。
 		if err := ctx.Err(); err != nil {
 			canceled = err

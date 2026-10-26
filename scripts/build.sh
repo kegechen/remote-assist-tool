@@ -72,8 +72,6 @@ build() {
 }
 
 build cmd/relay  remote-assist-relay "relay server"
-build cmd/remote remote-assist-cli   "remote client"
-build cmd/gui    remote-assist-webui "web console"
 
 echo "Build complete!"
 echo "Binaries in: $(pwd)/bin"

@@ -43,7 +43,7 @@ func TestParseTransfer(t *testing.T) {
 		{name: "从头传前的 truncate", tool: "write_file",
 			args: `{"path":"/a","content":"","create":true,"total":4000}`,
 			want: TransferEvent{Dir: "upload", Path: "/a", Total: 4000, Start: true}, ok: true},
-		{name: "普通 write_file（GUI 编辑器保存）照常逐条显示", tool: "write_file",
+		{name: "普通 write_file（编辑器保存）照常逐条显示", tool: "write_file",
 			args: `{"path":"/a","content":"` + content + `","create":true}`},
 		{name: "旧版 help 的 truncate 不带 total", tool: "write_file",
 			args: `{"path":"/a","content":"","create":true}`},

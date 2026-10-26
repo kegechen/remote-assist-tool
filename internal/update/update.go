@@ -75,6 +75,17 @@ func IsRelease(s string) bool {
 	return ok && suffix == ""
 }
 
+// NormalizeRelease returns the canonical release tag form used by published
+// artifacts. Configuration accepts both 1.2.3 and v1.2.3, while compatibility
+// metadata uses the repository's leading-v tag form.
+func NormalizeRelease(s string) (string, bool) {
+	v, suffix, ok := parse(s)
+	if !ok || suffix != "" {
+		return "", false
+	}
+	return fmt.Sprintf("v%d.%d.%d", v.num[0], v.num[1], v.num[2]), true
+}
+
 // Newer 报告 latest 是否严格高于 current。latest 必须是正式版本；current 无法解析
 // （dev 构建）返回 false。同号时预发布版（-rc1）低于正式版。
 func Newer(latest, current string) bool {

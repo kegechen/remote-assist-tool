@@ -67,38 +67,16 @@ scripts\build-linux.bat
 
 | 产物 | 说明 |
 |---|---|
-| `bin/remote-assist-cli-windows-amd64.exe` | 客户端，share / help 两种角色，也是 MCP 入口 |
-| `bin/remote-assist-webui-windows-amd64.exe` | 浏览器控制台（会去同目录/`bin/` 找上面那个 cli） |
 | `bin/remote-assist-relay-windows-amd64.exe` | 中转服务器 |
-| `bin/remote-assist-{cli,relay}-linux-{amd64,arm64}` | `scripts/build-linux.bat` 交叉编译产出 |
+| `bin/remote-assist-relay-linux-{amd64,arm64}` | `scripts/build-linux.bat` 交叉编译产出 |
+
+客户端仍可通过 `go build ./cmd/remote` 从源码构建；relay release 不包含客户端产物。
 
 Windows 产物内嵌产品信息（右键属性可见产品名/描述/版本），由 `goversioninfo` 按
 `git describe` 生成。该工具已用 `tools.go` 钉进 `go.mod`：`go mod download` 一次之后
 **离线也能构建**，不必每次联网。
 
 > 提示：纯编译检查用 `go build ./...`（不产出文件）；要产物务必 `-o bin/` 或用上面的脚本，别让可执行文件散落到仓库根。
-
-### Web UI 内升级 share
-
-Web UI 连接后会比较 help 与 share 的版本；确认 share 较旧时，顶部显示升级提示。选择与
-远端系统和架构匹配的 CLI 二进制后，后端按“先建后断”完成交接：
-
-1. 经 old 通道探测 PID、原可执行文件路径、系统与架构；上传前检查候选文件的 ELF/PE
-   machine，确认 Linux/Windows 与 amd64/arm64 均匹配后才分块上传，再在远端执行
-   `--version` 验证。
-2. 复用 old 的 share 参数，以隔离 `HOME`（独立 ClientID）和固定 `--code-file` 启动 new。
-   升级默认实例时，隔离 `HOME` 不改变其单实例锁：old 持锁期间 new 排队等待接管，因此
-   升级交接过程中再次启动默认 share 仍会直接报错。
-3. 仍经 old 通道读取 new code，主动连接 new 并核对版本。
-4. Linux 在 new 验证成功后原子替换原文件，再按 PID 终止 old。Windows 先把运行中的 old
-   改成备份名、让候选文件占回原路径，再启动 new；new 验证成功后按 PID 终止 old 并删除
-   备份，切换失败则经 old 通道恢复原文件。
-
-切换前任一步失败都不会终止 old；连接 new 失败会尝试自动回连 old。当前仅支持使用外部
-relay 的 Linux/Windows amd64/arm64 share，`--standalone` / `--no-auth` 会被拒绝。
-如果配置了 `--allow-exec`，升级所需的 `sh`/`powershell.exe`、`mkdir`、`chmod`、`kill` 及候选二进制也必须
-获准执行。原路径替换后，已有 systemd/开机启动配置无需改文件名；当前临时接管进程继续
-使用隔离 ClientID，下一次由原路径正常启动时恢复标准 HOME/ClientID。
 
 ### 用法一：经典 SSH 远程协助（经 relay）
 
@@ -221,7 +199,7 @@ MCP server 名建议用 `remote-debug`。
 
 ![remote-assist-tool 架构](docs/images/architecture.svg)
 
-- **协助端**：AI agent（或浏览器控制台）经 MCP stdio 调用本地的 `remote help`，后者把请求封成加密工具帧；
+- **协助端**：AI agent 或其他 MCP 客户端经 MCP stdio 调用本地的 `remote help`，后者把请求封成加密工具帧；
 - **relay**：发协助码、配对会话、转发消息、辅助打洞。它是可信边界，见[安全特性](#安全特性)；
 - **被协助端**：`remote share` 只主动连出，工具 daemon 执行命令和文件操作，每条调用实时显示在终端上；
 - **P2P 优先**：NAT 穿透成功则直连，失败自动回落 relay；经典 SSH 隧道模式走同一套连接。
@@ -354,9 +332,8 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
     - 新版 help 连旧版 share → 在 **help 端**放宽，三种入口任选其一：
       - 命令行：加 `--min-proto=1` 重启（命令行模式遇到旧版时直接中止，不会自动降级）；
       - MCP（AI agent）：**不用重启 MCP，也不用改配置**。`connect` 被拒时报错会提示 AI 先向用户说明风险、取得同意，再在当前会话里调用 `connect(code, min_proto="1")` 重试。这个参数只对这一次连接生效（含传输中断后的自动重连），并覆盖启动参数 `--min-proto`。它只是下限：已有的 v2 会话满足它，重复带上不会断开重连；
-      - GUI：勾选连接栏的「兼容旧版」后重新连接。断线自动重连会沿用这个设置；通过 GUI 把对端升级成功后会自动取消勾选，恢复默认的不降级。
     - 旧版 help 连新版 share → 在 **share 端**加 `--min-proto=1`（提示会同时打在 share 本机和旧 help 的终端上）。
-  - 降级到 v1 后，MCP `connect` 的返回结果会带上 `proto_version:"1"` 和 `warning`，GUI 终端会打出警告，连接详情里的「工具协议」一栏也会标明处于兼容模式。正常连接时 `proto_version` 为 `"2"`。
+  - 降级到 v1 后，MCP `connect` 的返回结果会带上 `proto_version:"1"` 和 `warning`；正常连接时 `proto_version` 为 `"2"`。
   - 放宽只是降低下限，不是强制降级：两端都支持 v2 时仍然谈成 v2。真的降到 v1 时两端都会打印醒目告警，因为那意味着 AAD 绑定、强制密文参数、抗重放三项一起关掉了。
   - **与 0.0.x 互通时没有 P2P 直连，全程走中转**：协商到 v1 后新端不再发任何打洞包、也不会把流量切到隧道。原因是打洞认证只能单向生效——我们会拒绝旧版不带 MAC 的包，但旧版只比对 `session_id`、压根不认识 `mac` 字段，会照单全收我们的包并**单方面**认定 P2P 已通，然后把流量送进一条我们这边根本没建起来的隧道。不发包是唯一能让两端状态保持一致的做法。
     - 需要说明的是：share 侧的地址通告可能在工具握手之前就发出去了（`advertiseAddr` 在 `mgr.Start()` 内部，而握手要等 `SessionReady` 之后才到），所以旧对端仍可能自行打洞、空等到它自己超时。这部分浪费在对端、我们改不动它的代码；要彻底免掉就得推迟 P2P 启动，但握手到达前分不清这是工具会话还是 SSH 会话，推迟会让 SSH 的 P2P 一起失效。**不会**因此出现黑洞：新端始终不回包、也不切隧道。

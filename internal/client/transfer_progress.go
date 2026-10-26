@@ -19,7 +19,7 @@ import (
 //
 //	上传 xgimi_remote.apk [=========>          ]  47.3%  17.8/37.6 MB  3.1 MB/s  剩余 00:06
 //
-// 非终端（重定向到文件、GUI 无控制台）下不能用 \r，改为每隔 plainEvery 打一整行。
+// 非终端（重定向到文件、无控制台）下不能用 \r，改为每隔 plainEvery 打一整行。
 // 两种模式传输结束都打一行汇总。其他活动行与日志经 Print / Writer 输出，先擦掉
 // 进度行、写完再重画，不会和进度行串在一起。
 type transferProgress struct {

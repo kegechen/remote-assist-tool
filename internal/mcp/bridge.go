@@ -267,7 +267,7 @@ func (b *Bridge) CallTool(ctx context.Context, name string, args json.RawMessage
 //
 // onChunk 契约：**不可长时间阻塞**。它在 help 端的隧道读循环上被同步调用，堵住它就等于
 // 堵住整条隧道（心跳也读不到，最终被判 tunnel_lost）。需要慢速消费的调用方自己排队——
-// gui.MCPClient 就为此配了每条流一个 pump goroutine。
+// 每条流都为此配一个 pump goroutine。
 func (b *Bridge) CallToolStream(ctx context.Context, name string, args json.RawMessage, onChunk func(stream string, data []byte)) (json.RawMessage, error) {
 	return b.callToolInner(ctx, name, args, onChunk)
 }
@@ -372,7 +372,7 @@ func (b *Bridge) callToolInner(ctx context.Context, name string, args json.RawMe
 		if !resp.OK {
 			return nil, fmt.Errorf("%s: %s", resp.ErrorCode, resp.ErrorMsg)
 		}
-		// 流式输出缺了帧就不能当成功返回：调用方（GUI 终端 / AI）没有别的办法察觉，
+		// 流式输出缺了帧就不能当成功返回：调用方（终端 / AI）没有别的办法察觉，
 		// 一份被挖空却标着 OK 的输出比一次明确的失败危险得多。
 		if recv != nil {
 			// v1 对端不发终止帧，只能按「缺帧数」判完整性；缺帧检测本身两个版本都有效。

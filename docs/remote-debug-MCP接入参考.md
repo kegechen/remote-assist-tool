@@ -21,7 +21,7 @@ remote-assist-cli-<os>-<arch>[.exe]
 ```
 
 - `remote-assist-cli`：客户端，**两端用同一个文件**——远端跑 `share`，本地跑 `help`。
-- 同一 Release 里的 `remote-assist-relay-*` 是中转服务器，只有自建 relay 才需要；`remote-assist-webui-*` 是浏览器控制台，它在后台拉起 `remote-assist-cli help --mcp-stdio`，用同一套 MCP 工具，只是改由人在网页上操作，接入 AI agent 不需要它。
+- 同一 Release 里的 `remote-assist-relay-*` 是中转服务器，只有自建 relay 才需要。
 
 也可以用一键脚本（Linux、macOS，或 Windows 的 Git Bash / MSYS2 / Cygwin）：
 

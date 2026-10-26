@@ -105,7 +105,7 @@ func TestReadFileExplicitLengthHonored(t *testing.T) {
 }
 
 // write_file 的 content 字段是 base64：Go 端类型是 []byte，encoding/json 按 base64 解码。
-// 客户端（GUI、脚本）直接发明文是 bug——多数会报 illegal base64，但恰好落在 base64
+// 客户端或脚本直接发明文是 bug——多数会报 illegal base64，但恰好落在 base64
 // 字母表且长度为 4 倍数的短内容会被静默解成垃圾字节写进文件，无声损坏用户数据。
 // 这个测试把该契约钉住：改动它就要同步改所有调用方的编码。
 func TestWriteFileContentIsBase64(t *testing.T) {

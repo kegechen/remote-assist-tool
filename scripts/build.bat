@@ -42,10 +42,6 @@ echo Resource version: %FILEVER%
 
 call :build cmd/relay  remote-assist-relay "relay server"
 if errorlevel 1 exit /b 1
-call :build cmd/remote remote-assist-cli   "remote client"
-if errorlevel 1 exit /b 1
-call :build cmd/gui    remote-assist-webui "web console"
-if errorlevel 1 exit /b 1
 
 echo Build complete!
 echo Binaries in: %CD%\bin

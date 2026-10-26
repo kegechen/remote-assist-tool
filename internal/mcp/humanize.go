@@ -15,7 +15,7 @@ import (
 // 这里在面向 Claude 的唯一出口（MCP server 的 tools/call 响应）做一次后处理：
 //   - 合法 UTF-8  → 直接给文本（text 字段）
 //   - 二进制      → 只标注 binary + 字节数 + 人类可读大小，不再把无意义的 base64 大块
-//                   塞给 Claude（顺带省 token / 带宽）
+//     塞给 Claude（顺带省 token / 带宽）
 //
 // 这一层只做编码转换，不做截断。限量一律在源头（agent 端）完成：read_file 靠默认块
 // 大小限量以保证 bytes_len/eof 自洽可续读，exec 靠 max_output_bytes 限量。在这里二次
@@ -54,8 +54,8 @@ func humanizeReadFile(result json.RawMessage) (string, bool) {
 	// offset，必须显式给出，否则大文件分块读会错位。
 	out := map[string]any{"eof": r.EOF, "bytes_len": len(r.Bytes)}
 	if r.AsText {
-		// The GUI requests this only after a user explicitly opts into a text
-		// preview. Keep the bytes so its browser decoder can handle GBK/UTF-16.
+		// Callers request this only after a user explicitly opts into a text
+		// preview. Keep the bytes so their decoder can handle GBK/UTF-16.
 		out["bytes_b64"] = base64.StdEncoding.EncodeToString(r.Bytes)
 	} else if isTextChunk(r.Bytes) {
 		out["text"] = string(r.Bytes)

@@ -120,7 +120,7 @@ func TestExecStreamEndToEnd(t *testing.T) {
 		t.Fatalf("no code in share output:\n%s", shareOut.String())
 	}
 
-	// 3. help --mcp-stdio（bootstrap，与 GUI 用的是同一条路径）
+	// 3. help --mcp-stdio（bootstrap，与其他 MCP 客户端用的是同一条路径）
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	helpCmd := exec.CommandContext(ctx, remoteBin, "help",

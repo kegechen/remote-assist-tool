@@ -48,9 +48,7 @@ jobs:
           fi
           ldflags="-X github.com/remote-assist/tool/internal/version.Version=$RELEASE_TAG"
           suf="${GOOS}-${GOARCH}${ext}"
-          go build -ldflags "$ldflags" -o "dist/remote-assist-cli-${suf}" ./cmd/remote
           go build -ldflags "$ldflags" -o "dist/remote-assist-relay-${suf}" ./cmd/relay
-          go build -ldflags "$ldflags" -o "dist/remote-assist-webui-${suf}" ./cmd/gui
         shell: bash
 
       - name: Upload Release Assets

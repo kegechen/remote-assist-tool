@@ -163,7 +163,7 @@ func (e *ExecTool) Run(ctx context.Context, raw json.RawMessage, sink agent.Stre
 // 才发——命令零星吐一行也会立刻成帧送走，终端才有"边跑边出"的手感。
 const execStreamChunk = 32 * 1024
 
-// runStreaming 边跑边把 stdout/stderr 推给 sink，供 GUI 流式终端实时渲染。
+// runStreaming 边跑边把 stdout/stderr 推给 sink，供流式客户端实时渲染。
 //
 // 与非流式模式的契约差异（调用方以 stream=true 显式选入）：
 //   - 输出不在 share 端累积，也不受 max_output_bytes 截断——实时输出由调用方自己留存

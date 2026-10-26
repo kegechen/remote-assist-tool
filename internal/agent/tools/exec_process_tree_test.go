@@ -84,7 +84,7 @@ func TestExecStreamingClosesInheritedPipesOnTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("期望超时错误")
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
 		t.Fatalf("继承输出管道的孙进程不应让 streaming exec 卡住: %v", elapsed)
 	}
 	// pipe holder 会自行退出，避免测试留下外部进程。

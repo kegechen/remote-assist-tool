@@ -67,7 +67,7 @@ func (c *blockingCaller) CallTool(_ context.Context, name string, args json.RawM
 	return json.Marshal(struct{}{})
 }
 
-// 回归：上传途中外层 ctx 被取消（notifications/cancelled、GUI 超时）时，doUploadFile
+// 回归：上传途中外层 ctx 被取消（notifications/cancelled、调用方超时）时，doUploadFile
 // 必须及时返回错误。
 //
 // 修复前 select 的 <-cctx.Done() 分支是空的，于是：

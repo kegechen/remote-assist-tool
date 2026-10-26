@@ -260,7 +260,7 @@ type connectResult struct {
 	P2P         bool   `json:"p2p,omitempty"`          // true when tool channel uses P2P direct connection
 	PeerVersion string `json:"peer_version,omitempty"` // share 版本，来自 relay join 响应
 	PeerHost    string `json:"peer_host,omitempty"`
-	HelpVersion string `json:"help_version,omitempty"` // 当前 help CLI 版本，供 GUI 做升级提示
+	HelpVersion string `json:"help_version,omitempty"` // 当前 help CLI 版本，供调用方显示升级提示
 	// ProtoVersion 协商出的工具协议版本。降级到 v1 时附带 Warning：stderr 上的告警 AI
 	// 看不到，只有放进结果里，它才能如实转告用户当前处在兼容模式。
 	ProtoVersion string `json:"proto_version,omitempty"`
@@ -854,7 +854,7 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 		}
 		// 版本必须与首次握手一致。下限放宽到 v1 时，一条伪造的 Version:"1" 应答能过
 		// sessionFromAck，若照单全收，会话就在中途悄悄掉到 v1：connect 结果、复用判断和
-		// GUI 状态都还以为是 v2，之后按默认下限的 connect 会复用一个实际跑在 v1 上的会话。
+		// 调用方状态都还以为是 v2，之后按默认下限的 connect 会复用一个实际跑在 v1 上的会话。
 		if newSess.Version != sessVersion {
 			teardown(fmt.Errorf("tunnel_lost: P2P 中断后重新握手失败（%w），请重新 connect", errVersionChangedMidSession))
 			return
@@ -1081,7 +1081,7 @@ func (b *HelpMCPBootstrap) doUploadFile(ctx context.Context, br toolCaller, raw 
 		case sem <- struct{}{}:
 		case <-cctx.Done():
 			// 两条取消源都会走到这里：setErr 内部取消（firstErr 已置，下面 hasErr 直接 break），
-			// 以及外部 ctx 取消（notifications/cancelled、GUI 超时）。后者 firstErr 仍是 nil，
+			// 以及外部 ctx 取消（notifications/cancelled、调用方超时）。后者 firstErr 仍是 nil，
 			// 必须在此显式置错，否则 (a) 下面 hasErr 为假会继续起 worker，而 worker 的
 			// `defer <-sem` 没有配对的 put，sem 容量只有 1，wg.Wait 必然永久阻塞；
 			// (b) 即便 break 掉，firstErr 为 nil 会让本函数谎报上传成功，而 total 里

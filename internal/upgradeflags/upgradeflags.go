@@ -1,7 +1,7 @@
 // Package upgradeflags is the single source of truth for the flag policy the
 // make-before-break upgrade applies to an old share's command line: rejecting
 // standalone/no-auth shares, locating --root (with remote-OS path semantics),
-// and reading flag values. Both the help/GUI orchestrator (internal/gui) and
+// and reading flag values. Both the help orchestrator and
 // the remote stage helper (cmd/remote) import it so the policy can't drift
 // between them. It has no dependencies on either package (leaf package).
 package upgradeflags

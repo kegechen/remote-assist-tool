@@ -49,7 +49,7 @@ func (t *TailLogTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 		return nil, err
 	}
 	// 同时走 sink（兼容旧 consumer）和把内容放进 result。result 是权威来源：调用方不要
-	// 流式时（Claude、GUI 的非终端调用都不要）没人接 sink，块会被 bridge 丢掉，所以
+	// 流式时（非终端调用都不要）没人接 sink，块会被 bridge 丢掉，所以
 	// lines 必须嵌在 result 里。
 	if sink != nil && len(last) > 0 {
 		sink.Send("stdout", last)
