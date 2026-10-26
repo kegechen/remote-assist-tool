@@ -117,7 +117,10 @@ type Config struct {
 	AuditLogFile   string
 	UseTLS         bool
 	STUNListenAddr string // STUN server listen address (empty to disable)
-	NoAuth         bool   // true: use fixed proto.NoAuthCode instead of random code generation (LAN-only, no auth)
+	// QUICListenAddr 额外在 UDP 上监听 QUIC（空=关闭）。TCP 被丢弃回程时给新版客户端兜底，
+	// 必须同时开 TLS。通常与 ListenAddr 同端口号（如 :8443），客户端不需要额外配置。
+	QUICListenAddr string
+	NoAuth         bool // true: use fixed proto.NoAuthCode instead of random code generation (LAN-only, no auth)
 	// DisableSourceIPLimits 旁路所有按来源 IP 计费的限制（零值=启用，安全默认）。
 	// 仅用于无法恢复真实源 IP 的 SNAT 部署；per-connection 与 global 限制始终生效。
 	DisableSourceIPLimits bool
@@ -136,6 +139,7 @@ type Server struct {
 	clients    map[string]*ClientConn
 	clientsMu  sync.RWMutex
 	stunServer *p2p.STUNServer
+	quicAddr   atomic.Value // net.Addr，QUIC 监听地址（未开启为空）
 
 	connMu    sync.Mutex     // 保护 connTotal / connPerIP
 	connTotal int            // 当前全局连接数
@@ -270,9 +274,9 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 
 	var listener net.Listener
 	var err error
+	var tlsConfig *tls.Config
 
 	if s.config.UseTLS && s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
-		var tlsConfig *tls.Config
 		tlsConfig, err = crypto.NewTLSConfig(s.config.TLSCertFile, s.config.TLSKeyFile)
 		if err != nil {
 			return fmt.Errorf("failed to create TLS config: %w", err)
@@ -286,6 +290,18 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 		return err
 	}
 
+	var qln *quicListener
+	if s.config.QUICListenAddr != "" {
+		qln, err = s.listenQUIC(tlsConfig)
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("failed to start QUIC listener: %w", err)
+		}
+		s.quicAddr.Store(qln.Addr())
+		log.Printf("QUIC listening on %s (udp)", qln.Addr())
+		go s.serveQUIC(ctx, qln)
+	}
+
 	log.Printf("Server starting on %s", s.config.ListenAddr)
 	log.Printf("Relay limits: %s", s.limits.JSON())
 	go s.cleanupLoop(ctx)
@@ -296,6 +312,9 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 		<-ctx.Done()
 		log.Printf("Shutting down server...")
 		listener.Close()
+		if qln != nil {
+			qln.Close()
+		}
 	}()
 	if onReady != nil {
 		onReady()
@@ -313,8 +332,22 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 				continue
 			}
 		}
-		go s.handleConn(conn)
+		s.dispatchConn(conn)
 	}
+}
+
+// dispatchConn 处理 TCP Accept 到的连接。QUIC 的对应入口是 acceptQUICConn：两者占连接
+// 名额的时机不同（QUIC 要先占名额再等流），之后都汇入 serveConn。
+func (s *Server) dispatchConn(conn net.Conn) {
+	go s.handleConn(conn)
+}
+
+// QUICAddr 返回 QUIC 实际监听地址（未开启或尚未启动时为 nil），供测试拿到随机端口。
+func (s *Server) QUICAddr() net.Addr {
+	if a, ok := s.quicAddr.Load().(net.Addr); ok {
+		return a
+	}
+	return nil
 }
 
 // acquireConnSlot 连接准入：未超限则占一个名额并返回 true；超限返回 false，调用方应关闭连接。
@@ -465,7 +498,6 @@ func (s *Server) releaseConnSlot(ip string) {
 
 // handleConn 处理连接
 func (s *Server) handleConn(conn net.Conn) {
-	clientID := generateClientID()
 	clientIP := conn.RemoteAddr().String()
 
 	// 连接数准入：按源 IP 限流，超限直接拒绝，防资源耗尽型 DoS
@@ -479,6 +511,13 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 	defer s.releaseConnSlot(host)
+	s.serveConn(conn, clientIP)
+}
+
+// serveConn 处理一条已占到连接名额的连接（调用方负责释放名额）。QUIC 在等流之前就
+// 占名额，所以与 TCP 在这里汇合，而不是在 handleConn。
+func (s *Server) serveConn(conn net.Conn, clientIP string) {
+	clientID := generateClientID()
 
 	// Enable TCP KeepAlive to detect dead connections
 	if tcpConn, ok := conn.(*net.TCPConn); ok {

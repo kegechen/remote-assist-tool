@@ -364,3 +364,26 @@ func receiveServiceStatus(t *testing.T, statuses <-chan svc.Status) svc.Status {
 		return svc.Status{}
 	}
 }
+
+// quic_listen 只能配合 TLS：plain 下配了就在加载配置时报错，而不是让服务启动后反复失败。
+func TestWindowsServiceConfigQUICListen(t *testing.T) {
+	cfg := windowsServiceConfig{
+		ListenAddr:    ":8443",
+		CodeTTL:       "30m",
+		CodeLength:    10,
+		AuditLog:      `C:\ProgramData\RemoteAssistRelay\logs\audit.jsonl`,
+		TrustSourceIP: true,
+		CertsDir:      `C:\ProgramData\RemoteAssistRelay\certs`,
+		QUICAddr:      ":8443",
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("TLS 下配置 quic_listen 应合法: %v", err)
+	}
+	if args := strings.Join(cfg.relayArgs(), " "); !strings.Contains(args, "--quic-listen :8443") {
+		t.Fatalf("relayArgs 未传 --quic-listen: %s", args)
+	}
+	cfg.Plain = true
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "quic_listen") {
+		t.Fatalf("validate()=%v, want quic_listen requires TLS error", err)
+	}
+}

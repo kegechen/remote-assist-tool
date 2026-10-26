@@ -32,6 +32,7 @@ type relayOptions struct {
 	genCerts       bool
 	certsDir       string
 	stunAddr       string
+	quicAddr       string
 	trustSourceIP  bool
 	limitsFile     string
 	printLimits    bool
@@ -113,6 +114,7 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		AuditLogFile:          opts.auditLog,
 		UseTLS:                !opts.plain,
 		STUNListenAddr:        opts.stunAddr,
+		QUICListenAddr:        opts.quicAddr,
 		NoAuth:                opts.noAuth,
 		DisableSourceIPLimits: !opts.trustSourceIP,
 		Limits:                limits,
@@ -172,6 +174,7 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.BoolVar(&opts.genCerts, "gen-certs", false, "Generate self-signed certs and exit")
 	fs.StringVar(&opts.certsDir, "certs-dir", opts.certsDir, "Directory for generated certs")
 	fs.StringVar(&opts.stunAddr, "stun", "", "STUN server listen address (empty to disable, e.g. ':3478' to enable)")
+	fs.StringVar(&opts.quicAddr, "quic-listen", "", "Also accept clients over QUIC/UDP on this address (empty to disable, e.g. ':8443'); requires TLS. New clients fall back to it when TCP to the relay is blocked")
 	fs.BoolVar(&opts.trustSourceIP, "trust-source-ip", opts.trustSourceIP, "Trust direct peer IP for per-IP limits; set false behind an SNAT load balancer")
 	fs.StringVar(&opts.limitsFile, "limits-file", opts.limitsFile, "JSON rate-limit config file (or REMOTE_RELAY_LIMITS_FILE)")
 	fs.BoolVar(&opts.printLimits, "print-default-limits", false, "Print default rate-limit JSON and exit")
@@ -195,6 +198,9 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	}
 	if opts.codeTTL <= 0 {
 		return relayOptions{}, fmt.Errorf("ttl must be positive")
+	}
+	if opts.plain && opts.quicAddr != "" {
+		return relayOptions{}, fmt.Errorf("--quic-listen requires TLS; it cannot be combined with --plain")
 	}
 	if opts.codeLength <= 0 {
 		return relayOptions{}, fmt.Errorf("length must be positive")

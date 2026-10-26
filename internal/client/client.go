@@ -26,7 +26,8 @@ const writeTimeout = 30 * time.Second
 // MCP 里格外要命：doConnect 入口就持有 connectMu，一个卡住的 connect 会让之后所有
 // connect 排队等它，整个 MCP server 只能重启。
 //
-// tls.DialWithDialer 会把这个 timeout 同时用作握手 deadline，两段都盖住。
+// dialRelay 把它作为整个拨号（TCP/QUIC 竞速、各自的 TLS 握手）的 context 截止时间，
+// 两段都盖住。
 var dialTimeout = 20 * time.Second
 
 // joinTimeout 等待 relay 回 JoinResponse / RegisterResponse 的超时。TCP 连上、TLS 也
@@ -53,6 +54,8 @@ type Config struct {
 	// MinProto 对应 --min-proto：可接受的最低工具协议版本。空串视作
 	// proto.DefaultMinProto，即不降级。放宽到 "1" 才会与 0.0.x 的旧客户端互通。
 	MinProto string
+	// Transport 对应 --transport：auto（空串同义，TCP 与 QUIC 竞速）、tcp、quic。
+	Transport string
 	// trustStore 仅供测试注入自定义指纹表位置；零值走 ~/.remote_assist_known_hosts。
 	trustStore *crypto.TrustStore
 }
@@ -108,7 +111,10 @@ type Client struct {
 	// 那个窗口，于是旧心跳 goroutine 检查 IsClosed() 得到 false，继续用新连接发
 	// 心跳，每次重连再叠一个，永不退出。
 	hbStop chan struct{}
-	mu     sync.Mutex
+	// transport 上一次成功建连用的传输（tcp/quic），auto 模式下次先拨它。只记在进程内：
+	// 网络环境变了不该一直沿用旧选择，进程重启即重新从 TCP 开始。
+	transport string
+	mu        sync.Mutex
 }
 
 // NewClient 创建客户端
@@ -126,12 +132,9 @@ func (c *Client) Connect() error {
 	c.closed = false               // 允许 Close 后重新连接
 	c.hbStop = make(chan struct{}) // 新一代连接：上一代的 hbStop 已在 Close 里关闭
 
-	var conn net.Conn
-	var err error
-
-	dialer := &net.Dialer{Timeout: dialTimeout}
+	var tlsConfig *tls.Config
 	if c.config.UseTLS {
-		var tlsConfig *tls.Config
+		var err error
 		tlsConfig, err = crypto.NewClientTLSConfig(crypto.ClientTLSOptions{
 			SkipVerify:   c.config.InsecureSkip,
 			CAFile:       c.config.CAFile,
@@ -143,14 +146,16 @@ func (c *Client) Connect() error {
 		if err != nil {
 			return fmt.Errorf("failed to create TLS config: %w", err)
 		}
-		conn, err = tls.DialWithDialer(dialer, "tcp", c.config.ServerAddr, tlsConfig)
-	} else {
-		conn, err = dialer.Dial("tcp", c.config.ServerAddr)
 	}
 
+	conn, transport, err := c.dialRelay(tlsConfig, c.transport)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
+	if c.config.Transport == "" || c.config.Transport == TransportAuto {
+		logTransport(c.config.ServerAddr, transport, c.transport)
+	}
+	c.transport = transport
 
 	// Enable TCP KeepAlive to detect dead connections
 	if tcpConn, ok := conn.(*net.TCPConn); ok {

@@ -32,6 +32,7 @@ func TestParseRelayOptionsRejectsInvalidValues(t *testing.T) {
 		{"--cert", "server.crt"},
 		{"--key", "server.key"},
 		{"unexpected"},
+		{"--plain", "--quic-listen", ":8443"},
 	}
 	for _, args := range tests {
 		if _, err := parseRelayOptions(args, &bytes.Buffer{}); err == nil {

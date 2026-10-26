@@ -42,6 +42,7 @@ type windowsServiceConfig struct {
 	Plain          bool   `json:"plain"`
 	CertsDir       string `json:"certs_dir"`
 	STUNAddr       string `json:"stun,omitempty"`
+	QUICAddr       string `json:"quic_listen,omitempty"`
 	TrustSourceIP  bool   `json:"trust_source_ip"`
 	LimitsFile     string `json:"limits_file,omitempty"`
 	NoAuth         bool   `json:"no_auth"`
@@ -130,6 +131,9 @@ func (cfg windowsServiceConfig) validate() error {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return errors.New("cert and key must be specified together")
 	}
+	if cfg.Plain && cfg.QUICAddr != "" {
+		return errors.New("quic_listen requires TLS; it cannot be combined with plain")
+	}
 	if !cfg.Plain && cfg.CertFile == "" && cfg.CertsDir == "" {
 		return errors.New("certs_dir must be a non-empty absolute path when TLS certificates are generated automatically")
 	}
@@ -174,6 +178,9 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 	}
 	if cfg.STUNAddr != "" {
 		args = append(args, "--stun", cfg.STUNAddr)
+	}
+	if cfg.QUICAddr != "" {
+		args = append(args, "--quic-listen", cfg.QUICAddr)
 	}
 	if cfg.LimitsFile != "" {
 		args = append(args, "--limits-file", cfg.LimitsFile)

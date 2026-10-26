@@ -123,6 +123,7 @@ func runShare(args []string) {
 	caFile := fs.String("ca", "", "CA certificate file")
 	trustNewCert := fs.Bool("trust-new-cert", false, "Accept a relay certificate whose fingerprint differs from the one recorded on first connect, and re-pin it. Use after the relay legitimately regenerated its cert.")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
+	transport := fs.String("transport", client.TransportAuto, "Relay transport: auto (TCP, falling back to QUIC/UDP after 3s if TCP is stuck), tcp, quic")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
@@ -341,6 +342,9 @@ func runShare(args []string) {
 		}
 	}
 
+	if !client.ValidTransport(*transport) {
+		log.Fatalf("Error: invalid --transport %q (want auto, tcp or quic)", *transport)
+	}
 	cfg := &client.Config{
 		ServerAddr:   *server,
 		InsecureSkip: *insecure,
@@ -351,6 +355,7 @@ func runShare(args []string) {
 		BindIP:       *bindIP,
 		TrustNewCert: *trustNewCert,
 		MinProto:     *minProto,
+		Transport:    *transport,
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
@@ -371,6 +376,7 @@ func runHelp(args []string) {
 	caFile := fs.String("ca", "", "CA certificate file")
 	trustNewCert := fs.Bool("trust-new-cert", false, "Accept a relay certificate whose fingerprint differs from the one recorded on first connect, and re-pin it. Use after the relay legitimately regenerated its cert.")
 	plain := fs.Bool("plain", false, "Use plain TCP (insecure, for dev only)")
+	transport := fs.String("transport", client.TransportAuto, "Relay transport: auto (TCP, falling back to QUIC/UDP after 3s if TCP is stuck), tcp, quic")
 	p2pMode := fs.String("p2p", "auto", "P2P mode: disabled, auto, required")
 	stunServer := fs.String("stun", "", "STUN server address for P2P (default: same as relay:3478)")
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
@@ -428,6 +434,9 @@ func runHelp(args []string) {
 		*p2pMode = "disabled"
 	}
 
+	if !client.ValidTransport(*transport) {
+		log.Fatalf("Error: invalid --transport %q (want auto, tcp or quic)", *transport)
+	}
 	cfg := &client.Config{
 		ServerAddr:   *server,
 		InsecureSkip: *insecure,
@@ -438,6 +447,7 @@ func runHelp(args []string) {
 		BindIP:       *bindIP,
 		TrustNewCert: *trustNewCert,
 		MinProto:     *minProtoHelp,
+		Transport:    *transport,
 	}
 
 	if *mcpStdio {
