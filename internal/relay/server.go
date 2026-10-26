@@ -232,6 +232,8 @@ func NewServer(cfg *Config) (*Server, error) {
 	// 并等待新协助端），只是此前 relay 从不在 Help 断连时发，那条路径一直是死代码。
 	// 在 Start 之前装好，之后只读不写，无并发。
 	srv.sessions.onHelpCleared = srv.notifyShareHelpGone
+	// 断线宽限与协助码 TTL 一致：使用中断开后，原码再保留一个 TTL。
+	srv.sessions.reconnectGrace = cfg.CodeTTL
 	return srv, nil
 }
 

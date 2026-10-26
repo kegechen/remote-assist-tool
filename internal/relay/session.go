@@ -119,6 +119,11 @@ type SessionManager struct {
 	// （可能为 nil 时不调）。回调一律在 sm.mu 之外执行，实现里可以做网络写。
 	// 由 NewServer 在 Start 前一次性装配，此后只读。
 	onHelpCleared func(share *ClientConn)
+
+	// reconnectGrace 使用中（share、help 都在）的会话发生断开后保留的时长：有效期顺延到
+	// 「断开时刻 + reconnectGrace」并恢复码映射，期间两端都能用原码/原 ClientID 回来。
+	// 0 表示不宽限（过了原 TTL 的会话一断即清）。由 NewServer 在 Start 前装配，此后只读。
+	reconnectGrace time.Duration
 }
 
 // NewSessionManager 创建会话管理器
@@ -649,6 +654,11 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 		delete(sm.byConnID, clientID)
 		// 数据面立即失效：Help 断连后旧 UDP relay 状态不得在去抖窗口内残留。
 		session.dataPlaneReady = false
+		// 宽限必须在去抖开始时就生效：过了原 TTL 的会话码映射已删，若等去抖回调再恢复，
+		// 去抖本该兜住的秒级抖动反而用原码回不来。
+		if session.Share != nil {
+			sm.graceAfterInUseLocked(session, time.Now())
+		}
 		// Help 断连去抖：延迟 5 秒再清除，防止网络抖动导致不必要的重连
 		session.pendingHelpID = clientID
 		session.helpDisconnectTimer = time.AfterFunc(helpDisconnectDebounce, func() {
@@ -678,6 +688,9 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 		session.dataPlaneReady = false
 		session.shareReady = false
 		help := session.Help
+		if help != nil {
+			sm.graceAfterInUseLocked(session, time.Now())
+		}
 		session.Share = nil
 		// 在线者真正离开：互踢已经结束（被顶掉一方的断开在上面 byConnID 查不到，走不到
 		// 这里），清掉冲突状态。否则接管者在冷却期内遇到一次半开重连会被误判为冲突，
@@ -693,6 +706,26 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 		}
 	}
 	return nil
+}
+
+// graceAfterInUseLocked 在使用中会话（share、help 都在）发生断开时调用：保证码在断开后
+// 至少还有一个 reconnectGrace（有效期取 max(原值, now+reconnectGrace)），并恢复码映射。
+// 原 TTL 之内断开同样顺延——用户要的是「断开后这段时间码不变」，不是「生成后这段时间」；
+// 续期只发生在真有人连着用的会话上。使用中的会话过了原 TTL 只删码映射不清理（见
+// CleanupExpired），没有这一步的话任何一端抖断一下，下一轮清理就会删掉会话，重连只能
+// 拿到新码。码映射只在空闲时恢复：no-auth 下码恒为 NoAuthCode，不能抢别的会话的条目。
+// 调用方须持 sm.mu。
+func (sm *SessionManager) graceAfterInUseLocked(session *TunnelSession, now time.Time) {
+	if sm.reconnectGrace <= 0 || session.closed {
+		return
+	}
+	if until := now.Add(sm.reconnectGrace); until.After(session.ExpiresAt) {
+		session.ExpiresAt = until
+	}
+	if _, taken := sm.byCode[session.Code]; !taken {
+		sm.byCode[session.Code] = session
+	}
+	log.Printf("Session %s in use disconnected, code kept until %s", session.ID, session.ExpiresAt.Format(time.RFC3339))
 }
 
 // CleanupExpired 清理过期会话
