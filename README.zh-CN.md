@@ -32,6 +32,17 @@ wget -qO- https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/i
 REMOTE_INSTALL_DIR=/usr/local/bin sh install.sh
 ```
 
+已经装过时，脚本会用 `remote --version` 对比最新 Release 的 tag：一致就跳过下载，不一致就原地更新到
+最新版。无论哪种情况，最后都会直接启动 `remote`（无参数即 `share` 协助端模式）。`sh -s --` 之后的参数
+原样透传给 `remote`；只想安装/更新不启动时设 `REMOTE_INSTALL_NO_RUN=1`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | sh -s -- share --standalone
+curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | REMOTE_INSTALL_NO_RUN=1 sh
+```
+
+没有可用终端（CI、无人值守部署）时只安装、不启动。
+
 支持 Linux、macOS 和 Windows（Git Bash / MSYS2 / Cygwin）的 amd64、arm64 架构；
 Linux/macOS 下载后会自动添加可执行权限；Windows 中 `curl` / `wget` 下载失败时会自动回退到
 系统 PowerShell。

@@ -106,7 +106,7 @@ verify_checksum() {
     file=$1
 
     sums_file="${temp_file}.sums"
-    sums_url="https://github.com/${REPOSITORY}/releases/latest/download/SHA256SUMS"
+    sums_url="${release_base}/SHA256SUMS"
     if ! download "$sums_url" "$sums_file"; then
         fail "cannot download the checksum list: ${sums_url}
   (set REMOTE_INSTALL_SKIP_CHECKSUM=1 to install without verification)"
@@ -135,6 +135,53 @@ verify_checksum() {
     info "Checksum verified."
 }
 
+# resolve_latest_tag 打印最新正式 Release 的 tag，拿不到时什么都不打印。
+#
+# 走 github.com/<repo>/releases/latest 的 302 跳转（落到 .../releases/tag/<tag>），不调
+# REST API：匿名 API 每小时 60 次的限额在公司出口 NAT 后面很容易被别人用光。
+resolve_latest_tag() {
+    latest_url="https://github.com/${REPOSITORY}/releases/latest"
+    location=''
+
+    if command -v curl >/dev/null 2>&1; then
+        location=$(curl --fail --location --silent --show-error \
+            --connect-timeout 10 --max-time 30 --retry 2 \
+            --output /dev/null --write-out '%{url_effective}' "$latest_url" 2>/dev/null) || location=''
+    fi
+
+    if [ -z "$location" ] && command -v wget >/dev/null 2>&1; then
+        location=$(wget --max-redirect=0 -S -T 30 -t 2 -O /dev/null "$latest_url" 2>&1 |
+            awk 'tolower($1) == "location:" { print $2 }' | tail -n 1 | tr -d '\r')
+    fi
+
+    # 与 download 一样，Windows 上 curl/wget 都不通时用系统 PowerShell 兜底：不跟随跳转，
+    # 直接读 302 的 Location。
+    if [ -z "$location" ] && [ "${os:-}" = 'windows' ] && command -v powershell.exe >/dev/null 2>&1; then
+        location=$(REMOTE_LATEST_URL=$latest_url \
+            powershell.exe -NoProfile -NonInteractive -Command \
+            '$ErrorActionPreference = "Stop"; $r = [Net.WebRequest]::Create($env:REMOTE_LATEST_URL); $r.Method = "HEAD"; $r.AllowAutoRedirect = $false; $r.Timeout = 30000; $resp = $r.GetResponse(); try { $resp.Headers["Location"] } finally { $resp.Close() }' \
+            2>/dev/null | tr -d '\r') || location=''
+    fi
+
+    case "$location" in
+        */releases/tag/?*)
+            printf '%s' "${location##*/releases/tag/}"
+            ;;
+    esac
+}
+
+# installed_version 打印已安装二进制自报的版本（`remote --version` 输出 "remote-assist <版本>"），
+# 未安装或读不出来时什么都不打印。
+installed_version() {
+    [ -f "$install_path" ] || return 0
+    "$install_path" --version 2>/dev/null | sed -n 's/^remote-assist //p' | head -n 1
+}
+
+# 发布过的 tag 有带 v 也有不带 v 的（1.0.0 / v1.1.0），比较前统一去掉前导 v。
+strip_v() {
+    printf '%s' "${1#v}"
+}
+
 os=$(detect_os)
 arch=$(detect_arch)
 
@@ -146,7 +193,6 @@ if [ "$os" = 'windows' ]; then
 fi
 
 asset="remote-assist-cli-${os}-${arch}${extension}"
-download_url="https://github.com/${REPOSITORY}/releases/latest/download/${asset}"
 
 if [ -n "${REMOTE_INSTALL_DIR:-}" ]; then
     install_dir=$REMOTE_INSTALL_DIR
@@ -156,45 +202,92 @@ else
     fail "HOME is not set; set REMOTE_INSTALL_DIR to choose an install directory"
 fi
 
-mkdir -p "$install_dir" || fail "cannot create install directory: ${install_dir}"
 install_path="${install_dir}/${command_name}"
-temp_file=$(mktemp "${install_dir}/.${command_name}.tmp.XXXXXX") || \
-    fail "cannot create a temporary file in: ${install_dir}"
 
-cleanup() {
-    rm -f "$temp_file" "${temp_file}.sums"
+# install_release 下载、校验并原子替换 install_path。
+install_release() {
+    mkdir -p "$install_dir" || fail "cannot create install directory: ${install_dir}"
+    temp_file=$(mktemp "${install_dir}/.${command_name}.tmp.XXXXXX") || \
+        fail "cannot create a temporary file in: ${install_dir}"
+
+    cleanup() {
+        rm -f "$temp_file" "${temp_file}.sums"
+    }
+    trap cleanup 0 1 2 15
+
+    download_url="${release_base}/${asset}"
+    info "Downloading ${asset} (${release_label})..."
+    if ! download "$download_url" "$temp_file"; then
+        fail "download failed: ${download_url}"
+    fi
+
+    if [ ! -s "$temp_file" ]; then
+        fail "downloaded file is empty: ${download_url}"
+    fi
+
+    # 校验放在 chmod / mv 之前：不合格的文件一次都不该以可执行的形式落到 install_path 上。
+    if [ "${REMOTE_INSTALL_SKIP_CHECKSUM:-}" = '1' ]; then
+        info "REMOTE_INSTALL_SKIP_CHECKSUM=1: skipping checksum verification."
+    else
+        verify_checksum "$temp_file"
+    fi
+
+    if [ "$os" != 'windows' ]; then
+        chmod 755 "$temp_file" || fail "cannot make the downloaded file executable"
+    fi
+
+    # Windows 上正在运行的 exe 不能被替换，mv 会失败——先关掉正在跑的 remote 再重试。
+    mv -f "$temp_file" "$install_path" || \
+        fail "cannot install to: ${install_path} (is ${command_name} still running?)"
+    trap - 0 1 2 15
+
+    info "Installed ${command_name} ${release_label} to ${install_path}"
 }
-trap cleanup 0 1 2 15
 
-info "Downloading latest ${asset} release..."
-if ! download "$download_url" "$temp_file"; then
-    fail "download failed: ${download_url}"
-fi
-
-if [ ! -s "$temp_file" ]; then
-    fail "downloaded file is empty: ${download_url}"
-fi
-
-# 校验放在 chmod / mv 之前：不合格的文件一次都不该以可执行的形式落到 install_path 上。
-if [ "${REMOTE_INSTALL_SKIP_CHECKSUM:-}" = '1' ]; then
-    info "REMOTE_INSTALL_SKIP_CHECKSUM=1: skipping checksum verification."
+latest_tag=$(resolve_latest_tag)
+if [ -n "$latest_tag" ]; then
+    # 下载钉到具体 tag 而不是 latest/download：版本比较和下载之间 latest 若恰好换了，
+    # 装上去的仍是刚才比较过的那一版，校验清单也来自同一个 Release。
+    release_base="https://github.com/${REPOSITORY}/releases/download/${latest_tag}"
+    release_label=$latest_tag
 else
-    verify_checksum "$temp_file"
+    release_base="https://github.com/${REPOSITORY}/releases/latest/download"
+    release_label='latest'
 fi
 
-if [ "$os" != 'windows' ]; then
-    chmod 755 "$temp_file" || fail "cannot make the downloaded file executable"
+current_version=$(installed_version)
+if [ -n "$current_version" ] && [ -n "$latest_tag" ] && \
+    [ "$(strip_v "$current_version")" = "$(strip_v "$latest_tag")" ]; then
+    info "${command_name} ${current_version} is already the latest version: ${install_path}"
+else
+    if [ -n "$current_version" ]; then
+        info "Updating ${command_name} ${current_version} -> ${release_label}"
+    elif [ -z "$latest_tag" ]; then
+        info "Cannot determine the latest release tag; installing whatever 'latest' points to."
+    fi
+    install_release
 fi
-
-mv -f "$temp_file" "$install_path" || fail "cannot install to: ${install_path}"
-trap - 0 1 2 15
-
-info "Installed ${command_name} to ${install_path}"
 
 case ":${PATH:-}:" in
     *":${install_dir}:"*)
         ;;
     *)
-        info "Add ${install_dir} to PATH before running ${command_name}."
+        info "Add ${install_dir} to PATH to run ${command_name} by name."
         ;;
 esac
+
+# 装完直接运行。无参数即 share 协助端模式；`curl ... | sh -s -- help --code XXX` 这类
+# 写法里 `--` 之后的参数原样透传给 remote。
+if [ "${REMOTE_INSTALL_NO_RUN:-}" = '1' ]; then
+    exit 0
+fi
+
+# `curl | sh` 时脚本自己的 stdin 是管道（脚本正文），remote 必须改接终端；没有可用终端
+# （CI、无人值守部署）就不启动——share 会一直挂着等人连，不能把自动化流程卡死。
+if ! (exec </dev/tty) 2>/dev/null; then
+    info "No terminal available; not starting ${command_name}. Run: ${install_path}"
+    exit 0
+fi
+
+info "Starting ${command_name}..."
+exec "$install_path" "$@" </dev/tty

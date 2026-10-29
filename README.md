@@ -32,6 +32,17 @@ wget -qO- https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/i
 REMOTE_INSTALL_DIR=/usr/local/bin sh install.sh
 ```
 
+If `remote` is already installed, the script compares its `remote --version` with the latest Release tag: it skips the
+download when they match and updates in place otherwise. Either way it then starts `remote` (no arguments = `share` mode).
+Arguments after `sh -s --` are passed through, and `REMOTE_INSTALL_NO_RUN=1` installs/updates without starting it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | sh -s -- share --standalone
+curl -fsSL https://raw.githubusercontent.com/kegechen/remote-assist-tool/master/install.sh | REMOTE_INSTALL_NO_RUN=1 sh
+```
+
+When there is no terminal (CI, unattended provisioning) the script only installs and does not start `remote`.
+
 Supports amd64 and arm64 on Linux, macOS and Windows (Git Bash / MSYS2 / Cygwin);
 on Linux/macOS the downloaded file is made executable automatically; on Windows, if the `curl` / `wget` download fails, the script falls back to
 the system PowerShell.
