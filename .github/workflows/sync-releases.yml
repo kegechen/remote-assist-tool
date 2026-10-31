@@ -1,0 +1,66 @@
+name: Sync Releases to gh-proxy
+
+# 把 release 列表推送给 gh.ifly.qzz.io 的加速代理, 其下载列表页直接读这份数据,
+# 不用每次访问都调 GitHub API (CF 出口 IP 共享, 匿名额度经常被耗尽)。
+#
+# 触发时机:
+# - release 发布/编辑/删除;
+# - release.yml 跑完: 附件是 release 创建之后才编译上传的, 发布时那次推送的附件列表还是空的;
+# - 每天一次, 刷新下载次数;
+# - 手动。
+
+on:
+  release:
+    types: [published, unpublished, edited, deleted, prereleased, released]
+  workflow_run:
+    workflows: ["Build and Upload Release Assets"]
+    types: [completed]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 每次推送的都是完整列表, 后到的覆盖先到的即可
+concurrency:
+  group: sync-releases
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Push release list to gh-proxy
+        # 不用第三方 action, 只用 runner 自带的 gh / jq / curl。仓库名与密钥都走 env 传入,
+        # 不内插进脚本 (原因见 release.yml)。
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SYNC_SECRET: ${{ secrets.GH_PROXY_SYNC_SECRET }}
+          SYNC_URL: https://gh.ifly.qzz.io/_sync/releases
+        run: |
+          set -euo pipefail
+          if [ -z "$SYNC_SECRET" ]; then
+            echo "未配置 GH_PROXY_SYNC_SECRET, 跳过同步"
+            exit 0
+          fi
+
+          # 代理列表页最多展示 10 个, 更早的 tag 访问时代理会自行回落到 API
+          gh api "repos/${REPOSITORY}/releases?per_page=30" > releases.json
+
+          jq --arg owner "${REPOSITORY%%/*}" --arg repo "${REPOSITORY##*/}" '{
+            owner: $owner,
+            repo: $repo,
+            releases: map(select(.draft | not) | {
+              id, tag_name, name, published_at, prerelease, draft,
+              assets: [.assets[] | {name, size, download_count}]
+            })
+          }' releases.json > payload.json
+
+          curl -fsS --retry 3 -X POST \
+            -H "Authorization: Bearer ${SYNC_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data @payload.json \
+            "$SYNC_URL"
