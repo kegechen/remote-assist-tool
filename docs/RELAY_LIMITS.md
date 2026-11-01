@@ -24,13 +24,13 @@ Relay 当前使用 TCP 连接的 `RemoteAddr()` 作为来源 IP，不解析 `X-F
 
 Relay 的 `--stun` 默认值为空，即不监听 UDP 3478。此时 TCP relay、协助码和 P2P 直连尝试仍可使用。
 
-share/help 未显式设置 `--stun` 时，会先尝试 `Relay主机:3478`；失败后依次尝试内置的 Google/Cloudflare 公共 STUN 地址。因此关闭 Relay 自带 STUN 后，客户端仍能通过公共 STUN 发现公网地址并尝试直接打洞。
+share/help 发现公网地址时，会把 `--stun`（未设置时为 `Relay主机:3478`）、relay 用 `--advertise-stun` 下发的地址、内置公共 STUN（B 站、小米、Cloudflare、Google）同时探测，谁先应答用谁，总时限约 4 秒；某台不通不会拖慢其它候选。因此关闭 Relay 自带 STUN、或其 UDP 3478 对外不通时，客户端仍能发现公网地址并尝试直接打洞。
 
 边界如下：
 
 - 公共 STUN 只提供标准 Binding 地址发现，不支持本项目的自定义 UDP relay。
 - P2P 直连成功时使用 UDP 直连；失败时 `--p2p=auto` 回退 TCP relay。
-- 当前客户端内部仍复用一个地址表示 STUN discovery 和自定义 UDP relay。不要把公共 STUN 当作自定义 relay 部署；显式拆分两个地址属于后续协议改造。
+- 自定义 UDP relay 只走 `--stun`（默认 `Relay主机:3478`），不受下发和公共 STUN 影响；下发列表只用于地址发现与 NAT 类型判断。
 - 只有确实需要自建 STUN/UDP relay，且已开放、防火墙和监控 UDP 3478 时，才配置 Relay `--stun=:3478`。
 - UDP relay 的准入要同时满足两条：会话数据面已就绪，且 UDP 包的**来源 IP 属于该会话两端之一**（STUN 反射得到的公网地址、对端自报的私网地址、或 relay 观测到的 TCP 源 IP）。只比 IP 不比端口，对称 NAT 换端口仍然可用。
 - 打洞包（`P2PTestPacket`）必须带协助码派生的 HMAC，且 MAC 绑定发送方是 share 还是 help。缺 MAC 或验不过一律丢弃并打一行日志。旧版客户端不发这个字段，因此与新版之间谈不成 P2P，`auto` 下回落 TCP relay。

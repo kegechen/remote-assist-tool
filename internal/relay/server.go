@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,8 +19,6 @@ import (
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/ratelimit"
-	"strconv"
-	"strings"
 )
 
 // 服务端加固默认值（防资源耗尽型 DoS / slowloris / 超大消息）
@@ -140,20 +139,36 @@ type Config struct {
 // maxAdvertiseSTUN 限制下发条数：每条都会让客户端多开一条 NAT 映射、多发几个包。
 const maxAdvertiseSTUN = 4
 
-// ValidateAdvertiseSTUN 校验 --advertise-stun：每项必须是 host:port（host 非空、不含空白，
-// 端口 1–65535），最多 maxAdvertiseSTUN 项。只校验格式，不解析域名。
+// ValidateAdvertiseSTUN 校验 --advertise-stun：每项必须是 host:port，host 为 IPv4 字面量（不能是
+// 回环、未指定、链路本地——客户端会丢弃这些）或只含字母数字、点、连字符的域名，端口 1–65535，
+// 最多 maxAdvertiseSTUN 项。客户端的 STUN socket 只走 IPv4，IPv6 字面量写了也用不上，直接拒绝。
+// 只校验格式，不解析域名。
 func ValidateAdvertiseSTUN(servers []string) error {
 	if len(servers) > maxAdvertiseSTUN {
 		return fmt.Errorf("at most %d STUN servers can be advertised, got %d", maxAdvertiseSTUN, len(servers))
 	}
 	for _, s := range servers {
 		host, port, err := net.SplitHostPort(s)
-		if err != nil || host == "" || strings.ContainsAny(host, " \t") {
+		if err != nil || host == "" {
 			return fmt.Errorf("invalid STUN server %q (want host:port)", s)
 		}
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 			return fmt.Errorf("invalid STUN server %q (port must be 1-65535)", s)
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			v4 := ip.To4()
+			if v4 == nil {
+				return fmt.Errorf("invalid STUN server %q (clients use IPv4 only)", s)
+			}
+			if v4.IsLoopback() || v4.IsUnspecified() || v4.IsLinkLocalUnicast() {
+				return fmt.Errorf("invalid STUN server %q (loopback/unspecified/link-local addresses are not reachable by clients)", s)
+			}
+			continue
+		}
+		for _, r := range host {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+				return fmt.Errorf("invalid STUN server %q (host may contain only letters, digits, '.' and '-')", s)
+			}
 		}
 	}
 	return nil

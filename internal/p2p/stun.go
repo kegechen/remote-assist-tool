@@ -4,10 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"fmt"
-	"log"
 	"net"
-	"time"
 )
 
 // STUN message types
@@ -36,11 +33,11 @@ var (
 
 // STUNMessage represents a STUN message
 type STUNMessage struct {
-	Type     uint16
-	Length   uint16
-	Magic    uint32
-	TID      [12]byte
-	Attrs    []STUNAttribute
+	Type   uint16
+	Length uint16
+	Magic  uint32
+	TID    [12]byte
+	Attrs  []STUNAttribute
 }
 
 // STUNAttribute represents a STUN attribute
@@ -108,9 +105,9 @@ func UnpackSTUN(data []byte) (*STUNMessage, error) {
 	}
 
 	msg := &STUNMessage{
-		Type:  binary.BigEndian.Uint16(data[0:2]),
+		Type:   binary.BigEndian.Uint16(data[0:2]),
 		Length: binary.BigEndian.Uint16(data[2:4]),
-		Magic: binary.BigEndian.Uint32(data[4:8]),
+		Magic:  binary.BigEndian.Uint32(data[4:8]),
 	}
 	copy(msg.TID[:], data[8:20])
 
@@ -205,51 +202,6 @@ func parseMappedAddress(data []byte, magic uint32, tid [12]byte, xor bool) (*Map
 	return addr, nil
 }
 
-// StunQueryPort sends a STUN binding request to the given server via conn
-// and returns the mapped port. Used by NAT type detection.
-func StunQueryPort(conn *net.UDPConn, stunServer string) (int, error) {
-	serverAddr, err := net.ResolveUDPAddr("udp", stunServer)
-	if err != nil {
-		return 0, fmt.Errorf("resolve STUN server: %w", err)
-	}
-
-	req := NewBindingRequest()
-	reqBytes := req.Pack()
-
-	_, err = conn.WriteToUDP(reqBytes, serverAddr)
-	if err != nil {
-		return 0, fmt.Errorf("send STUN request: %w", err)
-	}
-
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	buf := make([]byte, 1500)
-	n, _, err := conn.ReadFromUDP(buf)
-	conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		return 0, ErrSTUNTimeout
-	}
-
-	resp, err := UnpackSTUN(buf[:n])
-	if err != nil {
-		return 0, fmt.Errorf("parse STUN response: %w", err)
-	}
-
-	if resp.Type != STUNBindingResponse {
-		return 0, errors.New("not a binding response")
-	}
-
-	if resp.TID != req.TID {
-		return 0, errors.New("STUN response TID mismatch")
-	}
-
-	mappedAddr, err := resp.GetMappedAddress()
-	if err != nil {
-		return 0, fmt.Errorf("get mapped address: %w", err)
-	}
-
-	return int(mappedAddr.Port), nil
-}
-
 // AddSoftwareAttribute adds a software attribute to the message
 func (m *STUNMessage) AddSoftwareAttribute(name string) {
 	m.Attrs = append(m.Attrs, STUNAttribute{
@@ -258,72 +210,3 @@ func (m *STUNMessage) AddSoftwareAttribute(name string) {
 		Value:  []byte(name),
 	})
 }
-
-// DiscoverPublicAddrVia discovers the public address using an existing UDP connection
-// with retry logic for transient network failures
-func DiscoverPublicAddrVia(conn *net.UDPConn, stunServer string) (*net.UDPAddr, error) {
-	serverAddr, err := net.ResolveUDPAddr("udp", stunServer)
-	if err != nil {
-		return nil, fmt.Errorf("resolve STUN server: %w", err)
-	}
-
-	timeouts := []time.Duration{3 * time.Second, 5 * time.Second, 8 * time.Second}
-	var lastErr error
-
-	for attempt, timeout := range timeouts {
-		if attempt > 0 {
-			log.Printf("STUN retry %d/%d (timeout: %v)", attempt, len(timeouts)-1, timeout)
-		}
-
-		req := NewBindingRequest()
-		req.AddSoftwareAttribute("remote-assist-tool/1.0")
-		reqBytes := req.Pack()
-
-		_, err = conn.WriteToUDP(reqBytes, serverAddr)
-		if err != nil {
-			lastErr = fmt.Errorf("send STUN request: %w", err)
-			continue
-		}
-
-		conn.SetReadDeadline(time.Now().Add(timeout))
-		buf := make([]byte, 1500)
-		n, _, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			conn.SetReadDeadline(time.Time{})
-			lastErr = ErrSTUNTimeout
-			continue
-		}
-		conn.SetReadDeadline(time.Time{})
-
-		resp, err := UnpackSTUN(buf[:n])
-		if err != nil {
-			lastErr = fmt.Errorf("parse STUN response: %w", err)
-			continue
-		}
-
-		if resp.Type != STUNBindingResponse {
-			lastErr = errors.New("not a binding response")
-			continue
-		}
-
-		// 验证 TID 匹配，防止接收到上一次请求的延迟响应
-		if resp.TID != req.TID {
-			lastErr = errors.New("STUN response TID mismatch (stale response)")
-			continue
-		}
-
-		mappedAddr, err := resp.GetMappedAddress()
-		if err != nil {
-			lastErr = fmt.Errorf("get mapped address: %w", err)
-			continue
-		}
-
-		return &net.UDPAddr{
-			IP:   mappedAddr.IP,
-			Port: int(mappedAddr.Port),
-		}, nil
-	}
-
-	return nil, lastErr
-}
-

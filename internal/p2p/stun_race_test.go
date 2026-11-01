@@ -1,8 +1,10 @@
 package p2p
 
 import (
+	"errors"
 	"net"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,21 +130,29 @@ func TestRaceDiscoverRetransmitsSameTID(t *testing.T) {
 	}
 }
 
-// 伪造来源（换一个端口回包）与 TID 对不上的响应都必须丢弃。
-func TestRaceDiscoverRejectsSpoofedAndWrongTID(t *testing.T) {
-	other, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
-	spoofed := fakeSTUN(t, "127.0.0.1", alwaysReply, other)
+// TID 对不上的应答必须丢弃（96 位随机 TID 是认领应答的依据）。
+func TestRaceDiscoverRejectsWrongTID(t *testing.T) {
 	wrongTID := fakeSTUN(t, "127.0.0.1", func(_ int, req *STUNMessage, from *net.UDPAddr) []byte {
 		bad := *req
 		bad.TID[0] ^= 0xff
 		return bindingReply(&bad, from, &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 1})
 	}, nil)
-	if probes, err := RaceDiscover(clientSocket(t), []string{spoofed, wrongTID}, fastRace); err == nil {
-		t.Fatalf("spoofed / wrong-TID responses accepted: %+v", probes)
+	if probes, err := RaceDiscover(clientSocket(t), []string{wrongTID}, fastRace); err == nil {
+		t.Fatalf("wrong-TID response accepted: %+v", probes)
+	}
+}
+
+// 多 IP 的 STUN 主机可能从另一个地址回包：TID 对得上就接受（旧实现同样不校验来源）。
+func TestRaceDiscoverAcceptsOtherSourceWithMatchingTID(t *testing.T) {
+	other, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	srv := fakeSTUN(t, "127.0.0.1", alwaysReply, other)
+	probes, err := RaceDiscover(clientSocket(t), []string{srv}, fastRace)
+	if err != nil || probes[0].Server != srv {
+		t.Fatalf("probes=%+v err=%v", probes, err)
 	}
 }
 
@@ -162,11 +172,13 @@ func TestRaceDiscoverUnresolvableHostDoesNotBlock(t *testing.T) {
 // 第一个应答之后再等 Grace，收集更多应答供 NAT 判定；第一个仍排在最前。
 func TestRaceDiscoverCollectsAnswersWithinGrace(t *testing.T) {
 	fast := fakeSTUN(t, "127.0.0.1", alwaysReply, nil)
-	slow := fakeSTUN(t, "127.0.0.2", func(_ int, req *STUNMessage, from *net.UDPAddr) []byte {
+	slow := fakeSTUN(t, "127.0.0.1", func(_ int, req *STUNMessage, from *net.UDPAddr) []byte {
 		time.Sleep(40 * time.Millisecond)
 		return bindingReply(req, from, nil)
 	}, nil)
-	probes, err := RaceDiscover(clientSocket(t), []string{slow, fast}, fastRace)
+	opts := fastRace
+	opts.Grace = 400 * time.Millisecond
+	probes, err := RaceDiscover(clientSocket(t), []string{slow, fast}, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,16 +187,70 @@ func TestRaceDiscoverCollectsAnswersWithinGrace(t *testing.T) {
 	}
 }
 
+// 两个名字指向同一地址只发一份请求、只算一个应答。
+func TestRaceDiscoverDedupesSameAddress(t *testing.T) {
+	var count atomic.Int32
+	srv := fakeSTUN(t, "127.0.0.1", func(_ int, req *STUNMessage, from *net.UDPAddr) []byte {
+		count.Add(1)
+		return bindingReply(req, from, nil)
+	}, nil)
+	_, port, _ := net.SplitHostPort(srv)
+	probes, err := RaceDiscover(clientSocket(t), []string{srv, "localhost:" + port}, fastRace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probes) != 1 || count.Load() != 1 {
+		t.Fatalf("probes=%d requests=%d, want 1/1", len(probes), count.Load())
+	}
+}
+
+// 竞速中 socket 被关闭（P2P manager 被 Close）时立刻返回，不空转到 deadline。
+func TestRaceDiscoverReturnsWhenConnClosed(t *testing.T) {
+	dead := fakeSTUN(t, "127.0.0.1", neverReply, nil)
+	c := clientSocket(t)
+	time.AfterFunc(100*time.Millisecond, func() { c.Close() })
+	start := time.Now()
+	if _, err := RaceDiscover(c, []string{dead}, DefaultRaceOptions); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("err = %v, want net.ErrClosed", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("returned after %v", time.Since(start))
+	}
+}
+
+// 全部失败时错误里列出每个候选的结局，现场能区分解析失败与无应答。
+func TestRaceDiscoverFailureSummary(t *testing.T) {
+	dead := fakeSTUN(t, "127.0.0.1", neverReply, nil)
+	_, err := RaceDiscover(clientSocket(t), []string{dead, "no-such-host.invalid:3478", "bad-entry"}, fastRace)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{dead + "=no-reply", "no-such-host.invalid:3478=unresolved", "bad-entry=unresolved"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
 func TestMergeSTUNCandidates(t *testing.T) {
 	got := MergeSTUNCandidates("relay.example:3478",
 		[]string{"23.95.78.14:3478", " relay.example:3478 ", "", "stun.chat.bilibili.com:3478"},
-		[]string{"stun.chat.bilibili.com:3478", "a:1", "b:1", "c:1", "d:1", "e:1"})
-	want := []string{"relay.example:3478", "23.95.78.14:3478", "stun.chat.bilibili.com:3478", "a:1", "b:1", "c:1", "d:1", "e:1"}
+		[]string{"stun.chat.bilibili.com:3478", "a:1", "b:1", "c:1"})
+	want := []string{"relay.example:3478", "23.95.78.14:3478", "stun.chat.bilibili.com:3478", "a:1", "b:1", "c:1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
-	if got := MergeSTUNCandidates("", nil, []string{"a:1", "b:1", "c:1", "d:1", "e:1", "f:1", "g:1", "h:1", "i:1"}); len(got) != maxSTUNCandidates {
-		t.Fatalf("len = %d, want cap %d", len(got), maxSTUNCandidates)
+}
+
+// relay 下发的列表客户端自己也设防：不合格的丢弃（回环、未指定、IPv6、带怪字符），最多
+// 采用 4 项，内置兜底始终保留。
+func TestMergeSTUNCandidatesDistrustsAdvertised(t *testing.T) {
+	advertised := []string{"127.0.0.1:3478", "0.0.0.0:3478", "169.254.1.1:3478", "[2001:db8::1]:3478",
+		"evil\x1b[31m:1", "x:0", "a.example:1", "b.example:1", "c.example:1", "d.example:1", "e.example:1", "f.example:1"}
+	got := MergeSTUNCandidates("relay.example:3478", advertised, FallbackSTUNServers)
+	want := append([]string{"relay.example:3478", "a.example:1", "b.example:1", "c.example:1", "d.example:1"}, FallbackSTUNServers...)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
 	}
 }
 

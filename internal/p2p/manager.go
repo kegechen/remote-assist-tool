@@ -228,18 +228,13 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 			log.Printf("Discovered public address %v via %s in %v (%d/%d STUN servers answered)",
 				p.publicAddr, p.stunUsed, p.stunElapsed.Round(time.Millisecond), len(probes), len(candidates))
 
-			// NAT 类型：优先用竞速里两台不同 IP 服务器的映射直接判定；不够时只拿已应答的
-			// 服务器做临时 socket 探测（凑不够两台不同 IP 就按 Cone，与旧逻辑一致），
-			// 不再让不通的 relay:3478 排在第一个、一超时就被判成 Cone。
+			// NAT 类型：用竞速里两台不同 IP、映射 IP 相同的服务器看到的映射端口判定（同一个主
+			// socket，比旧的临时 socket 探测更准，也省一轮查询）。凑不够两台可比的应答时按
+			// Cone，与旧逻辑「数据不足按 Cone」一致，但不会再因为 relay:3478 不通而被直接判 Cone。
 			p.natType = NATFromProbes(p.localAddr.IP, probes)
 			if p.natType == NATUnknown {
-				answered := make([]string, 0, len(probes))
-				for _, pr := range probes {
-					if pr.Mapped.IP.Equal(p.publicAddr.IP) { // 映射 IP 不同的端口不可比（见 NATFromProbes）
-						answered = append(answered, pr.Server)
-					}
-				}
-				p.natType = DetectNATType(p.localAddr.IP, p.publicAddr, answered)
+				log.Printf("NAT detect: fewer than two comparable STUN answers, assuming cone")
+				p.natType = NATCone
 			}
 			log.Printf("NAT type detected: %s", p.natType)
 		}

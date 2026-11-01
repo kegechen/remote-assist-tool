@@ -675,9 +675,9 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 
 	fmt.Fprintln(os.Stderr, "MCP: 后台尝试 P2P 直连...")
 
-	// manager 在这里启动而不是在 connect 主路径上：Start 内含同步 STUN 发现 + NAT 类型
-	// 探测（UDP 被封时要把三台外部 STUN 依次试完），放主路径会让 connect 干等十几秒，
-	// 与「连接立即可用、P2P 后台升级」的设计相悖。
+	// manager 在这里启动而不是在 connect 主路径上：Start 内含同步 STUN 竞速发现（UDP 被封
+	// 时要等满约 4 秒的时限），放主路径会让 connect 干等，与「连接立即可用、P2P 后台升级」
+	// 的设计相悖。
 	mgr := p2p.NewP2PManager(mode, cfg.STUNServer, cfg.BindIP)
 	mgr.SetAuthCode(h.code)
 	mgr.SetSTUNCandidates(h.client.relaySTUNServers())

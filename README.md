@@ -262,6 +262,7 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--length` | `10` | Assist code length |
 | `--audit` | `audit.log` | Audit log file |
 | `--stun` | empty | STUN/UDP relay listen address; e.g. `:3478`, empty disables it |
+| `--advertise-stun` | empty | Comma-separated STUN servers (`host:port`, IPv4 or domain, at most 4) sent to new clients for public-address discovery, e.g. when this host's UDP 3478 is blocked by a cloud security group |
 | `--trust-source-ip` | `true` | Whether the relay can see the real source IP from the TCP connection; set to `false` for SNAT backends |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON rate-limit configuration file; if unset, safe defaults are used |
 | `--latest-version` | relay's own version | Latest version announced to clients; older clients print an upgrade hint (hint only, never rejects). Must be a release tag like `v1.2.3`; a non-release relay build announces nothing. `none` disables |
@@ -306,7 +307,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--ssh` | `127.0.0.1:22` | Local SSH address (SSH tunnel mode) |
 | `--new-instance` | `false` | Start an additional independent share; generates a new assist code and does not affect the default instance |
 | `--p2p` | `auto` | P2P mode: `disabled` / `auto` / `required` |
-| `--stun` | - | STUN server address (defaults to the relay's :3478) |
+| `--stun` | - | STUN server for P2P and the UDP relay fallback (defaults to the relay's :3478); relay-advertised and built-in public STUN servers are queried in parallel, the first answer wins |
 | `--bind-ip` | - | Specify the UDP bind IP (bypasses TUN proxy auto-detection) |
 | `--standalone` | `false` | Start a relay in-process and listen on `--standalone-listen`, for LAN direct-connection scenarios |
 | `--standalone-listen` | `:8443` | standalone relay listen address |
@@ -329,7 +330,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--trust-new-cert` | `false` | Same as share |
 | `--listen` | `127.0.0.1:2222` | Local listen address (SSH tunnel mode) |
 | `--p2p` | `auto` | P2P mode: `disabled` / `auto` / `required` |
-| `--stun` | - | STUN server address |
+| `--stun` | - | Same as share |
 | `--bind-ip` | - | Specify the UDP bind IP |
 | `--mcp-stdio` | `false` | Run as an MCP stdio server (for any MCP-capable AI agent) |
 | `--legacy-ssh` | `false` | Force the traditional SSH tunnel mode (this is the mode when `--mcp-stdio` is not given) |

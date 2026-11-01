@@ -56,7 +56,7 @@ Windows 版本的 relay 同时支持前台模式和原生 Windows 服务模式�
 }
 ```
 
-可选字段包括 `cert`、`key`、`stun` 和 `limits_file`。修改配置后需要重启服务：
+可选字段包括 `cert`、`key`、`stun`、`advertise_stun` 和 `limits_file`。`advertise_stun` 是逗号分隔的 `host:port`（最多 4 个），本机 UDP 3478 对外不通时用它让客户端改用别处的 STUN。旧版 relay.exe 不认识这个字段，配置加载会因未知字段失败：回滚到旧版本前先删掉它。修改配置后需要重启服务：
 
 ```powershell
 .\relay.exe service stop

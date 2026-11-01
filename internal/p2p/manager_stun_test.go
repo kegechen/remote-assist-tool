@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -47,10 +48,12 @@ func (c *captureRelay) advertise(t *testing.T) proto.PeerAddrAdvertise {
 // relay 自己的 3478 不通（Windows relay 安全组的情形）时，用 relay 下发的候选拿到公网
 // 地址，不再先等满 16 秒；上报里带上实际采用的 STUN 与耗时，供 relay 统计。
 func TestManagerUsesAdvertisedSTUNWhenRelaySTUNDead(t *testing.T) {
-	dead := fakeSTUN(t, "127.0.0.1", neverReply, nil)
-	live := fakeSTUN(t, "127.0.0.1", alwaysReply, nil)
+	// 客户端会丢弃下发的回环地址，所以假 STUN 绑在本机的非回环地址上。
+	ip := nonLoopbackIPv4(t)
+	dead := fakeSTUN(t, ip, neverReply, nil)
+	live := fakeSTUN(t, ip, alwaysReply, nil)
 
-	mgr := NewP2PManager(P2PModeAuto, dead, "127.0.0.1")
+	mgr := NewP2PManager(P2PModeAuto, dead, ip)
 	mgr.SetSTUNCandidates([]string{live})
 	mgr.fallbackSTUN = nil // 测试不碰公网
 	relay := &captureRelay{}
@@ -98,4 +101,21 @@ func TestManagerNoSTUNConfiguredSkipsDiscovery(t *testing.T) {
 	if a := relay.advertise(t); a.PublicAddr != "" || a.STUNServer != "" {
 		t.Fatalf("advertise = %+v, want no public address / stun", a)
 	}
+}
+
+// nonLoopbackIPv4 返回本机一个已启用的非回环 IPv4，没有则跳过测试。
+func nonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				if v4 := n.IP.To4(); v4 != nil && !v4.IsLoopback() && !v4.IsLinkLocalUnicast() {
+					return v4.String()
+				}
+			}
+		}
+	}
+	t.Skip("no non-loopback IPv4 address")
+	return ""
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,11 +21,16 @@ var FallbackSTUNServers = []string{
 	"stun.l.google.com:19302",
 }
 
-// maxSTUNCandidates 限制一次竞速的候选数：每个候选都会在 NAT 上开一条映射、发几个包。
-const maxSTUNCandidates = 8
+const (
+	// maxAdvertisedSTUN 客户端最多采用 relay 下发的几项（与 relay 端 --advertise-stun 上限一致）。
+	// 客户端自己也截断：异常或恶意的 relay 不能用长列表把内置兜底挤出候选。
+	maxAdvertisedSTUN = 4
+	// maxSTUNCandidates = 本端配置 1 + 下发 4 + 兜底 4。每个候选都会在 NAT 上开一条映射、发几个包。
+	maxSTUNCandidates = 9
+)
 
 // MergeSTUNCandidates 按优先级合并 STUN 候选并去重：本端配置（--stun 或默认的
-// relay:3478）→ relay 下发 → 内置兜底。空白项与重复项丢弃，最多 maxSTUNCandidates 个。
+// relay:3478）→ relay 下发（校验后最多 maxAdvertisedSTUN 项）→ 内置兜底。
 // 顺序只影响 NAT 判定选服务器时的先后，谁先应答由竞速决定。
 func MergeSTUNCandidates(configured string, advertised, fallback []string) []string {
 	seen := make(map[string]bool)
@@ -37,13 +44,43 @@ func MergeSTUNCandidates(configured string, advertised, fallback []string) []str
 		out = append(out, s)
 	}
 	add(configured)
+	taken := 0
 	for _, s := range advertised {
-		add(s)
+		if taken >= maxAdvertisedSTUN {
+			break
+		}
+		if s = strings.TrimSpace(s); validAdvertisedSTUN(s) {
+			add(s)
+			taken++
+		}
 	}
 	for _, s := range fallback {
 		add(s)
 	}
 	return out
+}
+
+// validAdvertisedSTUN 校验 relay 下发的一项：host:port，host 为 IPv4 字面量（不能是回环、
+// 未指定、链路本地）或只含字母数字、点、连字符的域名，端口 1–65535。不合格的直接丢弃，
+// 也就不会进日志——下发内容来自 relay，可能带控制字符。
+func validAdvertisedSTUN(s string) bool {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil || host == "" || len(s) > 255 {
+		return false
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		v4 := ip.To4()
+		return v4 != nil && !v4.IsLoopback() && !v4.IsUnspecified() && !v4.IsLinkLocalUnicast()
+	}
+	for _, r := range host {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // STUNProbe 是一台 STUN 服务器的应答：主 socket 在它那里的映射地址。
@@ -79,6 +116,7 @@ type raceTarget struct {
 	sentAt   time.Time // 首包时刻，重传以它为基准
 	resends  int
 	answered bool
+	dead     bool // 发送失败（如本机无路由），不再重传
 }
 
 type resolvedTarget struct {
@@ -89,18 +127,22 @@ type resolvedTarget struct {
 // RaceDiscover 在主 socket 上同时向所有候选发 Binding Request，按到达顺序返回应答
 // （第一个就是采用的公网地址）。必须用打洞的那个 socket：映射是按 socket 建立的。
 //
-// 只接受「来源 IP:port 等于某个已发请求的目标、且 TID 对得上」的 Binding Response，
-// 其余数据报一律丢弃。调用方须保证此时没有别的 goroutine 在读这个 socket。
+// 应答按 96 位随机 TID 认领（与旧实现一致，旧实现不校验来源）。来源地址不是请求目标
+// 时仍接受并记一行日志：多 IP 的 STUN 主机可能从另一个地址回包，严格比对会让它
+// 静默「不通」。调用方须保证此时没有别的 goroutine 在读这个 socket。
 func RaceDiscover(conn *net.UDPConn, servers []string, opts RaceOptions) ([]STUNProbe, error) {
 	start := time.Now()
 	deadline := start.Add(opts.Deadline)
 
-	// 域名并发解析：被污染或超时的域名不能挡住其它候选。
+	// 域名并发解析：被污染或超时的域名不能挡住其它候选。channel 容量等于 goroutine 数，
+	// 函数提前返回后它们也不会阻塞。
 	resolved := make(chan resolvedTarget, len(servers))
 	pending := 0
+	var unresolved []string
 	for _, s := range servers {
 		host, port, err := net.SplitHostPort(s)
 		if err != nil || host == "" {
+			unresolved = append(unresolved, s)
 			continue
 		}
 		pending++
@@ -110,7 +152,7 @@ func RaceDiscover(conn *net.UDPConn, servers []string, opts RaceOptions) ([]STUN
 			var addr *net.UDPAddr
 			if ips, err := net.DefaultResolver.LookupIPAddr(ctx, host); err == nil {
 				for _, ip := range ips {
-					if v4 := ip.IP.To4(); v4 != nil {
+					if v4 := ip.IP.To4(); v4 != nil { // 主 socket 是 udp4
 						if p, err := net.LookupPort("udp", port); err == nil {
 							addr = &net.UDPAddr{IP: v4, Port: p}
 						}
@@ -125,13 +167,9 @@ func RaceDiscover(conn *net.UDPConn, servers []string, opts RaceOptions) ([]STUN
 	var targets []*raceTarget
 	var probes []STUNProbe
 	var firstAt time.Time
+	byAddr := make(map[string]bool) // 不同名字解析到同一地址只发一份
 	buf := make([]byte, 1500)
 	defer conn.SetReadDeadline(time.Time{})
-
-	send := func(t *raceTarget) {
-		t.sentAt = time.Now()
-		_, _ = conn.WriteToUDP(t.req, t.addr)
-	}
 
 	for {
 		// 收下已解析完的目标并立即发首包。
@@ -141,13 +179,20 @@ func RaceDiscover(conn *net.UDPConn, servers []string, opts RaceOptions) ([]STUN
 			case r := <-resolved:
 				pending--
 				if r.addr == nil {
+					unresolved = append(unresolved, r.server)
 					continue
 				}
+				if byAddr[r.addr.String()] {
+					continue
+				}
+				byAddr[r.addr.String()] = true
 				req := NewBindingRequest()
 				req.AddSoftwareAttribute("remote-assist-tool/1.0")
-				t := &raceTarget{server: r.server, addr: r.addr, req: req.Pack(), tid: req.TID}
+				t := &raceTarget{server: r.server, addr: r.addr, req: req.Pack(), tid: req.TID, sentAt: time.Now()}
 				targets = append(targets, t)
-				send(t)
+				if _, err := conn.WriteToUDP(t.req, t.addr); err != nil {
+					t.dead = true
+				}
 			default:
 				break drain
 			}
@@ -160,18 +205,21 @@ func RaceDiscover(conn *net.UDPConn, servers []string, opts RaceOptions) ([]STUN
 			break
 		}
 
-		// 到期的重传：以各自首包时刻（sentAt，重传不改）为基准。
+		// 到期的重传：以各自首包时刻为基准，沿用同一 TID（RFC 5389 §7.2.1）。
 		wake := deadline
 		if !firstAt.IsZero() {
 			wake = minTime(wake, firstAt.Add(opts.Grace))
 		}
 		for _, t := range targets {
-			if t.answered {
+			if t.answered || t.dead {
 				continue
 			}
 			if t.resends < len(opts.Retransmit) && !now.Before(t.sentAt.Add(opts.Retransmit[t.resends])) {
 				t.resends++
-				_, _ = conn.WriteToUDP(t.req, t.addr)
+				if _, err := conn.WriteToUDP(t.req, t.addr); err != nil {
+					t.dead = true
+					continue
+				}
 			}
 			if t.resends < len(opts.Retransmit) {
 				wake = minTime(wake, t.sentAt.Add(opts.Retransmit[t.resends]))
@@ -191,48 +239,67 @@ func RaceDiscover(conn *net.UDPConn, servers []string, opts RaceOptions) ([]STUN
 			if errors.Is(err, net.ErrClosed) {
 				return nil, err
 			}
-			continue // Windows 上 ICMP 端口不可达等瞬时错误：继续等其它候选
+			// 其它瞬时错误（如 Windows 上的 ICMP 端口不可达）：稍等再读，避免空转。
+			time.Sleep(5 * time.Millisecond)
+			continue
 		}
-		if t := matchTarget(targets, buf[:n], from); t != nil {
-			resp, _ := UnpackSTUN(buf[:n])
-			mapped, err := resp.GetMappedAddress()
-			if err != nil {
-				continue
-			}
-			t.answered = true
-			if firstAt.IsZero() {
-				firstAt = time.Now()
-			}
-			probes = append(probes, STUNProbe{
-				Server:   t.server,
-				ServerIP: t.addr.IP.String(),
-				Mapped:   &net.UDPAddr{IP: mapped.IP, Port: int(mapped.Port)},
-				Elapsed:  time.Since(start),
-			})
+		t, mapped := claimResponse(targets, buf[:n])
+		if t == nil {
+			continue
 		}
+		if !t.addr.IP.Equal(from.IP) || t.addr.Port != from.Port {
+			log.Printf("STUN: answer for %s came from %v (multi-homed server?); accepted by transaction ID", t.server, from)
+		}
+		t.answered = true
+		if firstAt.IsZero() {
+			firstAt = time.Now()
+		}
+		probes = append(probes, STUNProbe{Server: t.server, ServerIP: t.addr.IP.String(), Mapped: mapped, Elapsed: time.Since(start)})
 	}
 
 	if len(probes) == 0 {
-		return nil, fmt.Errorf("%w: none of %d STUN servers answered", ErrSTUNTimeout, len(servers))
+		return nil, fmt.Errorf("%w: %s", ErrSTUNTimeout, raceSummary(targets, unresolved))
 	}
 	return probes, nil
 }
 
-// matchTarget 校验应答：来源必须是某个未应答目标的地址，且是 TID 匹配的 Binding Response。
-func matchTarget(targets []*raceTarget, data []byte, from *net.UDPAddr) *raceTarget {
+// claimResponse 按 TID 把应答认领给尚未应答的目标，返回目标与映射地址；不是 Binding
+// Response、TID 对不上或没有映射地址的数据报返回 nil。
+func claimResponse(targets []*raceTarget, data []byte) (*raceTarget, *net.UDPAddr) {
 	resp, err := UnpackSTUN(data)
 	if err != nil || resp.Type != STUNBindingResponse {
-		return nil
+		return nil, nil
 	}
 	for _, t := range targets {
-		if t.answered || !t.addr.IP.Equal(from.IP) || t.addr.Port != from.Port {
+		if t.answered || resp.TID != t.tid {
 			continue
 		}
-		if resp.TID == t.tid {
-			return t
+		m, err := resp.GetMappedAddress()
+		if err != nil {
+			return nil, nil
 		}
+		return t, &net.UDPAddr{IP: m.IP, Port: int(m.Port)}
 	}
-	return nil
+	return nil, nil
+}
+
+// raceSummary 列出每个候选的结局，供「全部失败」时定位：解析不了、发不出去、没有应答。
+func raceSummary(targets []*raceTarget, unresolved []string) string {
+	var parts []string
+	for _, s := range unresolved {
+		parts = append(parts, s+"=unresolved")
+	}
+	for _, t := range targets {
+		state := "no-reply"
+		if t.dead {
+			state = "send-failed"
+		}
+		parts = append(parts, t.server+"="+state)
+	}
+	if len(parts) == 0 {
+		return "no STUN candidates"
+	}
+	return "no STUN server answered (" + strings.Join(parts, ", ") + ")"
 }
 
 func minTime(a, b time.Time) time.Time {
@@ -242,10 +309,9 @@ func minTime(a, b time.Time) time.Time {
 	return a
 }
 
-// NATFromProbes 用竞速里已拿到的映射直接判定 NAT 类型，省掉临时 socket 的一轮查询：
-// 映射 IP 等于本机 IP 为 open；两台不同 IP 的服务器看到的映射端口相同为 cone、不同为
-// symmetric（与 DetectNATType 的判据一致，只是复用主 socket 的结果）。只比较映射 IP
-// 相同的应答；数据不足返回 ""。
+// NATFromProbes 用竞速里已拿到的映射判定 NAT 类型：映射 IP 等于本机 IP 为 open；两台不同
+// IP 的服务器看到的映射端口相同为 cone、不同为 symmetric（与旧的 DetectNATType 判据一致，
+// 只是复用主 socket 的结果）。只比较映射 IP 相同的应答；数据不足返回 ""。
 func NATFromProbes(localIP net.IP, probes []STUNProbe) string {
 	if len(probes) == 0 {
 		return NATUnknown

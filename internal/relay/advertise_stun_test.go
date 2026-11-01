@@ -56,14 +56,15 @@ func TestAdvertiseSTUNInRegisterAndJoin(t *testing.T) {
 
 func TestValidateAdvertiseSTUN(t *testing.T) {
 	for _, bad := range [][]string{
-		{"no-port"}, {":3478"}, {"host:0"}, {"host:70000"}, {"host:abc"}, {"a b:3478"},
+		{"no-port"}, {":3478"}, {"host:0"}, {"host:70000"}, {"host:abc"}, {"a b:3478"}, {"a/b:3478"},
+		{"127.0.0.1:3478"}, {"0.0.0.0:3478"}, {"169.254.1.1:3478"}, {"[2001:db8::1]:3478"},
 		{"a:1", "b:1", "c:1", "d:1", "e:1"},
 	} {
 		if _, err := NewServer(&Config{CodeTTL: time.Minute, AdvertiseSTUN: bad}); err == nil {
 			t.Errorf("AdvertiseSTUN %q accepted", bad)
 		}
 	}
-	if _, err := NewServer(&Config{CodeTTL: time.Minute, AdvertiseSTUN: []string{"23.95.78.14:3478", "[2001:db8::1]:3478", "stun.miwifi.com:3478"}}); err != nil {
+	if _, err := NewServer(&Config{CodeTTL: time.Minute, AdvertiseSTUN: []string{"23.95.78.14:3478", "10.0.0.8:3478", "stun.miwifi.com:3478"}}); err != nil {
 		t.Fatalf("valid list rejected: %v", err)
 	}
 }

@@ -31,7 +31,7 @@ Windows relay（华为云）安全组未放行 UDP 入站，`relay:3478` 对外�
 
 目标
 - relay 运营方可以给客户端指定 STUN 服务器（满足用户诉求：Windows relay 让客户端用 Linux relay 的 3478）。
-- 任何一台 STUN 不通都不再拖慢 P2P：发现阶段总耗时上限约 3s。
+- 任何一台 STUN 不通都不再拖慢 P2P：发现阶段总耗时上限约 4s。
 - NAT 类型探测只用「实际应答过」的服务器。
 - 能在看板上看到每端用哪台 STUN、耗时多少，用来量化改进前后的成功率。
 - 老客户端、老 relay 互相兼容，行为不变。
@@ -53,10 +53,10 @@ Windows relay（华为云）安全组未放行 UDP 入站，`relay:3478` 对外�
 
 ### 3.2 客户端：候选列表与优先级
 
-候选按以下顺序合并去重（保留顺序，最多 8 个）：
+候选按以下顺序合并去重（保留顺序，最多 9 个）：
 
 1. 本端配置：`--stun` 显式值，未指定时为 relay 主机:3478（现有默认，两者在 Config 里是同一个字段）；
-2. relay 下发的 `stun_servers`；
+2. relay 下发的 `stun_servers`（客户端自己再校验一遍：只收 IPv4 字面量或域名，丢弃回环/未指定/链路本地，最多 4 项，保证内置兜底不被挤掉）；
 3. 内置兜底：`stun.chat.bilibili.com:3478`、`stun.miwifi.com:3478`、`stun.cloudflare.com:3478`、`stun.l.google.com:19302`。
 
 顺序只影响 NAT 判定时的先后，谁先应答由竞速决定。`--stun` 为空（standalone / 回环 relay）且未下发时保持现状：不做 STUN。
@@ -66,16 +66,16 @@ UDP 中继地址（`stunAddr`）**仍然只取 relay 主机:3478**（或 `--stun
 ### 3.3 客户端：竞速发现（替换串行重试）
 
 - 同一个主 socket 向所有候选并发发 Binding Request（各自独立 transaction ID），按 transaction ID 匹配响应，**第一个合法响应即为公网地址**。
-- 轮次：0s 全发，1s 后对未应答的重发，2.5s 再重发一次，总时限 3s；全部失败则与现状一样不带公网地址继续（回退中继）。
-- 只接受来源 IP:port 等于某个已发请求目标、且 transaction ID 匹配的响应（防注入；与现有 `UnpackSTUN` 校验叠加）。
+- 轮次：0s 全发，1s 后对未应答的重发，2.5s 再重发一次，总时限 4s；全部失败则与现状一样不带公网地址继续（回退中继），错误里列出每个候选的结局（unresolved / no-reply / send-failed）。
+- 按 96 位随机 transaction ID 认领响应（与旧实现一致）；来源地址不是请求目标时仍接受并记日志——多 IP 的 STUN 主机可能从另一个地址回包。不同名字解析到同一地址只发一份。
 - 记录每个应答服务器的映射地址与 RTT，供 3.4 使用。
 - 主 socket 在发现结束后才进入 `receiveLoop`，与现有时序相同，不会和打洞包混读。
 
 ### 3.4 NAT 类型探测
 
-- 只从「发现阶段已应答」的服务器中挑两个不同 IP 的做端口比较（仍用临时 socket，逻辑不变）。
-- 不足两个时保持现状返回 Cone，但日志写明原因。
-- 发现阶段已拿到多个映射：若主 socket 对两个不同 IP 服务器的映射端口已经不同，可直接判定 symmetric，省掉临时 socket 的一轮查询（可选优化，实现时视复杂度决定）。
+- 直接用竞速里主 socket 的映射判定：映射 IP 等于本机 IP 为 open；两台不同 IP 的服务器、且映射 IP 相同时，端口相同为 cone、不同为 symmetric（判据同旧的 `DetectNATType`，但用的是打洞那个 socket，省掉临时 socket 一轮查询）。
+- 映射 IP 不同的应答（内网 STUN 看到内网地址、多出口网络）端口不可比，跳过。
+- 凑不够两台可比的应答时按 Cone（与旧逻辑「数据不足按 Cone」一致），日志写明原因。旧的 `DetectNATType` / `StunQueryPort` / `DiscoverPublicAddrVia` 不再有调用方，删除。
 
 ### 3.5 可观测性
 
@@ -103,7 +103,7 @@ UDP 中继地址（`stunAddr`）**仍然只取 relay 主机:3478**（或 `--stun
 
 ## 6. 测试
 
-- 单测：候选合并顺序与去重；竞速在「第一个不通、第二个通」时 ≤1.2s 返回；全部不通 3s 返回；伪造来源/错误 transaction ID 的响应被丢弃；NAT 探测只用已应答服务器。
+- 单测：候选合并顺序与去重、下发列表的客户端校验；竞速在「第一个不通、第二个通」时快速返回；全部不通按时限返回并带诊断；错误 transaction ID 被丢弃、来源不同但 TID 对得上被接受；同地址去重；socket 中途关闭立即返回；NAT 判定只比较映射 IP 相同的应答。
 - relay：参数校验、未配置时响应 JSON 与现状逐字节一致、配置后下发。
 - 端到端：本机起两个 relay（一个 3478 不监听，模拟 Windows），新客户端 share/help 打洞，确认发现耗时与 P2P 结果；老客户端连新 relay 回归。
 - 上线后：看板对比 Windows relay 的 P2P 直连率。

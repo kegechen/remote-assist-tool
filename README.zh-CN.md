@@ -262,6 +262,7 @@ MCP server 名建议用 `remote-debug`。
 | `--length` | `10` | 协助码长度 |
 | `--audit` | `audit.log` | 审计日志文件 |
 | `--stun` | 空 | STUN/UDP relay 监听地址；例如 `:3478`，空则禁用 |
+| `--advertise-stun` | 空 | 下发给新版客户端做公网地址发现的 STUN（`host:port`，IPv4 或域名，逗号分隔，最多 4 个），用于本机 UDP 3478 被云安全组挡住等情况 |
 | `--trust-source-ip` | `true` | Relay 是否能从 TCP 连接看到真实来源 IP；SNAT 后端设为 `false` |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON 限流配置文件；未设置则使用安全默认值 |
 | `--print-default-limits` | `false` | 输出完整默认限流 JSON 后退出 |
@@ -306,7 +307,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--ssh` | `127.0.0.1:22` | 本地 SSH 地址（SSH 隧道模式） |
 | `--new-instance` | `false` | 额外启动独立 share；生成新协助码且不影响默认实例 |
 | `--p2p` | `auto` | P2P 模式：`disabled` / `auto` / `required` |
-| `--stun` | - | STUN 服务地址（默认同 relay 的 :3478） |
+| `--stun` | - | P2P 与 UDP 中继兜底用的 STUN（默认同 relay 的 :3478）；relay 下发的与内置公共 STUN 会同时探测，谁先应答用谁 |
 | `--bind-ip` | - | 指定 UDP 绑定 IP（绕过 TUN 代理自动探测） |
 | `--standalone` | `false` | 进程内启动 relay 并监听 `--standalone-listen`，LAN 直连场景 |
 | `--standalone-listen` | `:8443` | standalone relay 监听地址 |
@@ -329,7 +330,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--trust-new-cert` | `false` | 同 share |
 | `--listen` | `127.0.0.1:2222` | 本地监听地址（SSH 隧道模式） |
 | `--p2p` | `auto` | P2P 模式：`disabled` / `auto` / `required` |
-| `--stun` | - | STUN 服务地址 |
+| `--stun` | - | 同 share |
 | `--bind-ip` | - | 指定 UDP 绑定 IP |
 | `--mcp-stdio` | `false` | 作为 MCP stdio server 运行（供任何支持 MCP 的 AI agent） |
 | `--legacy-ssh` | `false` | 强制传统 SSH 隧道模式（不加 `--mcp-stdio` 时即此模式） |
