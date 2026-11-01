@@ -417,6 +417,9 @@ func (sm *SessionManager) JoinSession(code string, help *ClientConn) (*JoinSessi
 		delete(sm.byConnID, session.Help.ID)
 	}
 	session.Help = help
+	// 新 help 的地址通告等它自己上报。不清空的话 UDP 中继仍把上一位 help 的 IP 当作会话成员，
+	// 同网判断也会拿它的内网地址去算。
+	session.HelpPublicAddr, session.HelpPrivateAddr, session.HelpNATType = "", "", ""
 	sm.byConnID[help.ID] = session
 	// 新 Help 换代：数据面保持未就绪，待调用方失效旧 UDP entry 后再 ActivateDataPlane。
 	session.dataPlaneReady = false

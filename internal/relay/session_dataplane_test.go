@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"net"
 	"testing"
 	"time"
 )
@@ -142,5 +143,26 @@ func TestActivateDataPlaneRejectsUnknownSession(t *testing.T) {
 	}
 	if sm.IsActiveDataSession("ses_nonexistent") {
 		t.Fatal("未知会话不应 active")
+	}
+}
+
+// 协助端更换：上一位 help 上报的地址与 NAT 不能留给新 help，否则 UDP 中继仍把上一位 help
+// 的 IP 当作会话成员，同网判断也会拿它的内网地址去算。
+func TestJoinClearsPreviousHelpAdvert(t *testing.T) {
+	sm, session, _, helpA := newPairedSession(t)
+	sm.UpdatePeerAddr(helpA.ID, "58.1.2.3:6000", "10.9.9.9:6000", "cone")
+	if sm.DisconnectClient(helpA.ID) == nil {
+		t.Fatal("disconnect help A")
+	}
+	if _, err := sm.JoinSession("DPCODE", &ClientConn{ID: "help2", Conn: &MockConn{}}); err != nil {
+		t.Fatalf("JoinSession: %v", err)
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if session.HelpPublicAddr != "" || session.HelpPrivateAddr != "" || session.HelpNATType != "" {
+		t.Fatalf("new help inherited advert: public=%q private=%q nat=%q", session.HelpPublicAddr, session.HelpPrivateAddr, session.HelpNATType)
+	}
+	if sessionKnowsIPLocked(session, net.ParseIP("58.1.2.3")) {
+		t.Fatal("previous help's public IP is still a session member")
 	}
 }
