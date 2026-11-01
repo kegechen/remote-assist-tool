@@ -335,14 +335,14 @@ func TestRaceDiscoverSummaryNamesAliases(t *testing.T) {
 
 // relay 启动校验与客户端过滤共用的规则。
 func TestCheckSTUNServer(t *testing.T) {
-	for _, ok := range []string{"23.95.78.14:3478", "10.0.0.5:3478", "stun.chat.bilibili.com:3478", "stun.l.google.com:19302"} {
+	for _, ok := range []string{"23.95.78.14:3478", "10.0.0.5:3478", "stun.chat.bilibili.com:3478", "stun.l.google.com:19302", "123.example.com:3478", "0x1.example:3478"} {
 		if err := CheckSTUNServer(ok); err != nil {
 			t.Errorf("CheckSTUNServer(%q) = %v, want ok", ok, err)
 		}
 	}
 	for _, bad := range []string{"no-port", ":3478", "host:0", "host:70000", "host:+80", "host:abc", "a b:3478", "a_b:3478",
 		"127.0.0.1:3478", "0.0.0.0:3478", "0.1.2.3:3478", "169.254.1.1:3478", "224.0.0.1:3478", "255.255.255.255:3478",
-		"[2001:db8::1]:3478", "[::ffff:1.2.3.4]:3478", "localhost:3478", "LOCALHOST.:3478", "x.localhost:3478", "127.1:3478", "2130706433:3478", "0177.0.0.1:3478", "240.0.0.1:3478", "evil\x1b[31m:1"} {
+		"[2001:db8::1]:3478", "[::ffff:1.2.3.4]:3478", "localhost:3478", "LOCALHOST.:3478", "x.localhost:3478", "127.1:3478", "2130706433:3478", "0177.0.0.1:3478", "240.0.0.1:3478", "0x7f000001:3478", "0x7f.0.0.0x1:3478", "0X7F.1:3478", "evil\x1b[31m:1"} {
 		if err := CheckSTUNServer(bad); err == nil {
 			t.Errorf("CheckSTUNServer(%q) accepted", bad)
 		}

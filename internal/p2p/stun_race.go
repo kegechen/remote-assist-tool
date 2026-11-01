@@ -63,8 +63,8 @@ func MergeSTUNCandidates(configured string, advertised, fallback []string) []str
 // CheckSTUNServer 校验一项「别处下发的」STUN 地址，relay 的 --advertise-stun 与客户端对下发
 // 列表的过滤共用它：host:port，端口为 1–65535 的十进制数字；host 为单播 IPv4 字面量（不能是
 // 回环、未指定、0.0.0.0/8、链路本地、多播、240.0.0.0/4 保留段与广播），或只含字母数字、点、
-// 连字符的域名（不能是 localhost；最后一段不能全是数字——127.1、2130706433 这类写法 ParseIP
-// 不认，但系统解析器可能按 inet_aton 解析成回环）。客户端的 STUN socket 只走 IPv4，IPv6 字面量也拒绝。私网地址有意放行（LAN 部署）。
+// 连字符的域名（不能是 localhost；最后一段不能全是数字，各段也不能全是 C 风格数字——127.1、
+// 2130706433、0x7f.0.0.1 这类写法 ParseIP 不认，但系统解析器可能按 inet_aton 解析成回环）。客户端的 STUN socket 只走 IPv4，IPv6 字面量也拒绝。私网地址有意放行（LAN 部署）。
 // 只校验格式，不解析域名。
 func CheckSTUNServer(s string) error {
 	host, port, err := net.SplitHostPort(s)
@@ -89,7 +89,7 @@ func CheckSTUNServer(s string) error {
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
 		return fmt.Errorf("invalid STUN server %q (localhost is not reachable by clients)", s)
 	}
-	if last := lower[strings.LastIndex(lower, ".")+1:]; strings.TrimLeft(last, "0123456789") == "" {
+	if last := lower[strings.LastIndex(lower, ".")+1:]; strings.TrimLeft(last, "0123456789") == "" || inetAtonForm(lower) {
 		return fmt.Errorf("invalid STUN server %q (numeric host is not a valid IPv4 address or domain)", s)
 	}
 	for _, r := range host {
@@ -98,6 +98,17 @@ func CheckSTUNServer(s string) error {
 		}
 	}
 	return nil
+}
+
+// inetAtonForm 判断 host 的每一段是否都是 C 风格整数（十进制、0 开头八进制、0x 十六进制），
+// 即 inet_aton 可能当作 IPv4 解析的写法。
+func inetAtonForm(host string) bool {
+	for _, label := range strings.Split(host, ".") {
+		if _, err := strconv.ParseUint(label, 0, 32); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // STUNProbe 是一台 STUN 服务器的应答：主 socket 在它那里的映射地址。
