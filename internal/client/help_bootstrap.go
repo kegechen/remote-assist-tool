@@ -31,7 +31,7 @@ const fileTransferChunk = 512 * 1024
 //
 // 为什么需要它：relay 对每次 advertise 只推送一次、且只推给对端。help 这边这条消息
 // 会落在工具握手窗口内（share 在收到 ToolHello 之前就 advertise 完了），而 manager
-// 要等握手结束、在后台 goroutine 里才启动（启动含同步 STUN + NAT 探测，放主路径会
+// 要等握手结束、在后台 goroutine 里才启动（启动含同步的 STUN 竞速发现，放主路径会
 // 拖慢 connect）。中间这段空窗如果把消息丢了，help 就永远没有对端地址，
 // startHolePunching 直接 return，P2P 静默失效。
 type peerAddrRelay struct {

@@ -225,7 +225,7 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 			p.publicAddr = probes[0].Mapped
 			p.stunUsed = probes[0].Server
 			p.stunElapsed = probes[0].Elapsed
-			log.Printf("Discovered public address %v via %s in %v (%d/%d STUN servers answered)",
+			log.Printf("Discovered public address %v via %s in %v (%d answers from %d STUN candidates)",
 				p.publicAddr, p.stunUsed, p.stunElapsed.Round(time.Millisecond), len(probes), len(candidates))
 
 			// NAT 类型：用竞速里两台不同 IP、映射 IP 相同的服务器看到的映射端口判定（同一个主

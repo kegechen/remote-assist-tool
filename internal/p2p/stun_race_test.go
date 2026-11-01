@@ -195,7 +195,7 @@ func TestRaceDiscoverDedupesSameAddress(t *testing.T) {
 		return bindingReply(req, from, nil)
 	}, nil)
 	_, port, _ := net.SplitHostPort(srv)
-	probes, err := RaceDiscover(clientSocket(t), []string{srv, "localhost:" + port}, fastRace)
+	probes, err := RaceDiscover(clientSocket(t), []string{srv, "[::ffff:127.0.0.1]:" + port}, fastRace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,6 +273,78 @@ func TestNATFromProbes(t *testing.T) {
 	for _, c := range cases {
 		if got := NATFromProbes(local, c.probes); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// unsendableAddr 返回一个从 127.0.0.1 上的 socket 发不出去的地址（本机无路由），找不到就跳过。
+func unsendableAddr(t *testing.T) string {
+	t.Helper()
+	c := clientSocket(t)
+	for _, a := range []string{"192.0.2.1:9", "0.0.0.0:9", "127.0.0.1:0"} {
+		u, _ := net.ResolveUDPAddr("udp4", a)
+		if _, err := c.WriteToUDP([]byte{0}, u); err != nil {
+			return a
+		}
+	}
+	t.Skip("no destination makes sendto fail on this host")
+	return ""
+}
+
+// 首包就发不出去的目标不会有应答：全部如此时立即失败，不等满 deadline，诊断里标 send-failed。
+func TestRaceDiscoverAllSendFailedReturnsImmediately(t *testing.T) {
+	bad := unsendableAddr(t)
+	start := time.Now()
+	_, err := RaceDiscover(clientSocket(t), []string{bad}, DefaultRaceOptions)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), bad+"=send-failed") {
+		t.Fatalf("error %q lacks send-failed", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("returned after %v; nothing can answer, must not wait for the deadline", elapsed)
+	}
+}
+
+// 发不出去的目标不挡住其它候选：另一台照常应答。
+func TestRaceDiscoverSendFailedDoesNotBlockOthers(t *testing.T) {
+	live := fakeSTUN(t, "127.0.0.1", alwaysReply, nil)
+	probes, err := RaceDiscover(clientSocket(t), []string{unsendableAddr(t), live}, fastRace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probes[0].Server != live {
+		t.Fatalf("winner = %s, want %s", probes[0].Server, live)
+	}
+}
+
+// 被去重合并的名字出现在失败诊断里，名字取候选列表里靠前的那个，与解析先后无关。
+func TestRaceDiscoverSummaryNamesAliases(t *testing.T) {
+	dead := fakeSTUN(t, "127.0.0.1", neverReply, nil)
+	_, port, _ := net.SplitHostPort(dead)
+	alias := "[::ffff:127.0.0.1]:" + port
+	_, err := RaceDiscover(clientSocket(t), []string{dead, alias}, fastRace)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if want := dead + "=no-reply(also " + alias + ")"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q lacks %q", err, want)
+	}
+}
+
+// relay 启动校验与客户端过滤共用的规则。
+func TestCheckSTUNServer(t *testing.T) {
+	for _, ok := range []string{"23.95.78.14:3478", "10.0.0.5:3478", "stun.chat.bilibili.com:3478", "stun.l.google.com:19302"} {
+		if err := CheckSTUNServer(ok); err != nil {
+			t.Errorf("CheckSTUNServer(%q) = %v, want ok", ok, err)
+		}
+	}
+	for _, bad := range []string{"no-port", ":3478", "host:0", "host:70000", "host:+80", "host:abc", "a b:3478", "a_b:3478",
+		"127.0.0.1:3478", "0.0.0.0:3478", "0.1.2.3:3478", "169.254.1.1:3478", "224.0.0.1:3478", "255.255.255.255:3478",
+		"[2001:db8::1]:3478", "[::ffff:1.2.3.4]:3478", "localhost:3478", "LOCALHOST.:3478", "x.localhost:3478", "evil\x1b[31m:1"} {
+		if err := CheckSTUNServer(bad); err == nil {
+			t.Errorf("CheckSTUNServer(%q) accepted", bad)
 		}
 	}
 }

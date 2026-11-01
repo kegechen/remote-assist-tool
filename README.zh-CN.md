@@ -262,7 +262,7 @@ MCP server 名建议用 `remote-debug`。
 | `--length` | `10` | 协助码长度 |
 | `--audit` | `audit.log` | 审计日志文件 |
 | `--stun` | 空 | STUN/UDP relay 监听地址；例如 `:3478`，空则禁用 |
-| `--advertise-stun` | 空 | 下发给新版客户端做公网地址发现的 STUN（`host:port`，IPv4 或域名，逗号分隔，最多 4 个），用于本机 UDP 3478 被云安全组挡住等情况 |
+| `--advertise-stun` | 空 | 下发给新版客户端做公网地址发现的 STUN（`host:port`，单播 IPv4 或域名，逗号分隔，最多 4 个），用于本机 UDP 3478 被云安全组挡住等情况 |
 | `--trust-source-ip` | `true` | Relay 是否能从 TCP 连接看到真实来源 IP；SNAT 后端设为 `false` |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON 限流配置文件；未设置则使用安全默认值 |
 | `--print-default-limits` | `false` | 输出完整默认限流 JSON 后退出 |

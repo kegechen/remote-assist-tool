@@ -262,7 +262,7 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--length` | `10` | Assist code length |
 | `--audit` | `audit.log` | Audit log file |
 | `--stun` | empty | STUN/UDP relay listen address; e.g. `:3478`, empty disables it |
-| `--advertise-stun` | empty | Comma-separated STUN servers (`host:port`, IPv4 or domain, at most 4) sent to new clients for public-address discovery, e.g. when this host's UDP 3478 is blocked by a cloud security group |
+| `--advertise-stun` | empty | Comma-separated STUN servers (`host:port`, unicast IPv4 or domain, at most 4) sent to new clients for public-address discovery, e.g. when this host's UDP 3478 is blocked by a cloud security group |
 | `--trust-source-ip` | `true` | Whether the relay can see the real source IP from the TCP connection; set to `false` for SNAT backends |
 | `--limits-file` | `$REMOTE_RELAY_LIMITS_FILE` | JSON rate-limit configuration file; if unset, safe defaults are used |
 | `--latest-version` | relay's own version | Latest version announced to clients; older clients print an upgrade hint (hint only, never rejects). Must be a release tag like `v1.2.3`; a non-release relay build announces nothing. `none` disables |

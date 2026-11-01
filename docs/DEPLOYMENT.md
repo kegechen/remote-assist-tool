@@ -36,7 +36,7 @@ echo $! > /opt/remote-assist/relay.pid
 
 公网部署至少放行 TCP 8443；只有确实启用自建 STUN/UDP relay 时才放行 UDP 3478，并配置 `--stun :3478`。限流和来源 IP 设置见 [Relay 来源 IP、限流与监控指南](RELAY_LIMITS.md)。
 
-如果本机 UDP 3478 对外不可达（例如云厂商安全组未放行 UDP、又改不了），用 `--advertise-stun host:port[,host:port...]`（Windows 服务配置为 `advertise_stun`，最多 4 个）让新版客户端改用别处可达的 STUN 发现公网地址，例如 `--advertise-stun 23.95.78.14:3478,stun.chat.bilibili.com:3478,stun.cloudflare.com:3478`。客户端会把它们与 relay:3478、内置公共 STUN 一起竞速，谁先应答用谁；UDP 中继兜底仍只走本机的 `--stun`。
+如果本机 UDP 3478 对外不可达（例如云厂商安全组未放行 UDP、又改不了），用 `--advertise-stun host:port[,host:port...]`（Windows 服务配置为 `advertise_stun`；单播 IPv4 或域名，最多 4 个，客户端会丢弃的值启动时直接报错）让新版客户端改用别处可达的 STUN 发现公网地址，例如 `--advertise-stun 23.95.78.14:3478,stun.chat.bilibili.com:3478,stun.cloudflare.com:3478`。客户端会把它们与 relay:3478、内置公共 STUN 一起竞速，谁先应答用谁；UDP 中继兜底仍只走本机的 `--stun`。
 
 ## 连接测试
 
