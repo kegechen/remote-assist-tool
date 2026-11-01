@@ -319,7 +319,7 @@ func TestRaceDiscoverSendFailedDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
-// 被去重合并的名字出现在失败诊断里，名字取候选列表里靠前的那个，与解析先后无关。
+// 被去重合并的名字出现在失败诊断里，名字取候选列表里靠前的那个。
 func TestRaceDiscoverSummaryNamesAliases(t *testing.T) {
 	dead := fakeSTUN(t, "127.0.0.1", neverReply, nil)
 	_, port, _ := net.SplitHostPort(dead)
@@ -342,7 +342,7 @@ func TestCheckSTUNServer(t *testing.T) {
 	}
 	for _, bad := range []string{"no-port", ":3478", "host:0", "host:70000", "host:+80", "host:abc", "a b:3478", "a_b:3478",
 		"127.0.0.1:3478", "0.0.0.0:3478", "0.1.2.3:3478", "169.254.1.1:3478", "224.0.0.1:3478", "255.255.255.255:3478",
-		"[2001:db8::1]:3478", "[::ffff:1.2.3.4]:3478", "localhost:3478", "LOCALHOST.:3478", "x.localhost:3478", "evil\x1b[31m:1"} {
+		"[2001:db8::1]:3478", "[::ffff:1.2.3.4]:3478", "localhost:3478", "LOCALHOST.:3478", "x.localhost:3478", "127.1:3478", "2130706433:3478", "0177.0.0.1:3478", "240.0.0.1:3478", "evil\x1b[31m:1"} {
 		if err := CheckSTUNServer(bad); err == nil {
 			t.Errorf("CheckSTUNServer(%q) accepted", bad)
 		}

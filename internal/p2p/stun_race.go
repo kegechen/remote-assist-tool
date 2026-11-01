@@ -62,8 +62,9 @@ func MergeSTUNCandidates(configured string, advertised, fallback []string) []str
 
 // CheckSTUNServer 校验一项「别处下发的」STUN 地址，relay 的 --advertise-stun 与客户端对下发
 // 列表的过滤共用它：host:port，端口为 1–65535 的十进制数字；host 为单播 IPv4 字面量（不能是
-// 回环、未指定、0.0.0.0/8、链路本地、多播、广播），或只含字母数字、点、连字符的域名（不能是
-// localhost）。客户端的 STUN socket 只走 IPv4，IPv6 字面量也拒绝。私网地址有意放行（LAN 部署）。
+// 回环、未指定、0.0.0.0/8、链路本地、多播、240.0.0.0/4 保留段与广播），或只含字母数字、点、
+// 连字符的域名（不能是 localhost；最后一段不能全是数字——127.1、2130706433 这类写法 ParseIP
+// 不认，但系统解析器可能按 inet_aton 解析成回环）。客户端的 STUN socket 只走 IPv4，IPv6 字面量也拒绝。私网地址有意放行（LAN 部署）。
 // 只校验格式，不解析域名。
 func CheckSTUNServer(s string) error {
 	host, port, err := net.SplitHostPort(s)
@@ -79,7 +80,7 @@ func CheckSTUNServer(s string) error {
 		if v4 == nil || strings.Contains(host, ":") {
 			return fmt.Errorf("invalid STUN server %q (clients use IPv4 only)", s)
 		}
-		if v4.IsLoopback() || v4.IsUnspecified() || v4[0] == 0 || v4.IsLinkLocalUnicast() || v4.IsMulticast() || v4.Equal(net.IPv4bcast) {
+		if v4.IsLoopback() || v4.IsUnspecified() || v4[0] == 0 || v4.IsLinkLocalUnicast() || v4.IsMulticast() || v4[0] >= 240 {
 			return fmt.Errorf("invalid STUN server %q (not a unicast address reachable by clients)", s)
 		}
 		return nil
@@ -87,6 +88,9 @@ func CheckSTUNServer(s string) error {
 	lower := strings.ToLower(strings.TrimSuffix(host, "."))
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
 		return fmt.Errorf("invalid STUN server %q (localhost is not reachable by clients)", s)
+	}
+	if last := lower[strings.LastIndex(lower, ".")+1:]; strings.TrimLeft(last, "0123456789") == "" {
+		return fmt.Errorf("invalid STUN server %q (numeric host is not a valid IPv4 address or domain)", s)
 	}
 	for _, r := range host {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
@@ -123,7 +127,7 @@ var DefaultRaceOptions = RaceOptions{
 
 type raceTarget struct {
 	server   string
-	index    int      // 在候选列表里的位置：同址时保留靠前的名字，结果不随解析先后变化
+	index    int      // 在候选列表里的位置：同址时保留靠前的名字（已产生的应答里的名字不再改）
 	aliases  []string // 解析到同一地址、被合并掉的其它候选（只用于诊断）
 	addr     *net.UDPAddr
 	req      []byte
@@ -131,7 +135,7 @@ type raceTarget struct {
 	sentAt   time.Time // 首包时刻，重传以它为基准
 	resends  int
 	answered bool
-	dead     bool // 首包就发不出去（如本机无路由），不会有应答
+	dead     bool // 首包就发不出去（如本机无路由），不会有应答；不区分瞬时错误，属已知取舍
 }
 
 type resolvedTarget struct {

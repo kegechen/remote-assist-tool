@@ -45,7 +45,7 @@ Windows relay（华为云）安全组未放行 UDP 入站，`relay:3478` 对外�
 
 ### 3.1 relay：下发 STUN 列表（协议新增可选字段）
 
-- 新参数 `--advertise-stun host:port[,host:port...]`，Windows 服务 `config.json` 对应 `advertise_stun`。最多 4 个，启动时校验格式（host 非空、端口 1–65535），非法则启动失败并报错。
+- 新参数 `--advertise-stun host:port[,host:port...]`，Windows 服务 `config.json` 对应 `advertise_stun`。最多 4 个，启动时用 `p2p.CheckSTUNServer` 校验（与客户端过滤下发列表的规则相同：单播 IPv4 字面量或域名，端口为纯数字 1–65535；拒绝回环、未指定、链路本地、多播、240/4、广播、localhost、纯数字主机名与 IPv6 字面量），非法则启动失败并报错。
 - `RegisterResponse` 与 `JoinResponse` 新增 `stun_servers []string`（`omitempty`）。未配置时不下发，与现状完全一致。
 - 老客户端忽略该字段。
 - Windows relay 部署时配置 `advertise_stun: "23.95.78.14:3478,stun.chat.bilibili.com:3478,stun.cloudflare.com:3478"`；Linux relay 可不配（自身 3478 可达）。
