@@ -52,12 +52,18 @@ type P2PManager struct {
 	mode       P2PMode
 	stunServer string
 	stunAddr   *net.UDPAddr // resolved STUN server address for UDP relay
-	localConn  *net.UDPConn
-	localAddr  *net.UDPAddr
-	publicAddr *net.UDPAddr
-	peerInfo   *PeerInfo
-	sessionID  string
-	isShare    bool
+	// stunCandidates relay 下发的 STUN（RegisterResponse/JoinResponse.STUNServers），
+	// fallbackSTUN 内置兜底；两者只参与公网地址发现与 NAT 判定，UDP 中继仍只用 stunServer。
+	stunCandidates []string
+	fallbackSTUN   []string
+	stunUsed       string        // 实际采用的 STUN（第一个应答者），随地址上报
+	stunElapsed    time.Duration // 发现耗时
+	localConn      *net.UDPConn
+	localAddr      *net.UDPAddr
+	publicAddr     *net.UDPAddr
+	peerInfo       *PeerInfo
+	sessionID      string
+	isShare        bool
 
 	// authCode 协助码，用来给打洞包签 MAC / 验 MAC（见 proto/punch.go）。
 	// 为空时本端签不出 MAC、也验不过任何包，P2P 因此谈不成并回落 relay——
@@ -107,12 +113,18 @@ type RelayConn interface {
 // bindIP 可选，为空则自动检测物理网卡 IP
 func NewP2PManager(mode P2PMode, stunServer string, bindIP string) *P2PManager {
 	return &P2PManager{
-		mode:       mode,
-		stunServer: stunServer,
-		bindIP:     bindIP,
-		stopChan:   make(chan struct{}),
-		recvStop:   make(chan struct{}),
+		mode:         mode,
+		stunServer:   stunServer,
+		fallbackSTUN: FallbackSTUNServers,
+		bindIP:       bindIP,
+		stopChan:     make(chan struct{}),
+		recvStop:     make(chan struct{}),
 	}
+}
+
+// SetSTUNCandidates 注入 relay 下发的 STUN 服务器，必须在 Start 之前调用。
+func (p *P2PManager) SetSTUNCandidates(servers []string) {
+	p.stunCandidates = append([]string(nil), servers...)
 }
 
 // SetRelayConn sets the relay connection for fallback and signaling
@@ -201,37 +213,36 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 		p.stunAddr, _ = net.ResolveUDPAddr("udp", p.stunServer)
 	}
 
-	// Discover public address via STUN
-	if p.stunServer != "" {
-		p.publicAddr, err = DiscoverPublicAddrVia(p.localConn, p.stunServer)
+	// 公网地址发现：本端配置（--stun 或默认 relay:3478）+ relay 下发 + 内置兜底一起竞速，
+	// 谁先应答用谁；任何一台不通都不再串行干等（旧实现单台 16s）。stunServer 为空表示
+	// standalone/loopback relay：保持不做 STUN（下发列表非空时除外）。
+	if p.stunServer != "" || len(p.stunCandidates) > 0 {
+		candidates := MergeSTUNCandidates(p.stunServer, p.stunCandidates, p.fallbackSTUN)
+		probes, err := RaceDiscover(p.localConn, candidates, DefaultRaceOptions)
 		if err != nil {
-			log.Printf("STUN discovery failed: %v, trying external STUN servers", err)
-			// 回退到公共 STUN 服务器
-			for _, extSTUN := range []string{"stun.l.google.com:19302", "stun1.l.google.com:19302", "stun.cloudflare.com:3478"} {
-				p.publicAddr, err = DiscoverPublicAddrVia(p.localConn, extSTUN)
-				if err == nil {
-					log.Printf("Discovered public address via external STUN (%s): %v", extSTUN, p.publicAddr)
-					break
-				}
-				log.Printf("External STUN %s failed: %v", extSTUN, err)
-			}
-			if p.publicAddr == nil {
-				log.Printf("All STUN servers failed, will try without public address")
-			}
+			log.Printf("STUN discovery failed (%v), will try without public address", err)
 		} else {
-			log.Printf("Discovered public address: %v", p.publicAddr)
-		}
-	}
+			p.publicAddr = probes[0].Mapped
+			p.stunUsed = probes[0].Server
+			p.stunElapsed = probes[0].Elapsed
+			log.Printf("Discovered public address %v via %s in %v (%d/%d STUN servers answered)",
+				p.publicAddr, p.stunUsed, p.stunElapsed.Round(time.Millisecond), len(probes), len(candidates))
 
-	// NAT 类型检测
-	if p.publicAddr != nil {
-		stunServers := []string{"stun.l.google.com:19302", "stun1.l.google.com:19302", "stun.cloudflare.com:3478"}
-		if p.stunServer != "" {
-			stunServers = append([]string{p.stunServer}, stunServers...)
+			// NAT 类型：优先用竞速里两台不同 IP 服务器的映射直接判定；不够时只拿已应答的
+			// 服务器做临时 socket 探测（凑不够两台不同 IP 就按 Cone，与旧逻辑一致），
+			// 不再让不通的 relay:3478 排在第一个、一超时就被判成 Cone。
+			p.natType = NATFromProbes(p.localAddr.IP, probes)
+			if p.natType == NATUnknown {
+				answered := make([]string, 0, len(probes))
+				for _, pr := range probes {
+					if pr.Mapped.IP.Equal(p.publicAddr.IP) { // 映射 IP 不同的端口不可比（见 NATFromProbes）
+						answered = append(answered, pr.Server)
+					}
+				}
+				p.natType = DetectNATType(p.localAddr.IP, p.publicAddr, answered)
+			}
+			log.Printf("NAT type detected: %s", p.natType)
 		}
-		// 去重，确保至少有 2 个不同 IP 的服务器
-		p.natType = DetectNATType(p.localAddr.IP, p.publicAddr, stunServers)
-		log.Printf("NAT type detected: %s", p.natType)
 	}
 
 	// Advertise our address via relay
@@ -257,6 +268,10 @@ func (p *P2PManager) advertiseAddr() error {
 		PublicAddr:  addrToString(p.publicAddr),
 		PrivateAddr: addrToString(p.localAddr),
 		NATType:     p.natType,
+	}
+	if p.publicAddr != nil {
+		advert.STUNServer = p.stunUsed
+		advert.STUNMs = p.stunElapsed.Milliseconds()
 	}
 
 	return p.relayConn.SendMessage(proto.MsgPeerAddrAdvertise, advert)

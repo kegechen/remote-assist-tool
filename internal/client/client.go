@@ -115,6 +115,24 @@ type Client struct {
 	// 网络环境变了不该一直沿用旧选择，进程重启即重新从 TCP 开始。
 	transport string
 	mu        sync.Mutex
+	// stunMu/relaySTUN：relay 在注册/加入响应里下发的 STUN 服务器（每次注册/加入覆盖）。
+	// 写在注册/加入的 goroutine，读在后台启动 P2P 的 goroutine，单独加锁。
+	stunMu    sync.Mutex
+	relaySTUN []string
+}
+
+// setRelaySTUN 记下 relay 下发的 STUN 服务器；nil 表示 relay 未下发。
+func (c *Client) setRelaySTUN(servers []string) {
+	c.stunMu.Lock()
+	c.relaySTUN = append([]string(nil), servers...)
+	c.stunMu.Unlock()
+}
+
+// relaySTUNServers 返回 relay 下发的 STUN 服务器副本。
+func (c *Client) relaySTUNServers() []string {
+	c.stunMu.Lock()
+	defer c.stunMu.Unlock()
+	return append([]string(nil), c.relaySTUN...)
 }
 
 // NewClient 创建客户端

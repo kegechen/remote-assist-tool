@@ -42,6 +42,7 @@ type relayOptions struct {
 	downloadURL    string
 	releasePage    string
 	updateInfoFile string
+	advertiseSTUN  []string
 }
 
 func main() {
@@ -120,6 +121,7 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		Limits:                limits,
 		Update:                updateInfo,
 		UpdateInfoFile:        opts.updateInfoFile,
+		AdvertiseSTUN:         opts.advertiseSTUN,
 	}
 
 	if opts.noAuth {
@@ -184,6 +186,7 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.StringVar(&opts.downloadURL, "download-url", opts.downloadURL, "Client download URL template (https) for upgrade hints; {version}/{os}/{arch}/{ext} are expanded per client platform")
 	fs.StringVar(&opts.releasePage, "release-page", opts.releasePage, "Fallback download page (https; {version} expanded) when a client's platform is unknown or has no released asset")
 	fs.StringVar(&opts.updateInfoFile, "update-info-file", "", "JSON upgrade announcement file to reload without restarting the relay")
+	advertiseSTUN := fs.String("advertise-stun", "", "Comma-separated STUN servers (host:port, at most 4) sent to new clients for public-address discovery; use when this host's --stun port is unreachable from outside")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
 		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
@@ -198,6 +201,10 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	}
 	if opts.codeTTL <= 0 {
 		return relayOptions{}, fmt.Errorf("ttl must be positive")
+	}
+	opts.advertiseSTUN = splitList(*advertiseSTUN)
+	if err := relay.ValidateAdvertiseSTUN(opts.advertiseSTUN); err != nil {
+		return relayOptions{}, fmt.Errorf("--advertise-stun: %w", err)
 	}
 	if opts.plain && opts.quicAddr != "" {
 		return relayOptions{}, fmt.Errorf("--quic-listen requires TLS; it cannot be combined with --plain")
@@ -282,4 +289,15 @@ func generateCerts(certsDir string, stdout io.Writer) error {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// splitList 拆分逗号分隔的列表，去掉两侧空白与空项；全空返回 nil。
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

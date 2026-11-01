@@ -50,6 +50,9 @@ type RegisterResponse struct {
 	Code      string `json:"code"`
 	ExpiresAt int64  `json:"expires_at"`
 	UpdateInfo
+	// STUNServers relay 建议的 STUN 服务器（host:port，--advertise-stun）；新版客户端把它们
+	// 加入公网地址发现的竞速候选。旧 relay 不发、旧客户端忽略。
+	STUNServers []string `json:"stun_servers,omitempty"`
 }
 
 // UpdateInfo relay 下发的新版本软提示（旧 relay 不发、旧客户端忽略）。只用于提示，
@@ -78,6 +81,7 @@ type JoinResponse struct {
 	PeerVersion string `json:"peer_version,omitempty"`
 	PeerHost    string `json:"peer_host,omitempty"` // share 端身份串（同 RegisterRequest.Host；旧 relay 不发）
 	UpdateInfo
+	STUNServers []string `json:"stun_servers,omitempty"` // 同 RegisterResponse.STUNServers
 }
 
 // TunnelData 隧道数据
@@ -123,6 +127,10 @@ type PeerAddrAdvertise struct {
 	PublicAddr  string `json:"public_addr"`        // "ip:port"
 	PrivateAddr string `json:"private_addr"`       // "ip:port"
 	NATType     string `json:"nat_type,omitempty"` // NAT 类型: "open", "cone", "symmetric"
+	// STUNServer / STUNMs：实际采用的 STUN 服务器与发现耗时（毫秒），供 relay 统计各 STUN
+	// 来源的 P2P 成功率。未拿到公网地址时为空 / 0。旧客户端不发、旧 relay 忽略。
+	STUNServer string `json:"stun_server,omitempty"`
+	STUNMs     int64  `json:"stun_ms,omitempty"`
 }
 
 // PeerAddrReady 对等端地址就绪（服务器转发给对方）

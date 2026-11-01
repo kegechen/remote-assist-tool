@@ -387,3 +387,26 @@ func TestWindowsServiceConfigQUICListen(t *testing.T) {
 		t.Fatalf("validate()=%v, want quic_listen requires TLS error", err)
 	}
 }
+
+// advertise_stun 传成 --advertise-stun；格式不对在加载配置时就报错。
+func TestWindowsServiceConfigAdvertiseSTUN(t *testing.T) {
+	cfg := windowsServiceConfig{
+		ListenAddr:    ":8443",
+		CodeTTL:       "30m",
+		CodeLength:    10,
+		AuditLog:      `C:\ProgramData\RemoteAssistRelay\logs\audit.jsonl`,
+		TrustSourceIP: true,
+		CertsDir:      `C:\ProgramData\RemoteAssistRelay\certs`,
+		AdvertiseSTUN: "23.95.78.14:3478,stun.chat.bilibili.com:3478,stun.cloudflare.com:3478",
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("合法的 advertise_stun 被拒: %v", err)
+	}
+	if args := strings.Join(cfg.relayArgs(), " "); !strings.Contains(args, "--advertise-stun 23.95.78.14:3478,stun.chat.bilibili.com:3478,stun.cloudflare.com:3478") {
+		t.Fatalf("relayArgs 未传 --advertise-stun: %s", args)
+	}
+	cfg.AdvertiseSTUN = "no-port"
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "advertise_stun") {
+		t.Fatalf("validate()=%v, want advertise_stun error", err)
+	}
+}

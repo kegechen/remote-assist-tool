@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/remote-assist/tool/internal/relay"
 	"github.com/remote-assist/tool/internal/update"
 )
 
@@ -50,6 +51,8 @@ type windowsServiceConfig struct {
 	DownloadURL    string `json:"download_url,omitempty"`
 	ReleasePage    string `json:"release_page,omitempty"`
 	UpdateInfoFile string `json:"update_info_file,omitempty"`
+	// AdvertiseSTUN 逗号分隔的 host:port，对应 --advertise-stun。
+	AdvertiseSTUN string `json:"advertise_stun,omitempty"`
 }
 
 func defaultWindowsServicePaths() (windowsServicePaths, error) {
@@ -145,6 +148,9 @@ func (cfg windowsServiceConfig) validate() error {
 			return fmt.Errorf("%s must be an https URL without spaces or control characters", name)
 		}
 	}
+	if err := relay.ValidateAdvertiseSTUN(splitList(cfg.AdvertiseSTUN)); err != nil {
+		return fmt.Errorf("advertise_stun: %w", err)
+	}
 	paths := map[string]string{
 		"cert":             cfg.CertFile,
 		"key":              cfg.KeyFile,
@@ -199,6 +205,9 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 	}
 	if cfg.UpdateInfoFile != "" {
 		args = append(args, "--update-info-file", cfg.UpdateInfoFile)
+	}
+	if cfg.AdvertiseSTUN != "" {
+		args = append(args, "--advertise-stun", cfg.AdvertiseSTUN)
 	}
 	return args
 }

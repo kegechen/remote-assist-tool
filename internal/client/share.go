@@ -28,6 +28,7 @@ var ErrPeerDisconnected = errors.New("peer disconnected")
 type shareP2PManager interface {
 	SetRelayConn(p2p.RelayConn)
 	SetAuthCode(string)
+	SetSTUNCandidates([]string)
 	Start(sessionID string, isShare bool) (<-chan p2p.P2PResult, error)
 	HandlePeerAddrReady(*proto.PeerAddrReady)
 	Close()
@@ -207,6 +208,7 @@ func (s *ShareMode) makeP2PManager(mode p2p.P2PMode) shareP2PManager {
 	// 打洞包要用协助码签 MAC，必须在 Start 之前注入，否则本轮打洞全程发的都是
 	// 无 MAC 的包，对端一律丢弃。
 	mgr.SetAuthCode(s.code)
+	mgr.SetSTUNCandidates(s.client.relaySTUNServers())
 	return mgr
 }
 
@@ -424,6 +426,7 @@ func (s *ShareMode) register() error {
 	}
 	s.code = resp.Code
 	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
+	s.client.setRelaySTUN(resp.STUNServers)
 	s.conflictHinted = false
 	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
 	s.printf("\n================ 请复制给你的 AI 助手（支持 MCP 即可） ================\n%s\n", instructions)

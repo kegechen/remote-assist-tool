@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -33,6 +34,8 @@ func TestParseRelayOptionsRejectsInvalidValues(t *testing.T) {
 		{"--key", "server.key"},
 		{"unexpected"},
 		{"--plain", "--quic-listen", ":8443"},
+		{"--advertise-stun", "no-port"},
+		{"--advertise-stun", "a:1,b:1,c:1,d:1,e:1"},
 	}
 	for _, args := range tests {
 		if _, err := parseRelayOptions(args, &bytes.Buffer{}); err == nil {
@@ -65,5 +68,17 @@ func TestRunRelayVersionDoesNotStartListener(t *testing.T) {
 	}
 	if stdout.Len() == 0 || stderr.Len() != 0 {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// --advertise-stun 逗号分隔、两侧空白忽略，原样进 relay.Config。
+func TestParseRelayOptionsAdvertiseSTUN(t *testing.T) {
+	opts, err := parseRelayOptions([]string{"--advertise-stun", "23.95.78.14:3478, stun.chat.bilibili.com:3478,,stun.cloudflare.com:3478"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"23.95.78.14:3478", "stun.chat.bilibili.com:3478", "stun.cloudflare.com:3478"}
+	if !reflect.DeepEqual(opts.advertiseSTUN, want) {
+		t.Fatalf("advertiseSTUN = %q, want %q", opts.advertiseSTUN, want)
 	}
 }

@@ -72,6 +72,7 @@ func (h *HelpMode) join() (*proto.JoinResponse, error) {
 	if !resp.Success {
 		return nil, fmt.Errorf("join failed: %s", resp.Error)
 	}
+	h.client.setRelaySTUN(resp.STUNServers)
 	return &resp, nil
 }
 
@@ -161,6 +162,7 @@ func (h *HelpMode) Run() error {
 func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTunnel, error) {
 	mgr := p2p.NewP2PManager(mode, h.client.config.STUNServer, h.client.config.BindIP)
 	mgr.SetAuthCode(h.code)
+	mgr.SetSTUNCandidates(h.client.relaySTUNServers())
 	mgr.SetRelayConn(h.client)
 
 	resultCh, err := mgr.Start(sessionID, false)

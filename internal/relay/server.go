@@ -18,6 +18,8 @@ import (
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/ratelimit"
+	"strconv"
+	"strings"
 )
 
 // 服务端加固默认值（防资源耗尽型 DoS / slowloris / 超大消息）
@@ -129,6 +131,32 @@ type Config struct {
 	Update                 proto.UpdateInfo
 	UpdateInfoFile         string
 	UpdateInfoPollInterval time.Duration
+	// AdvertiseSTUN 随注册/加入响应下发给新版客户端的 STUN 服务器（host:port，--advertise-stun），
+	// 客户端把它们加入公网地址发现的竞速候选。用于本机 3478 对外不通（如云安全组未放行 UDP）
+	// 的部署：让客户端改用别处可达的 STUN。为空不下发。
+	AdvertiseSTUN []string
+}
+
+// maxAdvertiseSTUN 限制下发条数：每条都会让客户端多开一条 NAT 映射、多发几个包。
+const maxAdvertiseSTUN = 4
+
+// ValidateAdvertiseSTUN 校验 --advertise-stun：每项必须是 host:port（host 非空、不含空白，
+// 端口 1–65535），最多 maxAdvertiseSTUN 项。只校验格式，不解析域名。
+func ValidateAdvertiseSTUN(servers []string) error {
+	if len(servers) > maxAdvertiseSTUN {
+		return fmt.Errorf("at most %d STUN servers can be advertised, got %d", maxAdvertiseSTUN, len(servers))
+	}
+	for _, s := range servers {
+		host, port, err := net.SplitHostPort(s)
+		if err != nil || host == "" || strings.ContainsAny(host, " \t") {
+			return fmt.Errorf("invalid STUN server %q (want host:port)", s)
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("invalid STUN server %q (port must be 1-65535)", s)
+		}
+	}
+	return nil
 }
 
 // Server 中转服务器
@@ -193,6 +221,9 @@ func NewServer(cfg *Config) (*Server, error) {
 	cfg.Limits = limits
 	if cfg.UpdateInfoPollInterval <= 0 {
 		cfg.UpdateInfoPollInterval = 5 * time.Second
+	}
+	if err := ValidateAdvertiseSTUN(cfg.AdvertiseSTUN); err != nil {
+		return nil, fmt.Errorf("invalid advertise STUN: %w", err)
 	}
 	if cfg.UpdateInfoFile != "" && !filepath.IsAbs(cfg.UpdateInfoFile) {
 		return nil, fmt.Errorf("update info file must be an absolute path: %s", cfg.UpdateInfoFile)
@@ -780,9 +811,10 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	client.Type = connStateShare
 
 	resp := &proto.RegisterResponse{
-		Code:       code,
-		ExpiresAt:  expiresAt.Unix(),
-		UpdateInfo: s.updateInfo(),
+		Code:        code,
+		ExpiresAt:   expiresAt.Unix(),
+		UpdateInfo:  s.updateInfo(),
+		STUNServers: s.config.AdvertiseSTUN,
 	}
 
 	msg, _ := proto.NewMessage(proto.MsgRegisterResponse, resp)
@@ -844,6 +876,7 @@ func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 		PeerVersion: joinResult.ShareVersion,
 		PeerHost:    s.legacyHelpUpdateHost(client, joinResult.ShareVersion, joinResult.ShareHost),
 		UpdateInfo:  s.updateInfo(),
+		STUNServers: s.config.AdvertiseSTUN,
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)

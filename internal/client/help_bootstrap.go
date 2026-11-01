@@ -680,6 +680,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	// 与「连接立即可用、P2P 后台升级」的设计相悖。
 	mgr := p2p.NewP2PManager(mode, cfg.STUNServer, cfg.BindIP)
 	mgr.SetAuthCode(h.code)
+	mgr.SetSTUNCandidates(h.client.relaySTUNServers())
 	mgr.SetRelayConn(h.client)
 	p2pMgrPtr.Store(mgr) // 登记给 teardown 回收
 	resultCh, startErr := mgr.Start(sessionID, false)
