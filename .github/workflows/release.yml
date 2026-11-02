@@ -3,12 +3,12 @@ name: Build and Upload Release Assets
 on:
   release:
     types: [created]
-  # 手动补发：只编 win7 版 cli 传到一个已有 release，并重算 SHA256SUMS。
+  # 手动补发：只编 legacy 版 cli（Win7/8/2008R2/2012 用）传到一个已有 release，并重算 SHA256SUMS。
   # 常规矩阵不跑（产物已在 release 上，重编会覆盖成另一次构建的字节）。
   workflow_dispatch:
     inputs:
       tag:
-        description: '要补发 win7 版 cli 的已有 release tag，如 v1.2.1'
+        description: '要补发 legacy 版 cli 的已有 release tag，如 v1.2.1'
         required: true
 
 permissions:
@@ -68,11 +68,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Windows 7 / Server 2008 R2 专用 cli。官方 Go 1.21 起不再支持 Win7（运行时会调用
+  # 老系统专用 cli：Windows 7/8/8.1、Server 2008 R2/2012。官方 Go 1.21 起只支持 Win10+（运行时会调用
   # Win8+ 才有的系统函数，Win7 上一启动就 0xc0000005），这里改用 thongtech/go-legacy-win7：
   # 在新版 Go 上恢复了 Win7 支持的工具链，源码和依赖都不用动。它是第三方工具链，所以
   # 版本和 SHA256 都钉死，只用来编这一个产物，正常产物仍走官方 Go。
-  build-win7:
+  build-legacy:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: 0
@@ -102,20 +102,20 @@ jobs:
           dirname "$gobin" >> "$GITHUB_PATH"
         shell: bash
 
-      - name: Build windows/amd64 win7 cli
+      - name: Build windows/amd64 legacy cli (Win7+)
         run: |
           set -euo pipefail
           go version
           mkdir -p dist
           ldflags="-X github.com/remote-assist/tool/internal/version.Version=$RELEASE_TAG"
-          go build -ldflags "$ldflags" -o dist/remote-assist-cli-windows-amd64-win7.exe ./cmd/remote
+          go build -ldflags "$ldflags" -o dist/remote-assist-cli-windows-amd64-legacy.exe ./cmd/remote
         shell: bash
 
       - name: Upload Release Asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$RELEASE_TAG" dist/remote-assist-cli-windows-amd64-win7.exe --clobber
+        run: gh release upload "$RELEASE_TAG" dist/remote-assist-cli-windows-amd64-legacy.exe --clobber
         shell: bash
 
   # SHA256SUMS 必须单独成 job：build 是 6 条并行的矩阵腿，每条只看得见自己那两三个
@@ -125,7 +125,7 @@ jobs:
   # 这里用 runner 自带的 gh 而不是再引一个 upload-artifact/download-artifact 组合：
   # 少两个需要钉 SHA 和跟版本的依赖，产物本来也已经在 release 上了。
   checksums:
-    needs: [build, build-win7]
+    needs: [build, build-legacy]
     # 手动补发时 build 被跳过；!failure() 把跳过当成通过，任一真失败仍会拦住
     if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
