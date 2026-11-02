@@ -199,6 +199,46 @@ serve "$S" SKIP
 run "$S" REMOTE_INSTALL_SKIP_CHECKSUM=1
 expect "逃生舱可跳过校验" 0 "skipping checksum verification"
 
+# ------------------------------------------- macOS 隔离属性
+#
+# 安装路径上若是浏览器下载过的那份，带着 com.apple.quarantine，Gatekeeper 会拒绝运行。
+# 本机多半不是 macOS，这里用假 uname 把平台报成 Darwin/arm64，用假 xattr 记下调用。
+
+XLOG="$TMP/xattr.log"
+# 记下参数后返回 1：模拟文件本来就没有该属性时 xattr -d 的失败，安装不能因此中断。
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' "$XLOG" > "$STUB/xattr"
+chmod +x "$STUB/xattr"
+
+: > "$XLOG"
+serve "$S" "$GOOD  $ASSET
+"
+run "$S"
+if [ -s "$XLOG" ]; then
+    note_fail "非 macOS 平台不该调用 xattr: $(cat "$XLOG")"
+else
+    echo "ok   非 macOS 平台不调用 xattr"
+fi
+
+MAC="$TMP/mac-stub"
+mkdir -p "$MAC"
+printf '#!/bin/sh\ncase "$1" in -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$MAC/uname"
+chmod +x "$MAC/uname"
+MAC_ASSET='remote-assist-cli-darwin-arm64'
+rm -rf "$S"; mkdir -p "$S"
+printf '%s\n' "$PAYLOAD" > "$S/$MAC_ASSET"
+printf '%s  %s\n' "$GOOD" "$MAC_ASSET" > "$S/SHA256SUMS"
+: > "$XLOG"
+rm -rf "$DEST"; mkdir -p "$DEST"
+out=$(env PATH="$MAC:$TESTPATH" STUB_SERVE_DIR="$S" REMOTE_INSTALL_DIR="$DEST" \
+    "$SH_UNDER_TEST" "$RUN_COPY" 2>&1)
+rc=$?
+expect "macOS 下正常安装" 0 "Checksum verified."
+if grep -qxF -- "-d com.apple.quarantine $DEST/remote" "$XLOG" 2>/dev/null; then
+    echo "ok   macOS 下清除了安装文件的隔离属性"
+else
+    note_fail "macOS 下没有清除隔离属性，xattr 调用: $(cat "$XLOG" 2>/dev/null)"
+fi
+
 # ------------------------------------------- compute_sha256 的三条工具分支
 #
 # macOS 自带的是 perl 版 shasum 而没有 sha256sum，某些精简容器里两个都没有只剩

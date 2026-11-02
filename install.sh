@@ -204,6 +204,16 @@ fi
 
 install_path="${install_dir}/${command_name}"
 
+# clear_quarantine 清掉 macOS 的隔离属性。浏览器 / AirDrop 下载或从带隔离属性的压缩包
+# 解出的文件带 com.apple.quarantine，Gatekeeper 会拒绝运行这个未公证的二进制（"无法验证
+# 开发者"）。curl/wget 下载的一般没有，但安装路径上可能是用户先前手动下载的那份，所以
+# 每次都尽力清一遍；没有 xattr 或没有该属性都不算错。
+clear_quarantine() {
+    [ "$os" = 'darwin' ] || return 0
+    command -v xattr >/dev/null 2>&1 || return 0
+    xattr -d com.apple.quarantine "$1" 2>/dev/null || true
+}
+
 # install_release 下载、校验并原子替换 install_path。
 install_release() {
     mkdir -p "$install_dir" || fail "cannot create install directory: ${install_dir}"
@@ -267,6 +277,7 @@ else
     fi
     install_release
 fi
+clear_quarantine "$install_path"
 
 case ":${PATH:-}:" in
     *":${install_dir}:"*)
