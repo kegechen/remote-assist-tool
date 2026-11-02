@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
 )
@@ -54,33 +53,45 @@ func TestGrepStopsOnCanceledContext(t *testing.T) {
 	}
 }
 
+// afterNChecksCtx 前 n 次 Err() 返回 nil，之后一律报 DeadlineExceeded。
+//
+// 用真 deadline 测"文件中途停下"是赌机器速度：快的 runner 150ms 内就能把 300 万行扫完，
+// deadline 还没到 grep 已正常返回，测试随机失败。按 Err() 调用次数触发就与快慢无关。
+type afterNChecksCtx struct {
+	context.Context
+	n int
+}
+
+func (c *afterNChecksCtx) Err() error {
+	if c.n > 0 {
+		c.n--
+		return nil
+	}
+	return context.DeadlineExceeded
+}
+
 // TestGrepStopsMidFileOnDeadline 覆盖单个巨型文件的情形：只在文件粒度上检查取消是不够的，
 // 一个几百万行的日志能顶着一次 WalkDir 回调跑很久。
+//
+// 放行的 2 次正好是 WalkDir 对根目录和 huge.log 的回调；此后能观察到 deadline 的只有
+// 文件内部的检查。去掉那处检查，grep 会把整个文件扫完并当作完整结果返回。
 func TestGrepStopsMidFileOnDeadline(t *testing.T) {
 	root := t.TempDir()
 	var buf bytes.Buffer
-	for i := 0; i < 3_000_000; i++ {
+	for i := 0; i < 3*grepCtxCheckLines; i++ {
 		buf.WriteString("no match here at all\n")
 	}
 	if err := os.WriteFile(filepath.Join(root, "huge.log"), buf.Bytes(), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	buf.Reset()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	start := time.Now()
+	ctx := &afterNChecksCtx{Context: context.Background(), n: 2}
 	_, err := grepIn(t, ctx, root, nil)
-	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("deadline 已过，grep 仍然把结果当成完整的返回了")
+		t.Fatal("deadline 已过，grep 仍然把结果当成完整的返回了：文件内部没有检查取消")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v，期望包住 context.DeadlineExceeded", err)
-	}
-	// 单文件内部不检查 ctx 的话，这里会一直扫到 300 万行读完为止。
-	if elapsed > 5*time.Second {
-		t.Fatalf("扫到 %v 才停：文件内部没有检查取消", elapsed)
 	}
 }
 
