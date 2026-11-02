@@ -110,6 +110,31 @@ func TestWindowsUpgradeRenameRollbackAndCommit(t *testing.T) {
 	}
 }
 
+// TestWindowsRollbackRestoresBackupWhenTargetMissing 原路径为空时（stage 改名原 exe 后被杀、
+// 或候选刚放上就被 Defender 隔离）回滚也必须把备份放回原名，而不是因"移开候选"失败而放弃。
+func TestWindowsRollbackRestoresBackupWhenTargetMissing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "remote-assist.exe")
+	backup := target + ".old-test"
+	if err := os.WriteFile(backup, []byte("old executable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := runUpgradeFinalize([]string{
+		"--action", "rollback", "--old-pid", "0", "--new-pid", "0",
+		"--target", target, "--backup", backup, "--failed", target + ".failed-test",
+	})
+	if err != nil {
+		t.Fatalf("原路径为空时回滚失败: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "old executable" {
+		t.Fatalf("备份没有放回原名: %q, %v", got, err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("回滚后备份仍在: %v", err)
+	}
+}
+
 func copyFileForUpgradeTest(t *testing.T, source, target string) {
 	t.Helper()
 	in, err := os.Open(source)

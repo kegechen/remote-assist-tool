@@ -258,6 +258,9 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   check('0.0.5 比 0.0.6 旧', ctx.isVersionOlder('0.0.5', '0.0.6'));
   check('同版本不提示升级', !ctx.isVersionOlder('0.0.6', '0.0.6'));
   check('git distance 可比较', ctx.isVersionOlder('0.0.6', '0.0.6-7-gabcdef'));
+  check('Windows 对端识别', ctx.peerHostIsWindows('Administrator@srv Windows 10 amd64'));
+  check('主机名含 windows 的 Linux 不算 Windows', !ctx.peerHostIsWindows('u@windows-box kylin amd64'));
+  check('只有主机名时不算 Windows', !ctx.peerHostIsWindows('windows'));
   ctx.setUpgradeInfo({ peer_version: '0.0.5', help_version: '0.0.6' });
   check('旧 share 显示升级条', els.get('upgrade-notice').style.display === 'flex');
   check('升级条显示两端版本', /0\.0\.5/.test(els.get('upgrade-msg').textContent) && /0\.0\.6/.test(els.get('upgrade-msg').textContent));

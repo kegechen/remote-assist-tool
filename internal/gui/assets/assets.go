@@ -144,7 +144,7 @@ const $=s=>document.querySelector(s),status=$('#status');
 // 设不了头，只能退回 query 参数（令牌本身即凭据，跨站方拿不到，同样安全）。
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 function withToken(path){return path+(path.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN)}
-let connected=false,cmdHistory=[],histIdx=-1,currentFilePath='',peerVersion='',helpVersion='';
+let connected=false,cmdHistory=[],histIdx=-1,currentFilePath='',peerVersion='',helpVersion='',peerHost='';
 let tabs=[],activeTab=null;
 
 function setStatus(ok,text){connected=ok;status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');status.disabled=!ok;if(!ok)$('#conn-info').style.display='none';renderConnBtn()}
@@ -209,7 +209,7 @@ function resetRemoteState(){
   for(const k in treeCache)delete treeCache[k];
   remoteOS='';
   $('#treePath').value='';
-  peerVersion='';helpVersion='';$('#upgrade-notice').style.display='none';$('#upgrade-notice').className='';
+  peerVersion='';helpVersion='';peerHost='';$('#upgrade-notice').style.display='none';$('#upgrade-notice').className='';
 }
 $('#connect').onclick=async()=>{
   const b=$('#connect');b.disabled=true;
@@ -225,8 +225,15 @@ function isVersionOlder(current,latest){
   for(let i=0;i<a.length;i++){if(a[i]!==b[i])return a[i]<b[i]}
   return false;
 }
+// peerHostIsWindows 与后端 update.PlatformFromHost 同规则：只看末尾的系统字段（末字段是架构），
+// 不看开头的 user@host，叫 windows-box 的 Linux 不算 Windows。
+function peerHostIsWindows(h){
+  const f=String(h||'').trim().split(/\s+/);if(f.length<2)return false;
+  const sys=f.slice(0,-1),w=x=>String(x||'').toLowerCase()==='windows';
+  return w(sys[sys.length-1])||(sys.length>=2&&w(sys[sys.length-2]));
+}
 function setUpgradeInfo(meta){
-  peerVersion=meta.peer_version||'';helpVersion=meta.help_version||'';
+  peerVersion=meta.peer_version||'';helpVersion=meta.help_version||'';peerHost=meta.peer_host||'';
   const n=$('#upgrade-notice');n.className='';
   if(!isVersionOlder(peerVersion,helpVersion)){n.style.display='none';return}
   $('#upgrade-msg').textContent='远端 share '+peerVersion+'，当前 help '+helpVersion;
@@ -236,7 +243,9 @@ $('#upgrade-select').onclick=()=>$('#upgrade-file').click();
 $('#upgrade-file').onchange=async()=>{
   const input=$('#upgrade-file'),file=input.files&&input.files[0];if(!file)return;
   input.value='';
-  if(!confirm('将 '+file.name+' 传到远端，验证后以先建后断方式升级 share。继续吗？'))return;
+  // Windows 上 Defender 可能把 share 当威胁结束进程并隔离文件，升级会停在半途；先提醒加排除项。
+  const defenderNote=peerHostIsWindows(peerHost)?'\n\n注意：Windows Defender 可能把 share 误报为威胁，结束进程并隔离文件，导致升级中断。建议先为 share 所在目录添加排除项。':'';
+  if(!confirm('将 '+file.name+' 传到远端，验证后以先建后断方式升级 share。继续吗？'+defenderNote))return;
   const btn=$('#upgrade-select'),connBtn=$('#connect');btn.disabled=true;connBtn.disabled=true;
   $('#upgrade-notice').className='';$('#upgrade-notice').style.display='flex';
   $('#upgrade-msg').textContent='正在准备升级...';

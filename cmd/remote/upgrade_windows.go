@@ -184,11 +184,22 @@ func runUpgradeFinalize(args []string) error {
 			return fmt.Errorf("check old executable backup: %w", err)
 		}
 		_ = os.Remove(*failed)
-		if err := os.Rename(*target, *failed); err != nil {
-			return fmt.Errorf("move failed candidate aside: %w", err)
+		// 原路径可能是空的：stage 改名原 exe 后还没放入候选就被杀，或候选刚放上就被
+		// Defender 隔离。此时没有东西要移开，直接把备份放回去；先 Rename 空路径只会报错，
+		// 原文件就永远停在备份名上了。
+		movedAside := false
+		if _, err := os.Stat(*target); err == nil {
+			if err := os.Rename(*target, *failed); err != nil {
+				return fmt.Errorf("move failed candidate aside: %w", err)
+			}
+			movedAside = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("check failed candidate: %w", err)
 		}
 		if err := os.Rename(*backup, *target); err != nil {
-			_ = os.Rename(*failed, *target)
+			if movedAside {
+				_ = os.Rename(*failed, *target)
+			}
 			return fmt.Errorf("restore old executable: %w", err)
 		}
 		_ = os.Remove(*failed)

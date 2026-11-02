@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"crypto/rand"
+	"debug/buildinfo"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/upgradeflags"
 )
 
@@ -107,10 +109,16 @@ func callRemoteJSON(ctx context.Context, client *MCPClient, tool string, args ma
 }
 
 func execRemote(ctx context.Context, client *MCPClient, argv []string) (remoteExecResult, error) {
+	return execRemoteTimeout(ctx, client, argv, 30000)
+}
+
+// execRemoteTimeout 同 execRemote，但指定远端超时。超时后 agent 会直接杀掉进程，被杀的
+// 命令来不及跑自己的收尾（例如 upgrade-stage 的 defer 还原），慢命令要给足时间。
+func execRemoteTimeout(ctx context.Context, client *MCPClient, argv []string, timeoutMS int) (remoteExecResult, error) {
 	var result remoteExecResult
 	err := callRemoteJSON(ctx, client, "exec", map[string]any{
 		"argv":       argv,
-		"timeout_ms": 30000,
+		"timeout_ms": timeoutMS,
 	}, &result)
 	if err != nil {
 		return result, err
@@ -128,16 +136,41 @@ func execRemote(ctx context.Context, client *MCPClient, argv []string) (remoteEx
 	return result, nil
 }
 
-func probeRemoteShare(ctx context.Context, client *MCPClient, fallbackVersion string) (remoteProcessProbe, error) {
-	linuxProbe, linuxErr := probeLinuxShare(ctx, client, fallbackVersion)
-	if linuxErr == nil {
-		return linuxProbe, nil
+// peerHostIsWindows 按 peer_host（sysinfo.Summary："user@host Windows 10 amd64"）末尾的
+// 系统字段判断，不看开头的主机名——叫 windows-box 的 Linux 不能被认成 Windows。
+func peerHostIsWindows(peerHost string) bool {
+	goos, _, ok := update.PlatformFromHost(peerHost)
+	return ok && goos == "windows"
+}
+
+// probeOrder 决定先跑哪种探测。一律先 Linux 的话，对端是装了 Git sh 的 Windows 时会白跑
+// 一轮，失败时排在前面的 Linux 报错还会盖住真正的原因。peer_host 只是对端自报的提示，
+// 所以另一种探测仍作兜底，不据此拒绝。
+func probeOrder(peerHost string) []string {
+	if peerHostIsWindows(peerHost) {
+		return []string{"windows", "linux"}
 	}
-	windowsProbe, windowsErr := probeWindowsShare(ctx, client, fallbackVersion)
-	if windowsErr == nil {
-		return windowsProbe, nil
+	return []string{"linux", "windows"}
+}
+
+func probeRemoteShare(ctx context.Context, client *MCPClient, fallbackVersion, peerHost string) (remoteProcessProbe, error) {
+	var failures []string
+	for _, osName := range probeOrder(peerHost) {
+		var probe remoteProcessProbe
+		var err error
+		label := "Linux"
+		if osName == "windows" {
+			label = "Windows"
+			probe, err = probeWindowsShare(ctx, client, fallbackVersion)
+		} else {
+			probe, err = probeLinuxShare(ctx, client, fallbackVersion)
+		}
+		if err == nil {
+			return probe, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", label, err))
 	}
-	return remoteProcessProbe{}, fmt.Errorf("无法探测远端 share（Linux: %v；Windows: %v）", linuxErr, windowsErr)
+	return remoteProcessProbe{}, fmt.Errorf("无法探测远端 share（%s）", strings.Join(failures, "；"))
 }
 
 func probeLinuxShare(ctx context.Context, client *MCPClient, fallbackVersion string) (remoteProcessProbe, error) {
@@ -426,6 +459,58 @@ func parseBuildVersion(s string) (buildVersion, bool) {
 	return buildVersion{values[0], values[1], values[2], values[3]}, true
 }
 
+// candidateVersionLDFlagRE 取构建时 -ldflags 注入的 version.Version（见 scripts/build.sh）。
+var candidateVersionLDFlagRE = regexp.MustCompile(`/internal/version\.Version=([^\s"']+)`)
+
+// localCandidateVersion 不执行候选包，只读它嵌入的 Go 构建信息（ELF/PE 都能读）拿版本号。
+// 读不到（非 Go 产物、未注入版本）返回空串，交给上传后远端 `--version` 判断。
+func localCandidateVersion(path string) string {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, setting := range info.Settings {
+		if setting.Key != "-ldflags" {
+			continue
+		}
+		if m := candidateVersionLDFlagRE.FindStringSubmatch(setting.Value); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+func writeUpgradeNotNeeded(w http.ResponseWriter, currentVersion, candidateVersion string) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"ok": false, "not_needed": true,
+		"error":           fmt.Sprintf("无需升级：远端 %s，候选包 %s", currentVersion, candidateVersion),
+		"current_version": currentVersion, "candidate_version": candidateVersion,
+	})
+}
+
+// upgradeTransportLost 判断错误是否意味着 old 通道已经断了。此时远端命令可能已经执行完、
+// 只是回执没回来，不能按"命令失败、远端没变"处理。
+func upgradeTransportLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "tunnel_lost") || strings.Contains(msg, "not_connected") || strings.Contains(msg, "peer_gone")
+}
+
+// windowsUpgradeRecoveryHint Windows 的 upgrade-stage 会先把原 exe 改名为备份，回滚却要靠
+// help 经 old 通道下发；通道一断（例如 Defender 结束了 old share 并隔离文件），远端就停在
+// "原文件不见了"的半途状态。没确认回滚成功时把现场和手动恢复办法告诉用户。
+// codePath 非空表示通道已失联、stage 可能其实成功了：新 share 也许正在运行。
+func windowsUpgradeRecoveryHint(probe remoteProcessProbe, backupPath, codePath string) string {
+	hint := fmt.Sprintf("；远端原文件可能已被改名为 %s。若 %s 缺失或不是旧版，请在远端结束候选 share 进程（如有），"+
+		"把 %s 改名移开，再把 %s 改回 %s", backupPath, probe.Exe, probe.Exe, backupPath, probe.Exe)
+	if codePath != "" {
+		hint += "；若新 share 其实已启动，它的协助码在 " + codePath
+	}
+	return hint + "。若进程或文件被 Windows Defender 拦截，请在“保护历史记录”中还原，并为该目录添加排除项"
+}
+
 func extractVersion(s string) string {
 	m := buildVersionRE.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
@@ -610,7 +695,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	client := s.client
 	connected := s.connected
 	oldCode, oldServer, oldNoAuth, oldMinProto := s.lastCode, s.lastServer, s.lastNoAuth, s.lastMinProto
-	peerVersion, effectiveServer := s.peerVersion, s.effectiveSrv
+	peerVersion, peerHost, effectiveServer := s.peerVersion, s.peerHost, s.effectiveSrv
 	if effectiveServer == "" {
 		if oldServer != "" {
 			effectiveServer = oldServer
@@ -663,7 +748,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	s.upgradeProgress("正在探测 old share")
-	probe, err := probeRemoteShare(ctx, client, peerVersion)
+	probe, err := probeRemoteShare(ctx, client, peerVersion, peerHost)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -676,6 +761,14 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if packageArch != probe.Arch {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("升级包架构为 %s/%s，远端为 %s/%s", probe.OS, packageArch, probe.OS, probe.Arch)})
 		return
+	}
+	// 上传前先在本地比一次版本：误选旧包时不必白传一遍（弱网下 10 MiB 要传十分钟）。
+	// 读到的只是 ldflags 注入值，上传后远端 `--version` 的校验仍是最终依据。
+	if localVersion := localCandidateVersion(localPath); localVersion != "" {
+		if newer, known := newerBuild(localVersion, probe.Version); known && !newer {
+			writeUpgradeNotNeeded(w, probe.Version, localVersion)
+			return
+		}
 	}
 
 	// 兼容 old 的 --code-file：升级后 new share 会继续写它（upgradedShareArgs 透传
@@ -769,11 +862,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if newer, known := newerBuild(candidateVersion, probe.Version); known && !newer {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"ok": false, "not_needed": true,
-			"error":           fmt.Sprintf("无需升级：远端 %s，候选包 %s", probe.Version, candidateVersion),
-			"current_version": probe.Version, "candidate_version": candidateVersion,
-		})
+		writeUpgradeNotNeeded(w, probe.Version, candidateVersion)
 		return
 	}
 
@@ -785,8 +874,32 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		stageArgs = append(stageArgs, "--target", probe.Exe, "--backup", backupPath, "--cwd", probe.CWD, "--")
 		stageArgs = append(stageArgs, probe.Argv...)
 	}
-	if _, err := execRemote(ctx, client, stageArgs); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "启动新 share 失败，old 通道仍保留: " + err.Error()})
+	// stage 要拷贝整个 exe、改名再起进程，实时扫描一慢就会超过默认 30 秒；超时被杀的 stage
+	// 来不及跑自己的 defer 还原，原 exe 会停在备份名上。
+	if _, err := execRemoteTimeout(ctx, client, stageArgs, 120000); err != nil {
+		msg := "启动新 share 失败，old 通道仍保留: " + err.Error()
+		switch {
+		case upgradeTransportLost(err):
+			// stage 可能已在远端执行（Windows 下已把原 exe 改名），只是回执没回来。
+			msg = "启动新 share 时与 old 通道失联，远端状态未知: " + err.Error()
+			if probe.OS == "windows" {
+				msg += windowsUpgradeRecoveryHint(probe, backupPath, codePath)
+			}
+			s.markConnectionLost(client)
+		case probe.OS == "windows":
+			// 超时、panic 或 stage 自己还原失败时原 exe 可能仍在备份名上。通道还在，就先按
+			// 回滚收拾一遍：备份不存在时它什么都不做，所以对干净失败的 stage 也无害。
+			if rollbackErr := rollbackWindowsUpgrade(ctx, client, remoteBinary, probe, 0, pidPath, backupPath, failedPath); rollbackErr != nil {
+				msg += "；恢复旧文件失败: " + rollbackErr.Error() + windowsUpgradeRecoveryHint(probe, backupPath, "")
+				if upgradeTransportLost(rollbackErr) {
+					s.markConnectionLost(client)
+				}
+			} else if strings.Contains(err.Error(), "deadline_exceeded") {
+				// 被杀的 stage 可能已起了 new share 却没来得及写 pid 文件，回滚找不到它。
+				msg += "；原文件已恢复，但远端可能残留一个候选 share 进程（" + remoteBinary + "），如有请手动结束"
+			}
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": msg})
 		return
 	}
 	staged = true // new share 已起，可能已写过 mirror；此后任何非 commit 返回都触发 defer 还原
@@ -797,7 +910,13 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		msg := err.Error() + "；old 通道仍保留，可查看 " + logPath
 		if probe.OS == "windows" {
 			if rollbackErr := rollbackWindowsUpgrade(ctx, client, remoteBinary, probe, newPID, pidPath, backupPath, failedPath); rollbackErr != nil {
-				msg += "；恢复旧文件失败: " + rollbackErr.Error()
+				hintCode := ""
+				if upgradeTransportLost(rollbackErr) {
+					msg = err.Error() + "；old 通道已失联，可在远端查看 " + logPath
+					hintCode = codePath
+					s.markConnectionLost(client)
+				}
+				msg += "；恢复旧文件失败: " + rollbackErr.Error() + windowsUpgradeRecoveryHint(probe, backupPath, hintCode)
 			}
 		} else if newPID > 1 {
 			if _, stopErr := execRemote(ctx, client, []string{"kill", "-TERM", strconv.Itoa(newPID)}); stopErr != nil {
@@ -831,6 +950,9 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		} else if cleanupErr != nil {
 			msg += "；清理候选 share 失败: " + cleanupErr.Error()
 		}
+		if probe.OS == "windows" && (reconnectErr != nil || cleanupErr != nil) {
+			msg += windowsUpgradeRecoveryHint(probe, backupPath, "")
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": msg})
 		return
 	}
@@ -851,6 +973,9 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			s.markConnectionLost(client)
 		} else if cleanupErr != nil {
 			msg += "；恢复旧文件失败: " + cleanupErr.Error()
+		}
+		if probe.OS == "windows" && (reconnectErr != nil || cleanupErr != nil) {
+			msg += windowsUpgradeRecoveryHint(probe, backupPath, "")
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": msg})
 		return
@@ -891,6 +1016,9 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if killErr != nil {
 		result["warning"] = "新通道已接管且文件已替换，但终止 old PID 失败: " + killErr.Error()
+		if probe.OS == "windows" {
+			result["warning"] = result["warning"].(string) + "；旧文件备份 " + backupPath + " 可能未删除，确认 old 已退出后可手动删除"
+		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
