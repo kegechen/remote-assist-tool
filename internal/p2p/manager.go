@@ -76,10 +76,10 @@ type P2PManager struct {
 	resultCh    chan P2PResult
 	stopChan    chan struct{}
 	closeOnce   sync.Once
-	sameNetwork bool   // 是否检测到同网络
-	bindIP      string // 用户手动指定的绑定 IP
-	natType     string // 本端 NAT 类型
-	peerNATType string // 对端 NAT 类型
+	punchPlan   punchPlan // 打洞策略（由 relay 的同网 hint 与私网段推导，见 planHolePunch）
+	bindIP      string    // 用户手动指定的绑定 IP
+	natType     string    // 本端 NAT 类型
+	peerNATType string    // 对端 NAT 类型
 	// backgroundMode 后台重试模式（仅记录日志，不创建 tunnel）。
 	// 必须是原子的：写在 backgroundRetry 的 goroutine 里，读在 receiveLoop / 生日攻击
 	// 的 goroutine 里（onP2PConnected），两者之间没有任何 happens-before 边，裸字段在
@@ -297,22 +297,49 @@ func (p *P2PManager) HandlePeerAddrReady(msg *proto.PeerAddrReady) {
 	}
 
 	p.peerNATType = msg.PeerNATType
-	p.sameNetwork = msg.SameNetwork
-	// 本地二次确认：本机 IP 和对端私网 IP 在同一 /16
-	if !p.sameNetwork && p.localAddr != nil && p.peerInfo.PrivateAddr != nil {
-		l := p.localAddr.IP.To4()
-		r := p.peerInfo.PrivateAddr.IP.To4()
-		if l != nil && r != nil && l[0] == r[0] && l[1] == r[1] {
-			p.sameNetwork = true
-		}
-	}
-
-	if p.sameNetwork {
+	p.punchPlan = planHolePunch(msg.SameNetwork, p.localAddr, p.peerInfo.PrivateAddr)
+	if p.punchPlan.lanOnly {
 		log.Printf("Same network detected, using LAN fast path")
+	} else if p.punchPlan.privateInterval == lanPunchInterval {
+		log.Printf("Peer private address in local /16, punching it fast alongside public hole punching")
 	}
 
 	// Start hole punching
 	go p.startHolePunching()
+}
+
+const (
+	// lanPunchInterval 私网地址大概率可达时的打洞间隔（LAN 快速通道）。
+	lanPunchInterval = 50 * time.Millisecond
+	// privatePunchInterval 私网地址可达性未知时的低频打洞间隔。
+	privatePunchInterval = 200 * time.Millisecond
+)
+
+// punchPlan 打洞策略。
+type punchPlan struct {
+	lanOnly         bool          // 只打私网地址，跳过公网打洞、端口预测、生日攻击和 UDP 中继
+	privateInterval time.Duration // 私网地址的打洞间隔
+}
+
+// planHolePunch 决定打洞策略。
+//
+// sameEgress 是 relay 下发的 same_network（两端公网出口 IP 相同，同一 NAT 后面），此时私网
+// 地址几乎必然可达，只打私网、跳过公网那套（LAN 快速通道，fd0aa13）。
+//
+// 私网 IP 同 /16 只说明「可能」同一局域网：企业内网、跨地域办公室普遍复用 10.x 段，私网互不
+// 可达（实测苏州 10.11.115.x 与合肥 10.11.24.x）。所以只把私网打洞提到 LAN 频率，公网打洞
+// 照常并行——真同 LAN 时私网照样先通，误判时也不丢公网的机会。
+func planHolePunch(sameEgress bool, local, peerPrivate *net.UDPAddr) punchPlan {
+	if sameEgress {
+		return punchPlan{lanOnly: true, privateInterval: lanPunchInterval}
+	}
+	if local != nil && peerPrivate != nil {
+		l, r := local.IP.To4(), peerPrivate.IP.To4()
+		if l != nil && r != nil && l[0] == r[0] && l[1] == r[1] {
+			return punchPlan{privateInterval: lanPunchInterval}
+		}
+	}
+	return punchPlan{privateInterval: privatePunchInterval}
 }
 
 // portPredictionRange 端口预测范围，用于对称型 NAT
@@ -323,12 +350,18 @@ func (p *P2PManager) startHolePunching() {
 		return
 	}
 
-	if p.sameNetwork {
+	plan := p.punchPlan
+	// backgroundRetry 可能看到 peerInfo 却还没看到 punchPlan（零值）；间隔为 0 时
+	// time.NewTicker 会 panic，退回低频私网打洞。
+	if plan.privateInterval <= 0 {
+		plan.privateInterval = privatePunchInterval
+	}
+	if plan.lanOnly {
 		// LAN 快速通道：只打私网地址，高频率
 		if p.peerInfo.PrivateAddr != nil {
 			go func() {
 				log.Printf("LAN hole punching private address: %v", p.peerInfo.PrivateAddr)
-				p.sendTestPackets(p.peerInfo.PrivateAddr, 50*time.Millisecond)
+				p.sendTestPackets(p.peerInfo.PrivateAddr, plan.privateInterval)
 			}()
 		}
 		return // 跳过公网打洞、端口预测、UDP 中继
@@ -369,11 +402,11 @@ func (p *P2PManager) startHolePunching() {
 		}()
 	}
 
-	// 私网地址：低频率持续打洞
+	// 私网地址：持续打洞（私网同 /16 时用 LAN 频率，否则低频）
 	if p.peerInfo.PrivateAddr != nil {
 		go func() {
 			log.Printf("Hole punching private address: %v", p.peerInfo.PrivateAddr)
-			p.sendTestPackets(p.peerInfo.PrivateAddr, 200*time.Millisecond)
+			p.sendTestPackets(p.peerInfo.PrivateAddr, plan.privateInterval)
 		}()
 	}
 

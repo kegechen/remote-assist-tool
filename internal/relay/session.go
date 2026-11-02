@@ -826,29 +826,18 @@ func (sm *SessionManager) UpdatePeerAddr(clientID string, publicAddr, privateAdd
 	return nil
 }
 
-// detectSameNetwork 检测两端是否在同一网络
+// detectSameNetwork 检测两端是否在同一网络：只认同一公网出口 IP（同一 NAT 后面）。
+//
+// 客户端收到 same_network=true 会走 LAN 快速通道：只打私网地址、跳过公网打洞、端口预测和
+// UDP 中继（旧版客户端同样如此），所以这里宁可漏判也不能误判。曾经「私网 IP 同 /16」也算
+// 同网，但企业内网、跨地域办公室普遍复用 10.x / 172.16.x 段（实测苏州 10.11.115.x 与合肥
+// 10.11.24.x 出口不同、私网互不可达），误判后连公网打洞的机会都没了。私网同段由客户端
+// 自行判断，只用来加快私网打洞，不跳过公网（见 p2p.planHolePunch）。
+// sharePrivate / helpPrivate 保留在签名里供调用方原样传入，当前不参与判定。
 func detectSameNetwork(shareRemote, helpRemote string, sharePrivate, helpPrivate string) bool {
-	// Check 1: 同一公网 IP（同一 NAT 出口）
 	shareHost, _, _ := net.SplitHostPort(shareRemote)
 	helpHost, _, _ := net.SplitHostPort(helpRemote)
-	if shareHost != "" && shareHost == helpHost {
-		return true
-	}
-	// Check 2: 私网 IP 同一 /16 子网
-	if sharePrivate != "" && helpPrivate != "" {
-		sIP, _, _ := net.SplitHostPort(sharePrivate)
-		hIP, _, _ := net.SplitHostPort(helpPrivate)
-		sNetIP := net.ParseIP(sIP)
-		hNetIP := net.ParseIP(hIP)
-		if sNetIP != nil && hNetIP != nil {
-			s4 := sNetIP.To4()
-			h4 := hNetIP.To4()
-			if s4 != nil && h4 != nil && s4[0] == h4[0] && s4[1] == h4[1] {
-				return true
-			}
-		}
-	}
-	return false
+	return shareHost != "" && shareHost == helpHost
 }
 
 // FindPeer finds the paired client for a given client ID
