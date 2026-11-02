@@ -34,24 +34,31 @@ const (
 )
 
 // ServerConfig relay 侧的 QUIC 参数：每个连接只允许一条双向流，不允许单向流。
+//
+// 两端都关闭 PMTUD，固定用 quic-go 的初始包长（1280 字节 UDP 载荷）。quic-go 的 PMTUD 只把
+// 包长往上探，路径 MTU 事后变小（Wi-Fi 漫游、换出口、隧道）时只有连接迁移才会重置；在那之前
+// 满长度的数据包全被丢，而 ACK/PING 小包照样能过——QUIC 不判空闲超时，控制流却收不到心跳，
+// relay 以 readIdleTimeout（deadline exceeded）踢掉连接。控制连接流量不大，放弃更大的包长换稳定。
 func ServerConfig() *quic.Config {
 	return &quic.Config{
-		MaxIncomingStreams:    1,
-		MaxIncomingUniStreams: -1,
-		KeepAlivePeriod:       keepAlivePeriod,
-		MaxIdleTimeout:        maxIdleTimeout,
-		HandshakeIdleTimeout:  handshakeIdleTimeout,
+		MaxIncomingStreams:      1,
+		MaxIncomingUniStreams:   -1,
+		KeepAlivePeriod:         keepAlivePeriod,
+		MaxIdleTimeout:          maxIdleTimeout,
+		HandshakeIdleTimeout:    handshakeIdleTimeout,
+		DisablePathMTUDiscovery: true,
 	}
 }
 
 // ClientConfig 客户端侧的 QUIC 参数：不接受对端开流，流只由客户端打开。
 func ClientConfig() *quic.Config {
 	return &quic.Config{
-		MaxIncomingStreams:    -1,
-		MaxIncomingUniStreams: -1,
-		KeepAlivePeriod:       keepAlivePeriod,
-		MaxIdleTimeout:        maxIdleTimeout,
-		HandshakeIdleTimeout:  handshakeIdleTimeout,
+		MaxIncomingStreams:      -1,
+		MaxIncomingUniStreams:   -1,
+		KeepAlivePeriod:         keepAlivePeriod,
+		MaxIdleTimeout:          maxIdleTimeout,
+		HandshakeIdleTimeout:    handshakeIdleTimeout,
+		DisablePathMTUDiscovery: true, // 见 ServerConfig 注释
 	}
 }
 
