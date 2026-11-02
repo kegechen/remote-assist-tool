@@ -3,6 +3,13 @@ name: Build and Upload Release Assets
 on:
   release:
     types: [created]
+  # 手动补发：只编 win7 版 cli 传到一个已有 release，并重算 SHA256SUMS。
+  # 常规矩阵不跑（产物已在 release 上，重编会覆盖成另一次构建的字节）。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要补发 win7 版 cli 的已有 release tag，如 v1.2.1'
+        required: true
 
 permissions:
   contents: write
@@ -14,6 +21,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
 
     strategy:
@@ -60,6 +68,56 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Windows 7 / Server 2008 R2 专用 cli。官方 Go 1.21 起不再支持 Win7（运行时会调用
+  # Win8+ 才有的系统函数，Win7 上一启动就 0xc0000005），这里改用 thongtech/go-legacy-win7：
+  # 在新版 Go 上恢复了 Win7 支持的工具链，源码和依赖都不用动。它是第三方工具链，所以
+  # 版本和 SHA256 都钉死，只用来编这一个产物，正常产物仍走官方 Go。
+  build-win7:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+      GOOS: windows
+      GOARCH: amd64
+      GO_W7_VERSION: 1.26.10-1
+      GO_W7_SHA256: 39f0d5efcc3a8bf1ed54532706f3b2f0403db5b63f0693a486673f7f5a8daad4
+      # 理由同上：tag 只经 env 传入，不内插进脚本
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up go-legacy-win7
+        run: |
+          set -euo pipefail
+          pkg="go-legacy-win7-${GO_W7_VERSION}.linux_amd64.tar.gz"
+          url="https://github.com/thongtech/go-legacy-win7/releases/download/v${GO_W7_VERSION}/$pkg"
+          curl -fsSL -o "$RUNNER_TEMP/$pkg" "$url"
+          echo "${GO_W7_SHA256}  $RUNNER_TEMP/$pkg" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gow7"
+          tar -xzf "$RUNNER_TEMP/$pkg" -C "$RUNNER_TEMP/gow7"
+          gobin="$(find "$RUNNER_TEMP/gow7" -path '*/bin/go' -type f | head -n1)"
+          test -n "$gobin"
+          dirname "$gobin" >> "$GITHUB_PATH"
+        shell: bash
+
+      - name: Build windows/amd64 win7 cli
+        run: |
+          set -euo pipefail
+          go version
+          mkdir -p dist
+          ldflags="-X github.com/remote-assist/tool/internal/version.Version=$RELEASE_TAG"
+          go build -ldflags "$ldflags" -o dist/remote-assist-cli-windows-amd64-win7.exe ./cmd/remote
+        shell: bash
+
+      - name: Upload Release Asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" dist/remote-assist-cli-windows-amd64-win7.exe --clobber
+        shell: bash
+
   # SHA256SUMS 必须单独成 job：build 是 6 条并行的矩阵腿，每条只看得见自己那两三个
   # 产物，各自生成一份 SHA256SUMS 传上去只会互相覆盖，最后留下的那份是随机的一条腿。
   # 等 6 条腿全跑完再把产物取回来统一算，才是完整的清单。
@@ -67,14 +125,16 @@ jobs:
   # 这里用 runner 自带的 gh 而不是再引一个 upload-artifact/download-artifact 组合：
   # 少两个需要钉 SHA 和跟版本的依赖，产物本来也已经在 release 上了。
   checksums:
-    needs: build
+    needs: [build, build-win7]
+    # 手动补发时 build 被跳过；!failure() 把跳过当成通过，任一真失败仍会拦住
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     steps:
       - name: 生成并上传 SHA256SUMS
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           mkdir -p dist
           # 只取二进制产物；不带上 SHA256SUMS 自己（重跑时它已经在 release 上了）
