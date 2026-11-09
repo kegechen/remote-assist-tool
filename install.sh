@@ -143,10 +143,12 @@ resolve_latest_tag() {
     latest_url="https://github.com/${REPOSITORY}/releases/latest"
     location=''
 
+    # 不跟随跳转，只读 302 的目标地址：跟随的话要把整页 tag HTML（几百 KB）下载下来，
+    # 经加速代理或慢网络时可能就要几十秒。
     if command -v curl >/dev/null 2>&1; then
-        location=$(curl --fail --location --silent --show-error \
+        location=$(curl --fail --silent --show-error \
             --connect-timeout 10 --max-time 30 --retry 2 \
-            --output /dev/null --write-out '%{url_effective}' "$latest_url" 2>/dev/null) || location=''
+            --output /dev/null --write-out '%{redirect_url}' "$latest_url" 2>/dev/null) || location=''
     fi
 
     if [ -z "$location" ] && command -v wget >/dev/null 2>&1; then
