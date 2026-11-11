@@ -171,9 +171,9 @@ function connectionRow(label,value,cls){return'<div class="conn-row"><span class
 async function showConnectionInfo(){
   if(!connected)return;const panel=$('#conn-info');panel.style.display='block';panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="meta">测量中...</span></div>';
   const r=await api('/api/status',{});if(!r.connected){panel.innerHTML='<div class="conn-title"><span>连接状态</span></div>'+connectionRow('状态','已断开');return}
-  const mode=r.p2p?'P2P 直连':'Relay 中转',latency=r.latency_ms!==undefined?r.latency_ms+' ms':'不可用';
+  const mode=r.p2p?(r.p2p_path==='udp_relay'?'UDP 中继':'P2P 直连'):'Relay 中转',latency=r.latency_ms!==undefined?r.latency_ms+' ms':'不可用';
   panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="ok">'+esc(mode)+'</span></div>'+
-    connectionRow('服务器',r.server)+connectionRow('传输',mode,r.p2p?'transport-p2p':'')+connectionRow('往返延迟',latency)+
+    connectionRow('服务器',r.server)+connectionRow('传输',mode,r.p2p&&r.p2p_path!=='udp_relay'?'transport-p2p':'')+connectionRow('往返延迟',latency)+
     connectionRow('远端主机',r.peer_host)+connectionRow('远端版本',r.peer_version)+connectionRow('工具协议',r.proto_version?('v'+r.proto_version+(r.proto_version==='1'?'（兼容模式，安全防护已降级）':'')):'')+connectionRow('Help 版本',r.help_version)+
     connectionRow('会话 ID',r.session_id)+connectionRow('已连接',formatConnectedTime(r.connected_seconds));
 }

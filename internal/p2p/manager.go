@@ -828,9 +828,11 @@ func (p *P2PManager) onP2PConnected(addr *net.UDPAddr) {
 
 	// Notify relay that we're switching to P2P
 	if p.relayConn != nil {
-		p.relayConn.SendMessage(proto.MsgP2PConnected, map[string]string{
-			"session_id": p.sessionID,
-		})
+		path := proto.P2PPathDirect
+		if isRelay {
+			path = proto.P2PPathUDPRelay
+		}
+		p.relayConn.SendMessage(proto.MsgP2PConnected, &proto.P2PConnected{SessionID: p.sessionID, Path: path})
 	}
 
 	// 建隧道前先停 receiveLoop：隧道的 recvLoop 马上要读同一个 localConn，两个

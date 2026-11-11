@@ -257,7 +257,8 @@ type connectResult struct {
 	Connected   bool   `json:"connected"`
 	SessionID   string `json:"session_id,omitempty"`
 	Server      string `json:"server,omitempty"`       // 实际连接的 relay 地址（debug 用）
-	P2P         bool   `json:"p2p,omitempty"`          // true when tool channel uses P2P direct connection
+	P2P         bool   `json:"p2p,omitempty"`          // true when tool channel uses the P2P UDP tunnel (direct or UDP relay)
+	P2PPath     string `json:"p2p_path,omitempty"`     // P2P 隧道实际走的路：direct 直连 / udp_relay 经 relay 的 UDP 中继（流量仍经服务器），见 proto.P2PPath*
 	PeerVersion string `json:"peer_version,omitempty"` // share 版本，来自 relay join 响应
 	PeerHost    string `json:"peer_host,omitempty"`
 	HelpVersion string `json:"help_version,omitempty"` // 当前 help CLI 版本，供 GUI 做升级提示
@@ -631,6 +632,11 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 				return nil, fmt.Errorf("P2P required but failed: 打洞或双向探活未通过（--p2p required 不接受中转回退）")
 			}
 			result.P2P = true
+			b.mu.Lock()
+			if b.bridge == bridge {
+				result.P2PPath = b.activeResult.P2PPath
+			}
+			b.mu.Unlock()
 		case <-time.After(p2pRequiredWaitTimeout):
 			teardown(errors.New("P2P required but negotiation timed out"))
 			return nil, fmt.Errorf("P2P required but failed: 协商超时")
@@ -748,11 +754,12 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	// 也就不存在新旧 key 的解密竞态。
 	p2pConnPtr.Store(pc)
 	bridge.SwapConn(pc, sess)
-	fmt.Fprintln(os.Stderr, "MCP: 已切换到 P2P 直连")
+	fmt.Fprintln(os.Stderr, "MCP: 已切换到 "+result.Tunnel.Describe())
 
 	b.mu.Lock()
 	if b.bridge == bridge {
 		b.activeResult.P2P = true
+		b.activeResult.P2PPath = result.Tunnel.Path()
 	}
 	b.mu.Unlock()
 	notify(true)
@@ -864,6 +871,7 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 		b.mu.Lock()
 		if b.bridge == bridge {
 			b.activeResult.P2P = false
+			b.activeResult.P2PPath = ""
 		}
 		b.mu.Unlock()
 		fmt.Fprintln(os.Stderr, "MCP: 已切回中转模式，连接继续可用")

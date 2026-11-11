@@ -666,7 +666,7 @@ func (s *ShareMode) upgradeToP2P(mgr shareP2PManager, resultCh <-chan p2p.P2PRes
 		abandon(nil, "P2P tunnel closed")
 		return
 	}
-	s.println("P2P 直连已建立，SSH 流量走直连...")
+	s.println(tunnel.Describe() + "已建立，SSH 流量改走该通道...")
 	// 只记日志，不动 relay 连接。
 	//
 	// handleSSHTunnelP2P 对任何隧道读错误都返回 ErrPeerDisconnected，包括「relay 健康、
@@ -804,7 +804,7 @@ func (s *ShareMode) handleToolOverP2P(tunnel *p2p.UDPTunnel, epoch uint64) {
 			if !swapped && s.swapDaemonTo(pc, epoch) {
 				swapped = true
 				log.Printf("P2P confirmed by inbound tool request, response path switched to P2P")
-				s.println("已切换到 P2P 直连")
+				s.println("已切换到 " + tunnel.Describe())
 			}
 			if d := s.currentDaemon(); d != nil {
 				d.Inject(msg)

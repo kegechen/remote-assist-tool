@@ -53,6 +53,7 @@ type Server struct {
 	effectiveSrv string
 	sessionID    string
 	p2p          bool
+	p2pPath      string // direct / udp_relay，见 proto.P2PPath*
 	connectedAt  time.Time
 	guardStarted bool
 	upgradeMu    sync.Mutex
@@ -537,6 +538,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{
 		"ok": connected, "connected": connected, "server": s.effectiveSrv, "session_id": s.sessionID,
 		"peer_host": s.peerHost, "peer_version": s.peerVersion, "help_version": s.helpVersion, "p2p": s.p2p,
+		"p2p_path":      s.p2pPath,
 		"proto_version": s.protoVersion,
 	}
 	if !s.connectedAt.IsZero() {
@@ -685,6 +687,7 @@ func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		s.effectiveSrv = ""
 		s.sessionID = ""
 		s.p2p = false
+		s.p2pPath = ""
 		s.protoVersion = ""
 		s.connectedAt = time.Time{}
 	}

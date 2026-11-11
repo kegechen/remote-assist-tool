@@ -10,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/remote-assist/tool/internal/proto"
 )
 
 const (
@@ -186,6 +188,23 @@ func NewUDPRelayTunnel(conn *net.UDPConn, relayAddr *net.UDPAddr, sessionID stri
 	go t.retransmitLoop()
 	go t.keepaliveLoop()
 	return t
+}
+
+// Path 隧道实际走的路：proto.P2PPathDirect 或 proto.P2PPathUDPRelay。
+func (t *UDPTunnel) Path() string {
+	if t.relayHeader != nil {
+		return proto.P2PPathUDPRelay
+	}
+	return proto.P2PPathDirect
+}
+
+// Describe 给用户看的连接方式：「P2P 直连」或「UDP 中继（经 relay 地址）」。UDP 中继的流量
+// 仍经服务器，不能说成直连——否则看到中转流量时会误以为 P2P 又回落了。
+func (t *UDPTunnel) Describe() string {
+	if t.relayHeader != nil {
+		return "UDP 中继（经 " + t.remoteAddr.String() + "）"
+	}
+	return "P2P 直连"
 }
 
 // sendPacket sends a packet, adding relay header if in relay mode

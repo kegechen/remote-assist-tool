@@ -221,7 +221,7 @@ func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTun
 
 	result := <-resultCh
 	if result.Tunnel != nil {
-		fmt.Println("P2P 直连已建立！")
+		fmt.Println(result.Tunnel.Describe() + "已建立！")
 	} else if result.Err == nil {
 		fmt.Println("P2P 打洞超时，回退到中转模式")
 		mgr.Close()
@@ -272,7 +272,7 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 	}()
 
 	for {
-		fmt.Printf("\n等待本地SSH连接 (P2P直连)... (ssh -p %s user@127.0.0.1)\n", getPort(h.listenAddr))
+		fmt.Printf("\n等待本地SSH连接，通道：%s... (ssh -p %s user@127.0.0.1)\n", tunnel.Describe(), getPort(h.listenAddr))
 
 		localConn, err := listener.Accept()
 		if err != nil {
@@ -284,7 +284,7 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 			return err
 		}
 
-		fmt.Println("本地SSH连接已建立，P2P 直连转发中...")
+		fmt.Println("本地SSH连接已建立，通过 " + tunnel.Describe() + " 转发中...")
 
 		connMu.Lock()
 		currentConn = localConn

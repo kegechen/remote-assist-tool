@@ -33,6 +33,8 @@ type connectMetadata struct {
 	PeerHost    string `json:"peer_host"`
 	HelpVersion string `json:"help_version"`
 	P2P         bool   `json:"p2p"`
+	// P2PPath P2P 隧道实际走的路（direct / udp_relay），旧版 help 不返回。
+	P2PPath string `json:"p2p_path"`
 	// ProtoVersion 协商出的工具协议版本，"1" 表示兼容旧版的模式（安全防护已降级）。
 	ProtoVersion string `json:"proto_version"`
 }
@@ -96,6 +98,7 @@ func (s *Server) recordConnectMetadata(raw json.RawMessage, code, server string,
 	s.effectiveSrv = meta.Server
 	s.sessionID = meta.SessionID
 	s.p2p = meta.P2P
+	s.p2pPath = meta.P2PPath
 	s.protoVersion = meta.ProtoVersion
 	s.connectedAt = time.Now()
 }
@@ -631,6 +634,7 @@ func (s *Server) markConnectionLost(client *MCPClient) bool {
 	s.effectiveSrv = ""
 	s.sessionID = ""
 	s.p2p = false
+	s.p2pPath = ""
 	s.protoVersion = ""
 	s.connectedAt = time.Time{}
 	s.mu.Unlock()

@@ -85,8 +85,31 @@ func TestDowngradeToRelayRejectsVersionChange(t *testing.T) {
 	}
 }
 
+// P2P 隧道（直连或 UDP 中继）断开、成功切回中转后，connect 结果里的 p2p 与 p2p_path 都要
+// 清掉：否则复用会话的 connect 仍报「UDP 中继/直连」，而工具流量早已回到普通中转。
+func TestDowngradeToRelayClearsP2PPath(t *testing.T) {
+	b := NewHelpMCPBootstrap(&Config{})
+	bridge := mcp.NewBridge(nil, proto.Session{})
+	b.bridge = bridge
+	b.activeResult = connectResult{Connected: true, P2P: true, P2PPath: proto.P2PPathUDPRelay}
+	if err := runDowngradeToRelayWith(t, proto.ToolProtocolVersionV1, b, bridge); err != nil {
+		t.Fatalf("版本一致时应照常切回中转，实际 teardown=%v", err)
+	}
+	b.mu.Lock()
+	got := b.activeResult
+	b.mu.Unlock()
+	if got.P2P || got.P2PPath != "" {
+		t.Fatalf("切回中转后 activeResult = %+v，p2p/p2p_path 应已清空", got)
+	}
+}
+
 // runDowngradeToRelay 让对端在重新握手时应答 v1，返回 teardown 收到的错误（未拆除为 nil）。
 func runDowngradeToRelay(t *testing.T, sessVersion string) error {
+	t.Helper()
+	return runDowngradeToRelayWith(t, sessVersion, NewHelpMCPBootstrap(&Config{}), mcp.NewBridge(nil, proto.Session{}))
+}
+
+func runDowngradeToRelayWith(t *testing.T, sessVersion string, b *HelpMCPBootstrap, bridge *mcp.Bridge) error {
 	t.Helper()
 	helpConn, peerConn := net.Pipe()
 	t.Cleanup(func() { helpConn.Close(); peerConn.Close() })
@@ -116,8 +139,7 @@ func runDowngradeToRelay(t *testing.T, sessVersion string) error {
 	p2pPtr.Store(pc)
 
 	var tornDown error
-	b := NewHelpMCPBootstrap(&Config{})
-	b.downgradeToRelay(h, mcp.NewBridge(nil, proto.Session{}), pc, &p2pPtr, ackCh,
+	b.downgradeToRelay(h, bridge, pc, &p2pPtr, ackCh,
 		func(err error) { tornDown = err }, errors.New("p2p closed"), sessVersion)
 	return tornDown
 }

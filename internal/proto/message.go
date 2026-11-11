@@ -142,6 +142,22 @@ type PeerAddrReady struct {
 	PeerNATType     string `json:"peer_nat_type,omitempty"` // 对端 NAT 类型
 }
 
+// P2PConnected 打通 P2P 隧道后告诉 relay（MsgP2PConnected）。
+type P2PConnected struct {
+	SessionID string `json:"session_id"`
+	// Path 隧道实际走的路，见 P2PPathDirect / P2PPathUDPRelay。旧客户端不发，按未知处理；
+	// 旧 relay 忽略此字段。
+	Path string `json:"path,omitempty"`
+}
+
+const (
+	// P2PPathDirect 两端打洞直连，数据不经服务器。
+	P2PPathDirect = "direct"
+	// P2PPathUDPRelay 打洞失败后经 relay 的 UDP 中继（--stun 指向的 3478）转发：
+	// 走的是同一套 UDP 隧道，但流量仍经服务器，不是 P2P 直连。
+	P2PPathUDPRelay = "udp_relay"
+)
+
 // P2PTestPacket P2P 测试包
 type P2PTestPacket struct {
 	SessionID string `json:"session_id"`
