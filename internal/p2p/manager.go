@@ -95,6 +95,13 @@ type P2PManager struct {
 	// tunnelCreated 表示隧道已成功投递进 resultCh（由 tunnelMu 保护）。Close 用它区分
 	// 「隧道已被接手，localConn 归消费者管」与「从未建过隧道，localConn 无主」。
 	tunnelCreated bool
+
+	// localIPs 列出可绑定的本机 IPv4（优先级排序，第一个是默认首选）；测试可替换。
+	localIPs func() []net.IP
+	// raceOpts STUN 竞速时序；测试可缩短。
+	raceOpts RaceOptions
+	// preferredGrace 见 defaultPreferredNICGrace；测试可缩短。
+	preferredGrace time.Duration
 }
 
 // stopReceiveLoop 幂等地叫停 receiveLoop。
@@ -119,6 +126,10 @@ func NewP2PManager(mode P2PMode, stunServer string, bindIP string) *P2PManager {
 		bindIP:       bindIP,
 		stopChan:     make(chan struct{}),
 		recvStop:     make(chan struct{}),
+		localIPs:     physicalIPCandidates,
+		raceOpts:     DefaultRaceOptions,
+
+		preferredGrace: defaultPreferredNICGrace,
 	}
 }
 
@@ -174,6 +185,7 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 
 	// 确定绑定 IP：手动指定 > 自动检测物理网卡 > 默认 0.0.0.0
 	listenIP := net.IPv4zero
+	var altIPs []net.IP // 自动检测时首选之外的候选网卡，STUN 发现时一起实测
 	if p.bindIP != "" {
 		if ip := net.ParseIP(p.bindIP); ip != nil {
 			listenIP = ip
@@ -183,18 +195,30 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 		}
 	}
 	if listenIP.Equal(net.IPv4zero) {
-		if physIP := DetectPhysicalIP(); physIP != nil {
-			listenIP = physIP
-			log.Printf("Proxy bypass: binding to physical NIC %v", physIP)
+		if ips := p.localIPs(); len(ips) > 0 {
+			listenIP = ips[0]
+			altIPs = ips[1:]
+			log.Printf("Proxy bypass: binding to physical NIC %v", listenIP)
 		}
 	}
 
 	// Create local UDP socket
-	var err error
-	p.localConn, err = net.ListenUDP("udp4", &net.UDPAddr{IP: listenIP, Port: 0})
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: listenIP, Port: 0})
 	if err != nil {
 		return nil, fmt.Errorf("listen UDP: %w", err)
 	}
+	// 在 tunnelMu 下登记：Close 可能与 Start 并发（help 在 Start 之前就把 manager 交给了
+	// teardown），它在同一把锁下回收 localConn。Close 已开始就不再登记，否则这个 socket 没人关。
+	p.tunnelMu.Lock()
+	select {
+	case <-p.stopChan:
+		p.tunnelMu.Unlock()
+		conn.Close()
+		return nil, net.ErrClosed
+	default:
+		p.localConn = conn
+	}
+	p.tunnelMu.Unlock()
 	p.localAddr = p.localConn.LocalAddr().(*net.UDPAddr)
 	// 如果绑定了具体 IP，localAddr 已经是正确的；否则尝试获取出站 IP
 	if listenIP.Equal(net.IPv4zero) {
@@ -218,7 +242,7 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 	// standalone/loopback relay：保持不做 STUN（下发列表非空时除外）。
 	if p.stunServer != "" || len(p.stunCandidates) > 0 {
 		candidates := MergeSTUNCandidates(p.stunServer, p.stunCandidates, p.fallbackSTUN)
-		probes, err := RaceDiscover(p.localConn, candidates, DefaultRaceOptions)
+		probes, err := p.discoverAcrossNICs(candidates, altIPs)
 		if err != nil {
 			log.Printf("STUN discovery failed (%v), will try without public address", err)
 		} else {
@@ -252,6 +276,131 @@ func (p *P2PManager) Start(sessionID string, isShare bool) (<-chan P2PResult, er
 	go p.p2pTimeout()
 
 	return p.resultCh, nil
+}
+
+// maxProbeNICs 首选之外最多再实测几块网卡：每块都会在各 STUN 候选上开一条映射、发几个包。
+const maxProbeNICs = 3
+
+// defaultPreferredNICGrace 备选网卡已拿到应答后，再给首选网卡多久：首选在这段时间内应答仍用
+// 首选（保持原行为），否则改绑备选，不必等首选跑满竞速时限（默认 4s）。取 1.5s：盖住
+// DefaultRaceOptions 首次重传（1s）加一个 RTT，首包丢失（Wi-Fi 唤醒、ARP）靠重传才通的
+// 首选网卡不会被抢切到备选。
+const defaultPreferredNICGrace = 1500 * time.Millisecond
+
+type nicRace struct {
+	conn   *net.UDPConn
+	probes []STUNProbe
+	err    error
+}
+
+// discoverAcrossNICs 在 p.localConn（首选网卡）和 altIPs 各自的新 socket 上并行做 STUN 竞速，
+// 按实测结果决定绑哪块网卡，而不是按网卡名或类型去猜哪块是虚拟的：
+//   - 首选网卡拿到应答：用它（与原行为一致），立即关掉其余 socket，不等它们跑满时限；
+//   - 备选网卡先拿到应答：再等首选 preferredGrace，首选仍无应答就改绑最先应答的备选（典型：
+//     全隧道 VPN 接管了默认路由、又不放行到公网 STUN 的 UDP，而物理网卡能直接出去）；
+//   - 都没有应答：保留首选网卡，返回首选的错误（照旧回落中转）。
+//
+// 改绑在 tunnelMu 下替换 p.localConn / p.localAddr：Close 可能与 Start 并发（help 在 Start
+// 之前就把 manager 登记给了 teardown），它在同一把锁下回收 localConn。
+func (p *P2PManager) discoverAcrossNICs(servers []string, altIPs []net.IP) ([]STUNProbe, error) {
+	if len(altIPs) > maxProbeNICs {
+		altIPs = altIPs[:maxProbeNICs]
+	}
+	primary := p.localConn
+	conns := []*net.UDPConn{primary}
+	for _, ip := range altIPs {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip, Port: 0})
+		if err != nil {
+			log.Printf("STUN: skip NIC %v: %v", ip, err)
+			continue
+		}
+		conns = append(conns, c)
+	}
+	if len(conns) == 1 {
+		return RaceDiscover(primary, servers, p.raceOpts)
+	}
+
+	results := make(chan nicRace, len(conns))
+	for _, c := range conns {
+		go func(c *net.UDPConn) {
+			probes, err := RaceDiscover(c, servers, p.raceOpts)
+			results <- nicRace{conn: c, probes: probes, err: err}
+		}(c)
+	}
+
+	var (
+		primaryErr  error
+		primaryDone bool
+		alt         *nicRace // 首选之外最先拿到应答的网卡
+		chosen      *nicRace
+		graceC      <-chan time.Time
+	)
+	for pending := len(conns); chosen == nil && pending > 0; {
+		select {
+		case r := <-results:
+			pending--
+			if r.err != nil {
+				log.Printf("STUN: NIC %v: %v", r.conn.LocalAddr(), r.err)
+			} else {
+				log.Printf("STUN: NIC %v answered via %s in %v", r.conn.LocalAddr(), r.probes[0].Server,
+					r.probes[0].Elapsed.Round(time.Millisecond))
+			}
+			if r.conn == primary {
+				primaryDone = true
+				if r.err == nil {
+					chosen = &r
+					continue
+				}
+				primaryErr = r.err
+			} else if r.err == nil && alt == nil {
+				alt = &r
+				if !primaryDone {
+					t := time.NewTimer(p.preferredGrace)
+					defer t.Stop()
+					graceC = t.C
+				}
+			}
+			if primaryDone && alt != nil {
+				chosen = alt
+			}
+		case <-graceC:
+			chosen = alt
+			primaryErr = fmt.Errorf("no answer within %v after another NIC answered", p.preferredGrace)
+		}
+	}
+
+	keep := primary
+	if chosen != nil {
+		keep = chosen.conn
+	}
+	if keep != primary {
+		p.tunnelMu.Lock()
+		select {
+		case <-p.stopChan:
+			// Close 已经（或正在）回收原 localConn；不再换上新 socket，否则没人关它。
+			keep = primary
+			chosen = nil
+			primaryErr = net.ErrClosed
+		default:
+			p.localConn = keep
+			p.localAddr = keep.LocalAddr().(*net.UDPAddr)
+		}
+		p.tunnelMu.Unlock()
+	}
+	// 关掉没被选中的 socket；还在跑的竞速会因 ErrClosed 立即返回，结果落进带缓冲的 channel。
+	for _, c := range conns {
+		if c != keep {
+			c.Close()
+		}
+	}
+	if chosen == nil {
+		return nil, primaryErr
+	}
+	if keep != primary {
+		log.Printf("STUN: no answer on preferred NIC %v (%v); switching to %v where STUN answered",
+			primary.LocalAddr(), primaryErr, p.localAddr)
+	}
+	return chosen.probes, nil
 }
 
 func (p *P2PManager) advertiseAddr() error {
@@ -438,9 +587,10 @@ func (p *P2PManager) startBirthdayAttack(peerAddr *net.UDPAddr) {
 	log.Printf("Starting birthday attack with %d sockets towards %v", numSockets, peerAddr)
 
 	// 确定绑定 IP
+	// 与主 socket 绑同一块网卡（含 --bind-ip 与按 STUN 实测改绑的结果）
 	listenIP := net.IPv4zero
-	if physIP := DetectPhysicalIP(); physIP != nil {
-		listenIP = physIP
+	if bound, ok := p.localConn.LocalAddr().(*net.UDPAddr); ok && bound.IP != nil {
+		listenIP = bound.IP
 	}
 
 	testPacket := p.newTestPacket()
