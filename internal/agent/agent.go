@@ -79,13 +79,20 @@ func classifyError(err error) (code, msg string) {
 	}
 }
 
+// PTYOpenTimeout pty_open（真终端长会话）的执行上限。mcp.fallbackTimeoutFor 与之保持一致。
+const PTYOpenTimeout = 24 * time.Hour
+
 // defaultToolTimeout 给未显式带 DeadlineMs 的工具请求兜底执行上限，按工具分档：
 // 元数据类快工具短兜底；exec / grep / 文件传输等可能合理长跑的给更长上限。与 host 端
 // mcp.fallbackTimeoutFor 呼应，但更紧（share 端先于 host 兜底返回，避免误报 tunnel_lost）。
 func defaultToolTimeout(tool string) time.Duration {
 	switch tool {
-	case "stat", "list_dir", "process_list", "tail_log", "glob", "screen_capture", "input":
+	case "stat", "list_dir", "process_list", "tail_log", "glob", "screen_capture", "input",
+		"pty_write", "pty_resize", "pty_close":
 		return 30 * time.Second
+	case "pty_open":
+		// 终端会话是无终止的长流，不套 5 分钟兜底；取消 / 断线由 ctx 取消与会话清理负责。
+		return PTYOpenTimeout
 	default:
 		return 5 * time.Minute
 	}
@@ -331,7 +338,8 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
 		// 远程桌面是高频调用（每秒数次抓屏/输入）：成功的不逐条记日志/刷控制台，失败的照常显示；
 		// input 的参数（按键文本）本来就不进摘要。
-		quiet := (req.Tool == "screen_capture" || req.Tool == "input") && resp.OK
+		// pty_write / pty_resize 是逐按键级别的高频调用，同样静默（输入内容本就不进摘要）。
+		quiet := (req.Tool == "screen_capture" || req.Tool == "input" || req.Tool == "pty_write" || req.Tool == "pty_resize") && resp.OK
 		if !quiet {
 			log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
 		}

@@ -1296,7 +1296,11 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		// 远程桌面工具始终注册，未启用时调用会返回 desktop_disabled 并提示开关，便于排查。
 		reg.Register(tools.NewScreenCapture(s.enableDesktop))
 		reg.Register(tools.NewInput(s.enableDesktop))
-		d := agent.NewDaemon(reg, s.client, sess)
+		// 真终端（PTY）：设了 --allow-exec 白名单时整体禁用，避免经 shell 绕过白名单。
+		for _, t := range tools.NewPTYTools(len(s.sbCfg.AllowExec) > 0) {
+			reg.Register(t)
+		}
+		d :=agent.NewDaemon(reg, s.client, sess)
 		d.OnActivity = func(line string) { s.println(line) }
 		if s.console != nil {
 			d.OnTransfer = s.console.Event
