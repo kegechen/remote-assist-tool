@@ -56,6 +56,9 @@ func main() {
 	// 稍等 server 起来再开浏览器
 	go func() {
 		time.Sleep(400 * time.Millisecond)
+		if os.Getenv("GUI_NO_BROWSER") != "" { // 自动化测试用：不自动打开浏览器
+			return
+		}
 		_ = openBrowser(url)
 	}()
 

@@ -606,6 +606,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 允许在协助码框里直接粘贴「协助码@中转地址」，省去单独填 Relay。
+	req.Code, req.Server = splitCodeServer(req.Code, req.Server)
+
 	// 关掉旧的子进程（如果有的话），再起新的。同时自增 connGen：用户发起了新的连接意图，
 	// 任何正在退避/连接中的过期自动重连都应就此作废，不得回头覆盖这次连接。
 	s.mu.Lock()
@@ -976,4 +979,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// splitCodeServer 把「协助码@host:port」拆成协助码和中转地址。server 已显式给出时以它为准；
+// 没有 @ 时原样返回。协助码本身不含 @，所以按最后一个 @ 切分是安全的。
+func splitCodeServer(code, server string) (string, string) {
+	code = strings.TrimSpace(code)
+	i := strings.LastIndex(code, "@")
+	if i < 0 {
+		return code, server
+	}
+	if strings.TrimSpace(server) == "" {
+		server = strings.TrimSpace(code[i+1:])
+	}
+	return strings.TrimSpace(code[:i]), server
 }
