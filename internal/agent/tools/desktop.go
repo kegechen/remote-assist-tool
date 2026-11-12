@@ -71,7 +71,8 @@ type ScreenCaptureTool struct {
 }
 
 func NewScreenCapture(enabled bool) *ScreenCaptureTool {
-	return &ScreenCaptureTool{enabled: enabled, ops: platformDesktopOps()}
+	// 不在构造时创建后端：未启用时零开销，启用后也等到首次调用再初始化。
+	return &ScreenCaptureTool{enabled: enabled}
 }
 
 func (t *ScreenCaptureTool) Name() string { return "screen_capture" }
@@ -80,9 +81,14 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	if !t.enabled {
 		return nil, ErrDesktopDisabled
 	}
-	if t.ops == nil {
+	ops := t.ops
+	if ops == nil {
+		ops = lazyDesktopOps()
+	}
+	if ops == nil {
 		return nil, ErrDesktopUnsupported
 	}
+	defer touchDesktopIdle()
 	var a ScreenCaptureArgs
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -108,14 +114,14 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 		return nil, err
 	}
 	tm := newDesktopTrace()
-	img, rect, err := t.ops.Capture(a.Display)
+	img, rect, err := ops.Capture(a.Display)
 	if err != nil {
 		return nil, fmt.Errorf("capture failed: %w", err)
 	}
 	tm.mark("capture")
 	n := 1
-	if t.ops.Displays != nil {
-		if c, e := t.ops.Displays(); e == nil && c > 0 {
+	if ops.Displays != nil {
+		if c, e := ops.Displays(); e == nil && c > 0 {
 			n = c
 		}
 	}
@@ -189,7 +195,7 @@ type InputTool struct {
 }
 
 func NewInput(enabled bool) *InputTool {
-	return &InputTool{enabled: enabled, ops: platformDesktopOps()}
+	return &InputTool{enabled: enabled}
 }
 
 func (t *InputTool) Name() string { return "input" }
@@ -198,9 +204,14 @@ func (t *InputTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stream
 	if !t.enabled {
 		return nil, ErrDesktopDisabled
 	}
-	if t.ops == nil {
+	ops := t.ops
+	if ops == nil {
+		ops = lazyDesktopOps()
+	}
+	if ops == nil {
 		return nil, ErrDesktopUnsupported
 	}
+	defer touchDesktopIdle()
 	var a InputArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, fmt.Errorf("invalid args: %w", err)
@@ -228,7 +239,7 @@ func (t *InputTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stream
 	var rect image.Rectangle
 	if needBounds {
 		var err error
-		if rect, err = t.ops.Bounds(a.Display); err != nil {
+		if rect, err = ops.Bounds(a.Display); err != nil {
 			return nil, fmt.Errorf("display bounds: %w", err)
 		}
 	}
@@ -237,7 +248,7 @@ func (t *InputTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stream
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := t.apply(rect, ev); err != nil {
+		if err := t.apply(ops, rect, ev); err != nil {
 			return nil, fmt.Errorf("events[%d] (%s) failed after %d applied: %w", i, ev.Type, applied, err)
 		}
 		applied++
@@ -296,8 +307,7 @@ func toPixel(r image.Rectangle, nx, ny float64) (int, int) {
 	return x, y
 }
 
-func (t *InputTool) apply(rect image.Rectangle, ev InputEvent) error {
-	o := t.ops
+func (t *InputTool) apply(o *DesktopOps, rect image.Rectangle, ev InputEvent) error {
 	switch ev.Type {
 	case "move":
 		x, y := toPixel(rect, ev.X, ev.Y)

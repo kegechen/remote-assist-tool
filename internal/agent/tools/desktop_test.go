@@ -11,6 +11,7 @@ import (
 	"image/jpeg"
 	"math/rand"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -84,6 +85,11 @@ func TestDesktopDisabled(t *testing.T) {
 }
 
 func TestDesktopUnsupportedWhenNoOps(t *testing.T) {
+	// 惰性后端默认会取真实平台实现，这里强制为“无后端”，避免测试真的去注入输入。
+	sharedOpsOnce = sync.Once{}
+	sharedOpsOnce.Do(func() {})
+	sharedOps = nil
+	t.Cleanup(func() { sharedOpsOnce = sync.Once{} })
 	if _, err := (&InputTool{enabled: true}).Run(context.Background(), json.RawMessage(`{"events":[{"type":"text","text":"a"}]}`), nil); !errors.Is(err, ErrDesktopUnsupported) {
 		t.Fatalf("got %v", err)
 	}
@@ -247,5 +253,17 @@ func TestScaleToWidthAverages(t *testing.T) {
 	dst := scaleToWidth(src, 1)
 	if dst.Bounds().Dx() != 1 || dst.Pix[0] < 120 || dst.Pix[0] > 135 {
 		t.Fatalf("面积平均错误: %v %v", dst.Bounds(), dst.Pix[:4])
+	}
+}
+
+// 未启用时构造工具不得创建后端（不调 platformDesktopOps、不改 DPI）。
+func TestDesktopToolsLazyBackend(t *testing.T) {
+	sc := NewScreenCapture(false)
+	in := NewInput(true)
+	if sc.ops != nil || in.ops != nil {
+		t.Fatal("构造时不应创建后端")
+	}
+	if _, err := sc.Run(context.Background(), nil, nil); err == nil || !strings.Contains(err.Error(), "desktop_disabled") {
+		t.Fatalf("want desktop_disabled, got %v", err)
 	}
 }

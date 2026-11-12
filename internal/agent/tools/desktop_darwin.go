@@ -427,3 +427,6 @@ func platformDesktopOps() *DesktopOps {
 		Text:     macText,
 	}
 }
+
+// platformReleaseIdle macOS 后端无需空闲回收的缓存（库句柄按需加载，常驻占用很小）。
+func platformReleaseIdle() {}

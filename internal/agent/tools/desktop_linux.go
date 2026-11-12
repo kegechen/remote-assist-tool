@@ -530,3 +530,14 @@ func platformDesktopOps() *DesktopOps {
 		Text:     x11.text,
 	}
 }
+
+// platformReleaseIdle 空闲时关闭 X 连接（先还原借用的键码映射），下次调用自动重连。
+func platformReleaseIdle() {
+	x11.mu.Lock()
+	defer x11.mu.Unlock()
+	if x11.conn == nil {
+		return
+	}
+	_ = x11.restoreSpare()
+	x11.drop()
+}

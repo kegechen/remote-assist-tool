@@ -413,3 +413,10 @@ func platformDesktopOps() *DesktopOps {
 		Text:    winText,
 	}
 }
+
+// platformReleaseIdle 空闲时释放缓存的内存 DC 与 DIB section（约 8MB/1080p），下一帧按需重建。
+func platformReleaseIdle() {
+	capMu.Lock()
+	capSt.release()
+	capMu.Unlock()
+}
