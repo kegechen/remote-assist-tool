@@ -152,6 +152,9 @@ main{flex:1;display:flex;min-height:0;min-width:0}
 #term-output,#search-output,#proc-output,#file-content{font-family:var(--mono);font-size:12.5px;line-height:1.5}
 #term-output{flex:1;min-height:0;overflow:auto;padding:14px 18px;background:var(--field);cursor:text}
 #term-log{white-space:pre-wrap;word-break:break-all}
+#term-status{flex:none;display:flex;align-items:center;gap:10px;padding:4px 18px;font-size:12px;border-top:1px solid var(--line);color:var(--muted)}
+#term-status .spacer{flex:1}
+#termStop{display:none;height:22px;padding:0 10px;font-size:12px}
 #search-box{display:none;flex-direction:column;flex:1;min-height:0}
 #search-box .sp{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 #search-box .sp label{color:var(--dim);font-size:12px}
@@ -276,7 +279,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
     <div id="right">
       <div class="tabs" id="tabbar"></div>
       <div class="tabcontent">
-        <div id="term-box"><div id="term-output"><div id="term-log"></div><div class="input-row"><span class="prompt">$</span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="命令输入"></div></div></div>
+        <div id="term-box"><div id="term-output"><div id="term-log"></div><div class="input-row"><span class="prompt" id="termPrompt">$</span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="命令输入"></div></div><div id="term-status"><span id="term-state" class="meta">未连接</span><button id="termStop" class="sec" type="button">中断 (Ctrl+C)</button><span class="spacer"></span><span class="meta">无 PTY：不支持 vim/top 等全屏程序</span></div></div>
         <div id="search-box"><div class="sp"><label>正则:</label><input id="grepPattern" placeholder="TODO"><label>目录:</label><input id="grepRoot" placeholder="C:\\"><button class="sm" id="grepRun">搜索</button></div><div id="search-output"></div></div>
         <div id="proc-box"><div id="proc-output"></div></div>
         <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-lbl">宽度</span><select id="deskW" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="0" selected>自动</option><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="30">30</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="0" selected>自动</option><option value="40">低</option><option value="60">中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div class="dk-chip" id="deskStat"></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
@@ -308,8 +311,8 @@ const es=new EventSource(withToken('/api/events')); // EventSource 设不了自�
 // 后端广播的全是具名事件（event: xxx，不带 data 字段），而 onmessage 只对带 data 的帧
 // 触发——所以原先那条 onmessage→底部日志框的线永远不会有内容，日志框一直是空的。
 // 日志框已移除：状态归右上角状态灯，值得留痕的（重连/丢失）直接说给终端。
-es.addEventListener('connected',()=>{setStatus(true,'已连接');loadDrives()});
-es.addEventListener('disconnected',()=>{setStatus(false,'已断开')});
+es.addEventListener('connected',()=>{setStatus(true,'已连接');loadDrives();termOnConnected()});
+es.addEventListener('disconnected',()=>{setStatus(false,'已断开');termOnDisconnected()});
 es.addEventListener('reconnecting',()=>{setStatus(false,'重连中...');termLog('<span class="meta">连接断开，正在自动重连...</span>')});
 es.addEventListener('lost',()=>{setStatus(false,'丢失');termLog('<span class="err">自动重连失败，请重新点击连接</span>')});
 es.addEventListener('upgrade-progress',e=>{const n=$('#upgrade-notice');n.style.display='flex';n.className='';$('#upgrade-msg').textContent=e.data});
@@ -388,7 +391,7 @@ async function doConnect(){
   setStatus(false,'连接中...');
   const r=await api('/api/connect',{code,server,no_auth:noauth,min_proto:legacy?'1':''});
   if(r.ok){
-    const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();openTerm();
+    const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();openTerm();termOnConnected();
     if(d.warning)termLog('<span class="err">[警告] '+esc(d.warning)+'</span>');
   }else{
     setStatus(false,'失败');termLog('<span class="err">'+esc(r.error)+'</span>');
@@ -512,7 +515,23 @@ function renderTabs(){
 
 // ========== exec 终端 ==========
 function termScroll(){const o=$('#term-output');o.scrollTop=o.scrollHeight}
-function termLog(s){$('#term-log').insertAdjacentHTML('beforeend',s+'\n');termScroll()}
+// termLines 近似记录 #term-log 里的行数；超过上限就从头删，长输出（tail -f、编译日志）不会拖垮 DOM。
+const TERM_MAX_LINES=5000;
+let termLines=0,termAtLineStart=true;
+function termTrim(){
+  if(termLines<=TERM_MAX_LINES+500)return; // 留 500 行滞后量，避免每次追加都删
+  const out=$('#term-log');
+  while(termLines>TERM_MAX_LINES&&out.firstChild){
+    const n=out.firstChild,t=n.textContent||'';
+    for(let i=t.indexOf('\n');i>=0;i=t.indexOf('\n',i+1))termLines--;
+    out.removeChild(n);
+  }
+}
+function termClear(){$('#term-log').innerHTML='';termLines=0;termAtLineStart=true}
+function termLog(s){
+  if(!termAtLineStart){$('#term-log').insertAdjacentHTML('beforeend','\n');termLines++} // 上一条命令的半行输出后先换行
+  $('#term-log').insertAdjacentHTML('beforeend',s+'\n');termAtLineStart=true;termLines++;termTrim();termScroll();
+}
 // termAppend 追加一段流式输出。用文本节点而不是 termLog 的 innerHTML 拼接：命令可以吐
 // 半行（进度条、没换行的提示符），按行拼会把半行强行变成整行；textContent 也天然免转义。
 function termAppend(text,cls){
@@ -521,7 +540,9 @@ function termAppend(text,cls){
   if(cls)n.className=cls;
   n.textContent=text;
   out.appendChild(n);
-  termScroll();
+  for(let i=text.indexOf('\n');i>=0;i=text.indexOf('\n',i+1))termLines++;
+  termAtLineStart=text.charAt(text.length-1)==='\n';
+  termTrim();termScroll();
 }
 function b64bytes(b64){const s=atob(b64),a=new Uint8Array(s.length);for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a}
 // scanUTF8 扫一段字节：complete = 合法且完整的前缀长度；ok=false 表示撞到了非法字节。
@@ -585,11 +606,24 @@ function makeFileDecoder(){
 // 点击终端空白处（不是在选文字）就聚焦输入框，和真实终端一致
 $('#term-output').addEventListener('mouseup',e=>{if(!String(window.getSelection()).length&&e.target!==$('#termInput'))$('#termInput').focus()});
 function openTerm(){openTab('term','终端','term-box',()=>{$('#termInput').focus()},true)}
+function termHasSelection(){return String(window.getSelection()).length>0}
 $('#termInput').addEventListener('keydown',e=>{
-  if(e.key==='Enter'){e.preventDefault();const v=$('#termInput').value;if(v.trim())execCmd(v);$('#termInput').value=''}
-  else if(e.key==='ArrowUp'){e.preventDefault();if(cmdHistory.length){histIdx=Math.max(0,histIdx+1);$('#termInput').value=cmdHistory[cmdHistory.length-1-histIdx]||''}}
-  else if(e.key==='ArrowDown'){e.preventDefault();histIdx=Math.min(cmdHistory.length,histIdx+1);$('#termInput').value=histIdx>=cmdHistory.length?'':cmdHistory[cmdHistory.length-1-histIdx]||''}
+  const inp=$('#termInput');
+  if(e.ctrlKey&&!e.altKey&&!e.metaKey&&(e.key==='c'||e.key==='C')){
+    if(termHasSelection())return; // 有选中文字：保持浏览器默认的复制
+    e.preventDefault();
+    if(termRunning){termInterrupt();return}
+    // 空闲时和 bash 一样：回显当前输入加 ^C，换新行
+    termLog('<span class="cmd">'+esc(termPromptText()+' '+inp.value)+'</span><span class="meta">^C</span>');
+    inp.value='';histIdx=-1;return;
+  }
+  if(e.ctrlKey&&!e.altKey&&!e.metaKey&&(e.key==='l'||e.key==='L')){e.preventDefault();termClear();return}
+  if(e.key==='Enter'){e.preventDefault();if(termRunning)return;const v=inp.value;inp.value='';if(v.trim())execCmd(v);else termLog('<span class="cmd">'+esc(termPromptText())+'</span>')}
+  else if(e.key==='ArrowUp'){e.preventDefault();if(cmdHistory.length){histIdx=Math.min(cmdHistory.length-1,histIdx+1);inp.value=cmdHistory[cmdHistory.length-1-histIdx]||''}}
+  else if(e.key==='ArrowDown'){e.preventDefault();histIdx=Math.max(-1,histIdx-1);inp.value=histIdx<0?'':cmdHistory[cmdHistory.length-1-histIdx]||''}
 });
+// 点击终端的“中断”按钮等同 Ctrl+C
+$('#termStop').addEventListener('click',()=>{termInterrupt();$('#termInput').focus()});
 // remote 的 exec 不走 shell，直接敲 pwd/ls/dir/cd/管道 会因“找不到可执行文件”失败。
 // 终端是给人用的，所以整行交给远端 shell 执行。远端是 Windows 还是 Unix 探测一次即知。
 let remoteOS=''; // 'windows' | 'unix' | ''(未探测)
@@ -606,45 +640,136 @@ async function detectOS(){
 function shellArgv(os,line){
   return os==='windows'?['powershell','-NoProfile','-Command',line]:['sh','-c',line];
 }
+// ---- 终端会话状态：像真 shell 一样记住用户/主机/工作目录 ----
+let termCwd='',termPrevCwd='',termUser='',termHostName='',termHome='',termRunning=false,termAbort=null,termProbeBusy=false,termProbeAt=0;
+function termShortCwd(){
+  let c=termCwd;if(!c)return '~';
+  const h=termHome.replace(/[\\\/]$/,'');
+  if(h&&(c===h||c.indexOf(h+'/')===0))c='~'+c.slice(h.length);
+  return c;
+}
+function termPromptText(){
+  if(remoteOS==='windows')return (termCwd||'PS')+'>';
+  return (termUser?termUser+'@'+(termHostName||'remote')+':':'')+termShortCwd()+'$';
+}
+function termRenderPrompt(){
+  $('#termPrompt').textContent=termRunning?'':termPromptText();
+  $('#termStop').style.display=termRunning?'inline-block':'none';
+  $('#term-state').textContent=termRunning?'运行中… 按 Ctrl+C 中断':(connected?'就绪':'未连接');
+  $('#term-state').className=termRunning?'ok':'meta';
+}
+function termInterrupt(){
+  if(!termRunning||!termAbort)return;
+  termAbort.abort(); // 断开 /api/exec/stream：GUI 侧取消 → MCP cancelled → 隧道 ToolCancel → 远端杀进程树
+}
+// 连接成功后自动“进入 shell”：探测远端 OS/用户/主机/目录并打印欢迎信息
+async function termOnConnected(){
+  const now=Date.now();
+  if(termProbeBusy||now-termProbeAt<3000)return; // doConnect 与 SSE 'connected' 会各触发一次，只探测一次
+  termProbeBusy=true;
+  try{
+    remoteOS='';termCwd='';termPrevCwd='';termUser='';termHostName='';termHome='';
+    const os=await detectOS();
+    const argv=os==='windows'
+      ?['powershell','-NoProfile','-Command','[Console]::OutputEncoding=[Text.Encoding]::UTF8;$env:USERNAME;$env:COMPUTERNAME;("Windows "+[System.Environment]::OSVersion.Version.ToString()+" "+$env:PROCESSOR_ARCHITECTURE);(Get-Location).Path;$env:USERPROFILE']
+      :['sh','-c','id -un 2>/dev/null||whoami;hostname 2>/dev/null||uname -n;uname -sm;pwd;echo "$HOME"'];
+    const r=await api('/api/call',{tool:'exec',args:{argv,timeout_ms:10000}});
+    const d=r.ok?parseMCP(r.result):{};
+    const L=String(d.stdout||'').split(/\r?\n/).map(s=>s.trim());
+    if(r.ok&&L[0]){
+      termUser=L[0];termHostName=L[1]||'';termCwd=L[3]||'';termHome=L[4]||'';
+      termLog('<span class="ok">已连接 '+esc(termUser+'@'+termHostName)+' ('+esc(L[2]||os)+') — 工作目录 '+esc(termCwd)+'</span>');
+    }else{
+      termLog('<span class="ok">已连接对端</span><span class="meta">（未能探测系统信息：'+esc((d&&d.error)||r.error||'无输出')+'）</span>');
+    }
+    termLog('<span class="meta">提示：Ctrl+C 中断命令，Ctrl+L 清屏，上下键翻历史。当前无 PTY，不支持 vim/top 等全屏交互程序。</span>');
+    termProbeAt=Date.now();
+  }catch(e){termLog('<span class="err">探测远端失败: '+esc(String(e))+'</span>')}
+  finally{termProbeBusy=false;termRenderPrompt()}
+}
+function termOnDisconnected(){
+  termProbeAt=0;
+  if(termRunning)termInterrupt();
+  termRenderPrompt();
+}
+// 单独的 cd 在本地解析：每条命令都是新进程，cd 没法靠远端 shell 保留，所以前端维护 cwd。
+// 先在远端实测目录是否存在、取规范化后的绝对路径，成功才更新。
+async function termCd(line){
+  let arg=line.trim().replace(/^cd\b/i,'').trim();
+  if(remoteOS==='windows')arg=arg.replace(/^\/d\s+/i,'');
+  if((arg[0]==='"'&&arg.slice(-1)==='"')||(arg[0]==="'"&&arg.slice(-1)==="'"))arg=arg.slice(1,-1);
+  if(arg==='-'){arg=termPrevCwd;if(!arg){termLog('<span class="err">cd: 没有上一个目录</span>');return}}
+  if(!arg||arg==='~'){
+    if(!arg&&remoteOS==='windows'){termLog(esc(termCwd));return}
+    arg=termHome||'';
+  }else if(arg.slice(0,2)==='~/'||arg.slice(0,2)==='~\\'){arg=termHome+arg.slice(1)}
+  let argv;
+  if(remoteOS==='windows')argv=['powershell','-NoProfile','-Command',"[Console]::OutputEncoding=[Text.Encoding]::UTF8;Set-Location -LiteralPath '"+arg.replace(/'/g,"''")+"' -ErrorAction Stop; (Get-Location).Path"];
+  else argv=['sh','-c','cd -- "$1" && pwd','sh',arg||'/'];
+  const args={argv,timeout_ms:10000};if(termCwd)args.cwd=termCwd;
+  const r=await api('/api/call',{tool:'exec',args});
+  if(!r.ok){termLog('<span class="err">'+esc(r.error)+'</span>');return}
+  const d=parseMCP(r.result);
+  const out=String(d.stdout||'').trim().split(/\r?\n/).pop();
+  if(d.exit_code||d.error||!out){
+    termLog('<span class="err">'+esc(remoteOS==='windows'?('cd: 找不到目录 '+arg):String(d.stderr||d.error||('cd: '+arg+': 没有那个目录')).trim())+'</span>');return;
+  }
+  termPrevCwd=termCwd;termCwd=out;
+}
 async function execCmd(line){
-  if(!connected||!line.trim())return;
+  if(!connected||!line.trim()||termRunning)return;
+  if(!cmdHistory.length||cmdHistory[cmdHistory.length-1]!==line)cmdHistory.push(line);histIdx=-1;
+  termLog('<span class="cmd">'+esc(termPromptText()+' '+line)+'</span>');
   // clear/cls 是清「本地终端显示」，远端 shell 的 clear 清的是远端屏幕、传不回来，
   // 所以在前端直接拦截清空 DOM，不发给远端。
   const lc=line.trim().toLowerCase();
-  if(lc==='clear'||lc==='cls'){$('#term-log').innerHTML='';return}
-  if(!cmdHistory.length||cmdHistory[cmdHistory.length-1]!==line)cmdHistory.push(line);histIdx=-1;
-  termLog('<span class="cmd">$ '+esc(line)+'</span>');
+  if(lc==='clear'||lc==='cls'){termClear();return}
+  termRunning=true;termRenderPrompt();
   try{
     const os=await detectOS();
-    await execStream(shellArgv(os,line));
-  }catch(e){termLog('<span class="err">'+esc(String(e))+'</span>')}
+    if(/^cd(\s|$)/i.test(line.trim()))await termCd(line);
+    else await execStream(shellArgv(os,line));
+  }catch(e){
+    if(!(e&&e.name==='AbortError'))termLog('<span class="err">'+esc(String(e))+'</span>');
+  }finally{
+    termRunning=false;termAbort=null;termRenderPrompt();
+    if(activeTab==='term')$('#termInput').focus();
+  }
 }
 
 // execStream 边跑边渲染一条命令的输出：构建、tail、跑测试这类长命令不必等跑完才出字。
 // 不走 api()——它有 30s abort，长命令必被腰斩；这里读 NDJSON 流直到远端收尾。
+// 用户 Ctrl+C 时 abort 这次 fetch，由 GUI 把取消一路传到远端杀掉进程树。
 async function execStream(argv){
-  const resp=await fetch('/api/exec/stream',{
-    method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},body:JSON.stringify({argv})
-  });
-  if(!resp.ok||!resp.body){
-    let msg='HTTP '+resp.status;
-    try{const j=await resp.json();if(j&&j.error)msg=j.error}catch{}
-    termLog('<span class="err">'+esc(msg)+'</span>');return;
-  }
-  // stdout / stderr 各一个 decoder：块边界可能切断多字节字符（中文日志里很常见），
-  // 两条流交错共用一个 decoder 会互相污染那半个字符的状态。
-  const decs={stdout:makeDecoder(),stderr:makeDecoder()};
-  const reader=resp.body.getReader(),td=new TextDecoder();
-  let buf='';
-  for(;;){
-    const {done,value}=await reader.read();
-    if(done)break;
-    buf+=td.decode(value,{stream:true});
-    let i;
-    while((i=buf.indexOf('\n'))>=0){
-      const line=buf.slice(0,i);buf=buf.slice(i+1);
-      if(line.trim())execEvent(JSON.parse(line),decs);
+  termAbort=new AbortController();
+  const body={argv};if(termCwd)body.cwd=termCwd;
+  try{
+    const resp=await fetch('/api/exec/stream',{
+      method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},body:JSON.stringify(body),signal:termAbort.signal
+    });
+    if(!resp.ok||!resp.body){
+      let msg='HTTP '+resp.status;
+      try{const j=await resp.json();if(j&&j.error)msg=j.error}catch{}
+      termLog('<span class="err">'+esc(msg)+'</span>');return;
     }
+    // stdout / stderr 各一个 decoder：块边界可能切断多字节字符（中文日志里很常见），
+    // 两条流交错共用一个 decoder 会互相污染那半个字符的状态。
+    const decs={stdout:makeDecoder(),stderr:makeDecoder()};
+    const reader=resp.body.getReader(),td=new TextDecoder();
+    let buf='';
+    for(;;){
+      const {done,value}=await reader.read();
+      if(done)break;
+      buf+=td.decode(value,{stream:true});
+      let i;
+      while((i=buf.indexOf('\n'))>=0){
+        const line=buf.slice(0,i);buf=buf.slice(i+1);
+        if(line.trim())execEvent(JSON.parse(line),decs);
+      }
+    }
+  }catch(e){
+    if(e&&e.name==='AbortError'){termLog('<span class="meta">^C 已中断（已通知远端终止进程）</span>');return}
+    throw e;
   }
 }
 
@@ -654,7 +779,12 @@ function execEvent(ev,decs){
     termAppend(dec(b64bytes(ev.data||'')),ev.stream==='stderr'?'err':'');
     return;
   }
-  if(ev.type==='error'){termLog('<span class="err">'+esc(ev.error)+'</span>');return}
+  if(ev.type==='error'){
+    const m=String(ev.error||'');
+    if(/deadline_exceeded/.test(m))termLog('<span class="err">命令已超时被终止（远端单条命令最长运行 5 分钟）；持续输出的命令请改用有限输出，如 tail -n 200。</span>');
+    else termLog('<span class="err">'+esc(m)+'</span>');
+    return;
+  }
   if(ev.type==='result'){
     // 0.0.5 不会发流式块，而是把输出放在最终响应里；新版流式结果不带这两项，故兼容
     // 渲染不会重复输出。
@@ -662,7 +792,7 @@ function execEvent(ev,decs){
     if(d.stdout)termAppend(d.stdout);
     if(d.stderr)termAppend(d.stderr,'err');
     if(d.error)termLog('<span class="err">无法执行: '+esc(d.error)+'</span>'); // 命令没能启动的原因
-    if(d.exit_code)termLog('<span class="meta">exit: '+esc(d.exit_code)+'</span>');
+    if(d.exit_code)termLog('<span class="err">[退出码 '+esc(d.exit_code)+']</span>');
   }
 }
 
