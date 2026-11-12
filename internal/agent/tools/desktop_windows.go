@@ -31,13 +31,11 @@ var (
 	pMapVirtualKeyW                = user32.NewProc("MapVirtualKeyW")
 	pVkKeyScanW                    = user32.NewProc("VkKeyScanW")
 
-	pCreateCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
-	pCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
-	pSelectObject           = gdi32.NewProc("SelectObject")
-	pBitBlt                 = gdi32.NewProc("BitBlt")
-	pGetDIBits              = gdi32.NewProc("GetDIBits")
-	pDeleteObject           = gdi32.NewProc("DeleteObject")
-	pDeleteDC               = gdi32.NewProc("DeleteDC")
+	pCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
+	pSelectObject       = gdi32.NewProc("SelectObject")
+	pBitBlt             = gdi32.NewProc("BitBlt")
+	pDeleteObject       = gdi32.NewProc("DeleteObject")
+	pDeleteDC           = gdi32.NewProc("DeleteDC")
 )
 
 const (
@@ -164,6 +162,55 @@ type bitmapInfoHeader struct {
 	biClrImportant  uint32
 }
 
+// capState 缓存抓屏用的内存 DC 与 DIB section，尺寸不变时每帧复用，
+// 避免每帧 Create/Delete 位图，并让 BitBlt 直接写进可读的像素内存，省掉 GetDIBits 拷贝。
+type capState struct {
+	hdcMem uintptr
+	hBmp   uintptr
+	old    uintptr
+	bits   unsafe.Pointer
+	w, h   int
+}
+
+var (
+	capMu sync.Mutex
+	capSt capState
+)
+
+var pCreateDIBSection = gdi32.NewProc("CreateDIBSection")
+
+func (c *capState) release() {
+	if c.hdcMem != 0 {
+		pSelectObject.Call(c.hdcMem, c.old)
+		pDeleteObject.Call(c.hBmp)
+		pDeleteDC.Call(c.hdcMem)
+	}
+	*c = capState{}
+}
+
+func (c *capState) ensure(hdcScreen uintptr, w, h int) error {
+	if c.hdcMem != 0 && c.w == w && c.h == h {
+		return nil
+	}
+	c.release()
+	hdcMem, _, e := pCreateCompatibleDC.Call(hdcScreen)
+	if hdcMem == 0 {
+		return fmt.Errorf("CreateCompatibleDC: %v", e)
+	}
+	bih := bitmapInfoHeader{biSize: uint32(unsafe.Sizeof(bitmapInfoHeader{})), biWidth: int32(w),
+		biHeight: -int32(h), biPlanes: 1, biBitCount: 32}
+	var bits uintptr
+	hBmp, _, e := pCreateDIBSection.Call(hdcScreen, uintptr(unsafe.Pointer(&bih)), dibRGBColors,
+		uintptr(unsafe.Pointer(&bits)), 0, 0)
+	if hBmp == 0 || bits == 0 {
+		pDeleteDC.Call(hdcMem)
+		return fmt.Errorf("CreateDIBSection: %v", e)
+	}
+	old, _, _ := pSelectObject.Call(hdcMem, hBmp)
+	*c = capState{hdcMem: hdcMem, hBmp: hBmp, old: old, bits: *(*unsafe.Pointer)(unsafe.Pointer(&bits)), w: w, h: h}
+	return nil
+}
+
 func winCapture(display int) (*image.RGBA, image.Rectangle, error) {
 	rect, err := monitorRect(display)
 	if err != nil {
@@ -175,35 +222,27 @@ func winCapture(display int) (*image.RGBA, image.Rectangle, error) {
 		return nil, rect, fmt.Errorf("GetDC: %v", e)
 	}
 	defer pReleaseDC.Call(0, hdcScreen)
-	hdcMem, _, e := pCreateCompatibleDC.Call(hdcScreen)
-	if hdcMem == 0 {
-		return nil, rect, fmt.Errorf("CreateCompatibleDC: %v", e)
+	capMu.Lock()
+	defer capMu.Unlock()
+	if err := capSt.ensure(hdcScreen, w, h); err != nil {
+		return nil, rect, err
 	}
-	defer pDeleteDC.Call(hdcMem)
-	hBmp, _, e := pCreateCompatibleBitmap.Call(hdcScreen, uintptr(w), uintptr(h))
-	if hBmp == 0 {
-		return nil, rect, fmt.Errorf("CreateCompatibleBitmap: %v", e)
-	}
-	defer pDeleteObject.Call(hBmp)
-	old, _, _ := pSelectObject.Call(hdcMem, hBmp)
-	defer pSelectObject.Call(hdcMem, old)
-	if r, _, e := pBitBlt.Call(hdcMem, 0, 0, uintptr(w), uintptr(h), hdcScreen,
+	if r, _, e := pBitBlt.Call(capSt.hdcMem, 0, 0, uintptr(w), uintptr(h), hdcScreen,
 		uintptr(rect.Min.X), uintptr(rect.Min.Y), srccopy|captureblt); r == 0 {
+		capSt.release() // 会话切换后 DC 可能失效，下次重建
 		return nil, rect, fmt.Errorf("BitBlt: %v（可能处于锁屏/断开的远程会话）", e)
 	}
-	bih := bitmapInfoHeader{biSize: uint32(unsafe.Sizeof(bitmapInfoHeader{})), biWidth: int32(w),
-		biHeight: -int32(h), biPlanes: 1, biBitCount: 32}
+	// DIB section 里是 BGRA 且 alpha 不可靠：拷贝出来（脱离缓存位图，调用方可随意持有）
+	// 并换成 RGBA、强制不透明；按行块并行。
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	if r, _, e := pGetDIBits.Call(hdcMem, hBmp, 0, uintptr(h), uintptr(unsafe.Pointer(&img.Pix[0])),
-		uintptr(unsafe.Pointer(&bih)), dibRGBColors); r == 0 {
-		return nil, rect, fmt.Errorf("GetDIBits: %v", e)
-	}
-	// GDI 给的是 BGRA，且 alpha 不可靠：换成 RGBA 并强制不透明。
-	p := img.Pix
-	for i := 0; i+3 < len(p); i += 4 {
-		p[i], p[i+2] = p[i+2], p[i]
-		p[i+3] = 255
-	}
+	src := unsafe.Slice((*byte)(capSt.bits), w*h*4)
+	parallelRows(h, 64, func(lo, hi int) {
+		s := src[lo*w*4 : hi*w*4]
+		d := img.Pix[lo*w*4 : hi*w*4]
+		for i := 0; i+3 < len(s); i += 4 {
+			d[i], d[i+1], d[i+2], d[i+3] = s[i+2], s[i+1], s[i], 255
+		}
+	})
 	return img, rect, nil
 }
 

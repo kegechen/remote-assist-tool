@@ -1,13 +1,11 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
-	"image/jpeg"
 	"strings"
 
 	"github.com/remote-assist/tool/internal/agent"
@@ -109,66 +107,40 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	tm := newDesktopTrace()
 	img, rect, err := t.ops.Capture(a.Display)
 	if err != nil {
 		return nil, fmt.Errorf("capture failed: %w", err)
 	}
+	tm.mark("capture")
 	n := 1
 	if t.ops.Displays != nil {
 		if c, e := t.ops.Displays(); e == nil && c > 0 {
 			n = c
 		}
 	}
+	tm.mark("displays")
 	out := scaleToWidth(img, a.MaxWidth)
+	tm.mark("scale")
 	data, err := encodeJPEGCapped(out, a.Quality, desktopMaxJPEGBytes)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(ScreenCaptureResult{
+	tm.mark("jpeg")
+	res, err := json.Marshal(ScreenCaptureResult{
 		Format: "jpeg", Width: out.Bounds().Dx(), Height: out.Bounds().Dy(),
 		ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(), Displays: n, Data: data,
 	})
+	tm.mark("json")
+	tm.flush(len(res))
+	return res, err
 }
 
-// scaleToWidth 用面积平均缩小到不超过 maxW 宽；不放大。面积平均比最近邻更利于文字可读。
-func scaleToWidth(src *image.RGBA, maxW int) *image.RGBA {
-	sb := src.Bounds()
-	sw, sh := sb.Dx(), sb.Dy()
-	if sw <= maxW || sw == 0 {
-		return src
+func encodeJPEGAny(img image.Image, q int) ([]byte, error) {
+	if rgba, ok := img.(*image.RGBA); ok {
+		return encodeJPEG(rgba, q)
 	}
-	dw := maxW
-	dh := sh * dw / sw
-	if dh < 1 {
-		dh = 1
-	}
-	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
-	for dy := 0; dy < dh; dy++ {
-		y0, y1 := dy*sh/dh, (dy+1)*sh/dh
-		if y1 <= y0 {
-			y1 = y0 + 1
-		}
-		for dx := 0; dx < dw; dx++ {
-			x0, x1 := dx*sw/dw, (dx+1)*sw/dw
-			if x1 <= x0 {
-				x1 = x0 + 1
-			}
-			var r, g, b, cnt uint32
-			for y := y0; y < y1; y++ {
-				off := y*src.Stride + x0*4
-				for x := x0; x < x1; x++ {
-					r += uint32(src.Pix[off])
-					g += uint32(src.Pix[off+1])
-					b += uint32(src.Pix[off+2])
-					off += 4
-					cnt++
-				}
-			}
-			o := dy*dst.Stride + dx*4
-			dst.Pix[o], dst.Pix[o+1], dst.Pix[o+2], dst.Pix[o+3] = uint8(r/cnt), uint8(g/cnt), uint8(b/cnt), 255
-		}
-	}
-	return dst
+	return encodeJPEGSingle(img, q)
 }
 
 // encodeJPEGCapped 编码为 JPEG；超过 limit 时逐步降质量，直到不超限或到最低质量。
@@ -177,15 +149,15 @@ func encodeJPEGCapped(img image.Image, quality, limit int) ([]byte, error) {
 		if q < 10 {
 			q = 10
 		}
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: q}); err != nil {
-			return nil, fmt.Errorf("jpeg encode: %w", err)
+		data, err := encodeJPEGAny(img, q)
+		if err != nil {
+			return nil, err
 		}
-		if buf.Len() <= limit || q == 10 {
-			if buf.Len() > limit {
-				return nil, fmt.Errorf("frame too large: %d bytes even at quality %d", buf.Len(), q)
+		if len(data) <= limit || q == 10 {
+			if len(data) > limit {
+				return nil, fmt.Errorf("frame too large: %d bytes even at quality %d", len(data), q)
 			}
-			return buf.Bytes(), nil
+			return data, nil
 		}
 	}
 }
