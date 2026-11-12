@@ -1,6 +1,6 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package tools
 
-// platformDesktopOps 非 Windows 平台暂无实现（Linux X11 后续补充）。
+// platformDesktopOps 既非 Windows 也非 Linux 的平台暂无实现。
 func platformDesktopOps() *DesktopOps { return nil }
