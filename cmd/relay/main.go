@@ -155,7 +155,7 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	opts := relayOptions{
 		listenAddr:    ":8443",
 		codeTTL:       30 * time.Minute,
-		codeLength:    10,
+		codeLength:    12,
 		auditLog:      "audit.log",
 		certsDir:      "./certs",
 		trustSourceIP: true,

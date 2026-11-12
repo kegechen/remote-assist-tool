@@ -86,7 +86,7 @@ func defaultWindowsServiceConfig(paths windowsServicePaths) windowsServiceConfig
 	return windowsServiceConfig{
 		ListenAddr:     ":8443",
 		CodeTTL:        "30m",
-		CodeLength:     10,
+		CodeLength:     12,
 		AuditLog:       paths.auditFile,
 		CertsDir:       paths.certsDir,
 		TrustSourceIP:  true,

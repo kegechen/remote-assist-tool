@@ -18,7 +18,7 @@ func TestParseRelayOptionsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.listenAddr != ":8443" || opts.codeTTL != 30*time.Minute || opts.codeLength != 10 {
+	if opts.listenAddr != ":8443" || opts.codeTTL != 30*time.Minute || opts.codeLength != 12 {
 		t.Fatalf("unexpected defaults: %+v", opts)
 	}
 	if !opts.trustSourceIP || opts.plain || opts.noAuth {

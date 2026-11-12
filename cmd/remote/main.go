@@ -284,7 +284,7 @@ func runShare(args []string) {
 			TLSCertFile:    certFile,
 			TLSKeyFile:     keyFile,
 			CodeTTL:        30 * time.Minute,
-			CodeLength:     10,
+			CodeLength:     12,
 			AuditLogFile:   "",
 			STUNListenAddr: "", // 不启 STUN，LAN 下 P2P 没必要
 			NoAuth:         *noAuth,

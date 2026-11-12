@@ -200,7 +200,7 @@ func NewServer(cfg *Config) (*Server, error) {
 		cfg.CodeTTL = 30 * time.Minute
 	}
 	if cfg.CodeLength == 0 {
-		cfg.CodeLength = 10
+		cfg.CodeLength = defaultCodeLength
 	}
 	if cfg.AuditLogFile != "" {
 		if err := logger.InitAuditLogger(cfg.AuditLogFile); err != nil {
