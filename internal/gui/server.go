@@ -574,7 +574,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// normalizeSSEEvent 保证 SSE 事件带 data 行。按规范，没有 data 的事件浏览器不会派发，
+// 此前 connected/disconnected/reconnecting/lost 等只写 event 行，页面一直收不到。
+// 不带冒号的行（如 "retry 1/3"）会被当作未知字段忽略，这里一并转成 data 行。
+func normalizeSSEEvent(msg string) string {
+	var event string
+	var data []string
+	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			event = line
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, line)
+		case line != "":
+			data = append(data, "data: "+line)
+		}
+	}
+	if len(data) == 0 {
+		data = []string{"data: "}
+	}
+	return event + "\n" + strings.Join(data, "\n") + "\n"
+}
+
 func (s *Server) broadcast(msg string) {
+	msg = normalizeSSEEvent(msg)
 	s.sseMu.Lock()
 	defer s.sseMu.Unlock()
 	for ch := range s.sseSubs {
@@ -1015,7 +1038,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case msg := <-ch:
-			fmt.Fprintf(w, "%s\n\n", msg)
+			fmt.Fprintf(w, "%s\n", msg) // msg 已以换行结尾，再补一个空行作为事件结束
 			flusher.Flush()
 		case <-ticker.C:
 			fmt.Fprintf(w, "event: ping\n\n")
