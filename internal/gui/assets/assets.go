@@ -80,10 +80,11 @@ main{flex:1;display:flex;min-height:0}
    内容还矮"，于是输出区不滚而是把自己撑高，再被 .tabcontent 的 overflow:hidden 裁掉
    ——表现就是没滚动条 + 内容被截断。overflow:auto 只有配上 min-height:0 才生效。 */
 #term-box{display:none;flex-direction:column;flex:1;min-height:0}
-#term-box .input-row{display:flex;align-items:center;padding:4px 8px;background:#11111b;gap:4px}
-#term-box .prompt{color:#a6e3a1;font-weight:bold;user-select:none}
-#termInput{flex:1;background:transparent;border:none;color:#cdd6f4;font-family:inherit;font-size:13px;outline:none}
-#term-output{flex:1;min-height:0;overflow:auto;padding:6px 10px;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.4}
+#term-box .input-row{display:flex;align-items:baseline;gap:6px;margin-top:2px}
+#term-box .prompt{color:#a6e3a1;font-weight:bold;user-select:none;font-size:12px;line-height:1.4}
+#termInput{flex:1;min-width:0;background:transparent;border:none;color:#cdd6f4;font-family:inherit;font-size:12px;line-height:1.4;padding:0;outline:none;caret-color:#a6e3a1}
+#term-output{flex:1;min-height:0;overflow:auto;padding:8px 12px;background:#11111b;font-size:12px;line-height:1.4;cursor:text}
+#term-log{white-space:pre-wrap;word-break:break-all}
 #search-box{display:none;flex-direction:column;flex:1;min-height:0}
 #search-box .sp{padding:6px 10px;background:#181825;border-bottom:1px solid #313244;display:flex;gap:6px;align-items:center}
 #search-box .sp label{color:#9399b2;font-size:11px}
@@ -201,7 +202,7 @@ main{flex:1;display:flex;min-height:0}
     <div id="right">
       <div class="tabs" id="tabbar"></div>
       <div class="tabcontent">
-        <div id="term-box"><div class="input-row"><span class="prompt">$</span><input id="termInput" placeholder="输入命令" autocomplete="off"></div><div id="term-output"></div></div>
+        <div id="term-box"><div id="term-output"><div id="term-log"></div><div class="input-row"><span class="prompt">$</span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="命令输入"></div></div></div>
         <div id="search-box"><div class="sp"><label>正则:</label><input id="grepPattern" placeholder="TODO"><label>目录:</label><input id="grepRoot" placeholder="C:\\"><button class="sm" id="grepRun">搜索</button></div><div id="search-output"></div></div>
         <div id="proc-box"><div id="proc-output"></div></div>
         <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-lbl">宽度</span><select id="deskW" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="2">2</option><option value="5" selected>5</option><option value="10">10</option><option value="15">15</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="40">低</option><option value="60" selected>中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div class="dk-chip" id="deskStat"></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
@@ -433,16 +434,17 @@ function renderTabs(){
 }
 
 // ========== exec 终端 ==========
-function termLog(s){$('#term-output').innerHTML+=s+'\n';$('#term-output').scrollTop=$('#term-output').scrollHeight}
+function termScroll(){const o=$('#term-output');o.scrollTop=o.scrollHeight}
+function termLog(s){$('#term-log').insertAdjacentHTML('beforeend',s+'\n');termScroll()}
 // termAppend 追加一段流式输出。用文本节点而不是 termLog 的 innerHTML 拼接：命令可以吐
 // 半行（进度条、没换行的提示符），按行拼会把半行强行变成整行；textContent 也天然免转义。
 function termAppend(text,cls){
   if(!text)return;
-  const out=$('#term-output'),n=document.createElement('span');
+  const out=$('#term-log'),n=document.createElement('span');
   if(cls)n.className=cls;
   n.textContent=text;
   out.appendChild(n);
-  out.scrollTop=out.scrollHeight;
+  termScroll();
 }
 function b64bytes(b64){const s=atob(b64),a=new Uint8Array(s.length);for(let i=0;i<s.length;i++)a[i]=s.charCodeAt(i);return a}
 // scanUTF8 扫一段字节：complete = 合法且完整的前缀长度；ok=false 表示撞到了非法字节。
@@ -503,6 +505,8 @@ function makeFileDecoder(){
     return fallback(bytes,final);
   };
 }
+// 点击终端空白处（不是在选文字）就聚焦输入框，和真实终端一致
+$('#term-output').addEventListener('mouseup',e=>{if(!String(window.getSelection()).length&&e.target!==$('#termInput'))$('#termInput').focus()});
 function openTerm(){openTab('term','终端','term-box',()=>{$('#termInput').focus()},true)}
 $('#termInput').addEventListener('keydown',e=>{
   if(e.key==='Enter'){e.preventDefault();const v=$('#termInput').value;if(v.trim())execCmd(v);$('#termInput').value=''}
@@ -530,7 +534,7 @@ async function execCmd(line){
   // clear/cls 是清「本地终端显示」，远端 shell 的 clear 清的是远端屏幕、传不回来，
   // 所以在前端直接拦截清空 DOM，不发给远端。
   const lc=line.trim().toLowerCase();
-  if(lc==='clear'||lc==='cls'){$('#term-output').innerHTML='';return}
+  if(lc==='clear'||lc==='cls'){$('#term-log').innerHTML='';return}
   if(!cmdHistory.length||cmdHistory[cmdHistory.length-1]!==line)cmdHistory.push(line);histIdx=-1;
   termLog('<span class="cmd">$ '+esc(line)+'</span>');
   try{
