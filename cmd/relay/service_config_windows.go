@@ -39,6 +39,10 @@ type windowsServiceConfig struct {
 	KeyFile        string `json:"key,omitempty"`
 	CodeTTL        string `json:"ttl"`
 	CodeLength     int    `json:"length"`
+	// CodeMaxAge 码的绝对寿命上限（即使 share 一直在线也到期）；空串=不限。
+	CodeMaxAge string `json:"code_max_age,omitempty"`
+	// LegacyCodeExpiry 恢复旧的硬 TTL 过期行为（不支持跨重连固定协助码）。
+	LegacyCodeExpiry bool `json:"legacy_code_expiry,omitempty"`
 	AuditLog       string `json:"audit"`
 	Plain          bool   `json:"plain"`
 	CertsDir       string `json:"certs_dir"`
@@ -131,6 +135,11 @@ func (cfg windowsServiceConfig) validate() error {
 	if cfg.CodeLength <= 0 {
 		return errors.New("length must be positive")
 	}
+	if cfg.CodeMaxAge != "" {
+		if d, err := time.ParseDuration(cfg.CodeMaxAge); err != nil || d < 0 {
+			return fmt.Errorf("code_max_age must be a non-negative duration: %q", cfg.CodeMaxAge)
+		}
+	}
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return errors.New("cert and key must be specified together")
 	}
@@ -178,6 +187,12 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 	}
 	if cfg.CertFile != "" {
 		args = append(args, "--cert", cfg.CertFile, "--key", cfg.KeyFile)
+	}
+	if cfg.CodeMaxAge != "" {
+		args = append(args, "--code-max-age", cfg.CodeMaxAge)
+	}
+	if cfg.LegacyCodeExpiry {
+		args = append(args, "--legacy-code-expiry")
 	}
 	if cfg.Plain {
 		args = append(args, "--plain")

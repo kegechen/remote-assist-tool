@@ -18,6 +18,7 @@ var (
 	ErrCodeExpired      = errors.New("code expired")
 	ErrCodeInvalid      = errors.New("invalid code")
 	ErrSessionHasHelper = errors.New("session already has helper")
+	ErrCodeTaken        = errors.New("code already in use")
 )
 
 // helpDisconnectDebounce Help 断连去抖窗口：这段时间内重连回来的算网络抖动，不清 Help
@@ -59,9 +60,12 @@ type ClientConn struct {
 	Host     string // 客户端身份串 "user@host 系统 架构"（已 sanitizePeerString；旧客户端为空）
 	// supportsUpdateNotice 在 register/join 时读取；发布会话前写入，relay 配对路径读取。
 	supportsUpdateNotice bool
-	Conn                 Conn
-	Send                 chan []byte
-	writeMu              sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
+	// 协助码固定相关：register 首帧写入（同 supportsUpdateNotice 的并发约束）。
+	supportsStickyCode bool
+	requestCode        string
+	Conn               Conn
+	Send               chan []byte
+	writeMu            sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
 
 	// joinFailures 本连接累计的 Join 失败次数（含限流拒绝）。仅由该连接的读循环 goroutine
 	// 单线程访问，无需加锁。达到 maxJoinFailures 即关闭连接；一次成功 Join 后清零。
@@ -124,6 +128,58 @@ type SessionManager struct {
 	// 「断开时刻 + reconnectGrace」并恢复码映射，期间两端都能用原码/原 ClientID 回来。
 	// 0 表示不宽限（过了原 TTL 的会话一断即清）。由 NewServer 在 Start 前装配，此后只读。
 	reconnectGrace time.Duration
+
+	// sticky 为 true 时协助码「在 share 在线期间恒定有效」：share 在线的会话不按 ExpiresAt（TTL）
+	// 过期，TTL 退化为 share 掉线后的保留宽限（掉线时刻 + reconnectGrace）。false = 旧行为（纯 TTL）。
+	// maxAge > 0 时码另有绝对寿命上限（CreatedAt + maxAge，share 在线也到期）。
+	// 由 NewServer 在 Start 前装配，此后只读。
+	sticky bool
+	maxAge time.Duration
+}
+
+// pastMaxAgeLocked 码是否已超过绝对寿命上限（仅 sticky 且 maxAge>0 时可能为真）。调用方须持 sm.mu。
+func (sm *SessionManager) pastMaxAgeLocked(session *TunnelSession, now time.Time) bool {
+	return sm.sticky && sm.maxAge > 0 && now.After(session.CreatedAt.Add(sm.maxAge))
+}
+
+// expiredLocked 统一的「会话/码是否过期」判定。sticky 下 share 在线不按 TTL 过期。调用方须持 sm.mu。
+func (sm *SessionManager) expiredLocked(session *TunnelSession, now time.Time) bool {
+	if sm.sticky {
+		if sm.pastMaxAgeLocked(session, now) {
+			return true
+		}
+		if session.Share != nil {
+			return false
+		}
+	}
+	return now.After(session.ExpiresAt)
+}
+
+// reportedExpiry 新建会话时应告知 share 的到期时刻（加锁版 stickyExpiryLocked）。
+func (sm *SessionManager) reportedExpiry(session *TunnelSession, clientSupportsSticky bool, ttl time.Duration) time.Time {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.stickyExpiryLocked(session, clientSupportsSticky, ttl)
+}
+
+// stickyExpiryLocked 返回应告知 share 的到期时刻：零值表示「无固定到期」（仅支持 sticky 的客户端可收到）。
+// 旧客户端不理解无到期，按「现在 + TTL」滚动给出（其重连仍经 ClientID 复用同一个码）。调用方须持 sm.mu。
+func (sm *SessionManager) stickyExpiryLocked(session *TunnelSession, clientSupportsSticky bool, ttl time.Duration) time.Time {
+	if !sm.sticky {
+		return session.ExpiresAt
+	}
+	var capAt time.Time
+	if sm.maxAge > 0 {
+		capAt = session.CreatedAt.Add(sm.maxAge)
+	}
+	if clientSupportsSticky {
+		return capAt // 无上限时为零值
+	}
+	exp := time.Now().Add(ttl)
+	if !capAt.IsZero() && capAt.Before(exp) {
+		exp = capAt
+	}
+	return exp
 }
 
 // NewSessionManager 创建会话管理器
@@ -149,8 +205,28 @@ func (sm *SessionManager) createPendingSession(code string, share *ClientConn, t
 }
 
 func (sm *SessionManager) createSession(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int, shareReady bool) (*TunnelSession, error) {
+	return sm.createSessionOpt(code, share, ttl, clientID, shareIP, maxPerIP, maxTotal, shareReady, false)
+}
+
+// createPendingSessionExact 用调用方指定的码建会话（share 请求复用上次的码）：码已被其他有效会话
+// 占用时返回 ErrCodeTaken，不覆盖；占着该码的是已过期且无 share 的残留会话时先回收再建。
+func (sm *SessionManager) createPendingSessionExact(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int) (*TunnelSession, error) {
+	return sm.createSessionOpt(code, share, ttl, clientID, shareIP, maxPerIP, maxTotal, false, true)
+}
+
+func (sm *SessionManager) createSessionOpt(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int, shareReady, exact bool) (*TunnelSession, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	if exact {
+		if prev, taken := sm.byCode[code]; taken {
+			if prev.Share == nil && sm.expiredLocked(prev, time.Now()) {
+				sm.deleteSessionLocked(prev.ID, prev)
+			} else {
+				return nil, ErrCodeTaken
+			}
+		}
+	}
 
 	// 活跃会话上限检查
 	total := len(sm.sessions)
@@ -217,7 +293,7 @@ func (sm *SessionManager) GetSessionByCode(code string) (*TunnelSession, error) 
 	if !exists {
 		return nil, ErrCodeInvalid
 	}
-	if time.Now().After(session.ExpiresAt) {
+	if sm.expiredLocked(session, time.Now()) {
 		return nil, ErrCodeExpired
 	}
 	if session.closed {
@@ -239,7 +315,7 @@ func (sm *SessionManager) GetSessionByClientID(clientID string) (*TunnelSession,
 	if !exists {
 		return nil, false
 	}
-	if time.Now().After(session.ExpiresAt) || session.closed {
+	if sm.expiredLocked(session, time.Now()) || session.closed {
 		return nil, false
 	}
 	return session, true
@@ -250,8 +326,10 @@ type ReuseSessionResult struct {
 	SessionID string
 	Code      string
 	ExpiresAt time.Time
-	OldShare  *ClientConn
-	OldHelp   *ClientConn
+	// ReportedExpiry 应告知 share 的到期时刻（见 stickyExpiryLocked，零值=无固定到期）。
+	ReportedExpiry time.Time
+	OldShare       *ClientConn
+	OldHelp        *ClientConn
 
 	// Conflict 为 true 时（此时 ok=false）表示同 ClientID 的另一个进程正在线且两边在
 	// 互踢：会话未做任何改动，调用方应拒绝新来者，且【不得】另建会话。
@@ -262,7 +340,12 @@ type ReuseSessionResult struct {
 }
 
 // ReuseSessionByClientID 原子查询并复用会话。调用方只能使用返回快照，不能持有内部 session 指针。
-func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *ClientConn) (*ReuseSessionResult, bool) {
+func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *ClientConn, supportsSticky ...bool) (*ReuseSessionResult, bool) {
+	sticky := len(supportsSticky) > 0 && supportsSticky[0]
+	return sm.reuseSessionByClientID(clientID, newShare, sticky)
+}
+
+func (sm *SessionManager) reuseSessionByClientID(clientID string, newShare *ClientConn, supportsSticky bool) (*ReuseSessionResult, bool) {
 	if clientID == "" {
 		return nil, false
 	}
@@ -275,7 +358,7 @@ func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *Clie
 		return nil, false
 	}
 	now := time.Now()
-	if now.After(session.ExpiresAt) || session.closed {
+	if sm.expiredLocked(session, now) || session.closed {
 		return nil, false
 	}
 
@@ -306,6 +389,7 @@ func (sm *SessionManager) ReuseSessionByClientID(clientID string, newShare *Clie
 		OldShare:  session.Share,
 		OldHelp:   session.Help,
 	}
+	result.ReportedExpiry = sm.stickyExpiryLocked(session, supportsSticky, sm.reconnectGrace)
 
 	if session.Share != nil {
 		delete(sm.byConnID, session.Share.ID)
@@ -391,7 +475,7 @@ func (sm *SessionManager) JoinSession(code string, help *ClientConn) (*JoinSessi
 	if !exists {
 		return nil, ErrCodeInvalid
 	}
-	if time.Now().After(session.ExpiresAt) {
+	if sm.expiredLocked(session, time.Now()) {
 		return nil, ErrCodeExpired
 	}
 	if session.closed {
@@ -691,7 +775,8 @@ func (sm *SessionManager) DisconnectClient(clientID string) *DisconnectResult {
 		session.dataPlaneReady = false
 		session.shareReady = false
 		help := session.Help
-		if help != nil {
+		if help != nil || sm.sticky {
+			// sticky：无论有没有 help，share 掉线都按「掉线时刻 + 宽限」保留码，宽限内同 ClientID 重连复用原码。
 			sm.graceAfterInUseLocked(session, time.Now())
 		}
 		session.Share = nil
@@ -722,7 +807,11 @@ func (sm *SessionManager) graceAfterInUseLocked(session *TunnelSession, now time
 	if sm.reconnectGrace <= 0 || session.closed {
 		return
 	}
-	if until := now.Add(sm.reconnectGrace); until.After(session.ExpiresAt) {
+	if sm.pastMaxAgeLocked(session, now) {
+		return // 已超绝对寿命上限：不再续命
+	}
+	if until := now.Add(sm.reconnectGrace); sm.sticky || until.After(session.ExpiresAt) {
+		// sticky 下 ExpiresAt 只在 share 离线时有意义，直接按掉线时刻重置；legacy 只增不减。
 		session.ExpiresAt = until
 	}
 	if _, taken := sm.byCode[session.Code]; !taken {
@@ -740,7 +829,7 @@ func (sm *SessionManager) CleanupExpired() []string {
 	var expired []string
 	var toClose []*ClientConn
 	for id, session := range sm.sessions {
-		if now.After(session.ExpiresAt) {
+		if sm.expiredLocked(session, now) {
 			// 移除协助码映射，防止新的 help 通过过期码加入。
 			// 与 deleteSessionLocked 一致做指针复核：no-auth 下 code 恒为 NoAuthCode，
 			// 后注册的 B 会顶掉 A 在 byCode 里的映射，此时 A 过期若无条件 delete，

@@ -43,12 +43,20 @@ type RegisterRequest struct {
 	Host     string `json:"host,omitempty"` // 身份串 "user@host 系统 架构"（sysinfo.Summary），看板展示用；旧客户端不发
 	// SupportsUpdateNotice 表示能自行显示 UpdateInfo，relay 不再发送旧版兼容提示。
 	SupportsUpdateNotice bool `json:"supports_update_notice,omitempty"`
+	// RequestCode 期望复用的协助码：share 进程内缓存的上一次所得之码。relay 在码可用时原样复用，
+	// 使码在 share 进程存活期间不变（relay 重启、share 离线超宽限后重连也能找回）。旧 relay 忽略。
+	RequestCode string `json:"request_code,omitempty"`
+	// SupportsStickyCode 表示客户端理解 RegisterResponse.CodeSticky 且 expires_at==0 的"无到期"语义。
+	SupportsStickyCode bool `json:"supports_sticky_code,omitempty"`
 }
 
 // RegisterResponse 注册响应
 type RegisterResponse struct {
-	Code      string `json:"code"`
-	ExpiresAt int64  `json:"expires_at"`
+	Code string `json:"code"`
+	// ExpiresAt 为 0 且 CodeSticky 为 true 表示码在 share 在线期间一直有效（无固定到期时刻）。
+	ExpiresAt int64 `json:"expires_at"`
+	// CodeSticky relay 声明码在 share 在线期间恒定有效、掉线宽限内/relay 状态在时可复用。旧 relay 不发。
+	CodeSticky bool `json:"code_sticky,omitempty"`
 	UpdateInfo
 	// STUNServers relay 建议的 STUN 服务器（host:port，--advertise-stun）；新版客户端把它们
 	// 加入公网地址发现的竞速候选。旧 relay 不发、旧客户端忽略。

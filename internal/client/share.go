@@ -46,7 +46,9 @@ type ShareMode struct {
 	codeFile       string
 	mirrorCodeFile string
 	code           string
-	expiresAt      time.Time
+	expiresAt      time.Time // 零值 = relay 声明码在 share 在线期间恒定有效（无固定到期）
+	codeSticky     bool      // 最近一次注册时 relay 是否声明了「固定码」能力
+	stickyHinted   bool      // 「中转服务不支持固定码」的提示已打印过；重连不重复刷屏
 	sbCfg          agent.SandboxConfig
 	minProto       string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
 	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭
@@ -289,7 +291,7 @@ func (s *ShareMode) Run() (string, time.Time, error) {
 		sessionDur := time.Since(start)
 
 		isPeerDisconnect := errors.Is(tunnelErr, ErrPeerDisconnected)
-		codeExpired := time.Now().After(s.expiresAt)
+		codeExpired := !s.expiresAt.IsZero() && time.Now().After(s.expiresAt)
 
 		// 对端断开 + 协助码仍有效 → 在当前连接上等待新的协助端（不重连不退出）
 		if isPeerDisconnect && !codeExpired {
@@ -391,7 +393,12 @@ func (s *ShareMode) register() error {
 		return err
 	}
 	hostInfo := sysinfo.Summary()
-	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{ClientID: clientID, Version: version.Info(), Host: hostInfo, SupportsUpdateNotice: true}); err != nil {
+	// 携带进程内缓存的码：首次注册为空；重连（含 relay 重启、掉线超宽限）时请 relay 原样复用，
+	// 使码在本进程存活期间不变。旧 relay 忽略这两个字段并按旧逻辑发码。
+	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{
+		ClientID: clientID, Version: version.Info(), Host: hostInfo, SupportsUpdateNotice: true,
+		RequestCode: s.code, SupportsStickyCode: true,
+	}); err != nil {
 		return err
 	}
 
@@ -426,8 +433,20 @@ func (s *ShareMode) register() error {
 	if err := proto.DecodePayload(msg, &resp); err != nil {
 		return err
 	}
+	prevCode := s.code
 	s.code = resp.Code
-	s.expiresAt = time.Unix(resp.ExpiresAt, 0)
+	s.codeSticky = resp.CodeSticky
+	if resp.ExpiresAt == 0 && resp.CodeSticky {
+		s.expiresAt = time.Time{}
+	} else {
+		s.expiresAt = time.Unix(resp.ExpiresAt, 0)
+	}
+	if notice := codeChangeNotice(prevCode, resp.Code, resp.CodeSticky); notice != "" {
+		s.printf("\n[!] %s\n", notice)
+	} else if prevCode == "" && !resp.CodeSticky && !s.stickyHinted {
+		s.stickyHinted = true
+		s.printf("\n[提示] 中转服务版本较旧，不支持固定协助码：协助码按有效期到期，重连或过期后可能变更。\n")
+	}
 	s.client.setRelaySTUN(resp.STUNServers)
 	s.conflictHinted = false
 	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
@@ -435,7 +454,7 @@ func (s *ShareMode) register() error {
 	s.println("========================================================")
 	// 整段复制到系统剪贴板，让未配置 MCP 的协助端也能直接按文案中的指南完成安装。
 	// 首次注册与重连刷新 code 都走到这里，剪贴板始终包含最新协助信息。
-	if err := copyToClipboard(instructions); err == nil {
+	if err := clipboardCopy(instructions); err == nil {
 		s.println("（以上协助信息已复制到剪贴板）")
 	}
 	// 升级提示放在协助信息块之外：不进剪贴板，避免被原样转给协助端。
@@ -469,7 +488,10 @@ func (s *ShareMode) writeCodeFile() {
 		Code      string `json:"code"`
 		Server    string `json:"server"`
 		ExpiresAt int64  `json:"expiresAt"`
-	}{Code: s.code, Server: s.client.config.ServerAddr, ExpiresAt: s.expiresAt.Unix()}
+	}{Code: s.code, Server: s.client.config.ServerAddr}
+	if !s.expiresAt.IsZero() {
+		payload.ExpiresAt = s.expiresAt.Unix() // 0 = 本进程存活期间一直有效
+	}
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -1073,7 +1095,22 @@ func (s *ShareMode) GetCode() string {
 	return s.code
 }
 
-// GetExpiresAt 获取过期时间
+// codeChangeNotice 重连后协助码与上次不同时的用户提示；码没变（或首次注册）返回空串。
+// 区分两种原因：relay 没声明固定码能力 = 版本太旧，忽略了 request_code；声明了 = 原码已被占用/不可复用。
+func codeChangeNotice(prev, cur string, relaySticky bool) string {
+	if prev == "" || prev == cur {
+		return ""
+	}
+	if !relaySticky {
+		return fmt.Sprintf("中转服务不支持固定协助码（版本较旧），协助码已变更：%s -> %s，请把新码告知协助端", formatCode(prev), formatCode(cur))
+	}
+	return fmt.Sprintf("原协助码 %s 无法继续使用（已被占用或不可复用），协助码已变更为 %s，请把新码告知协助端", formatCode(prev), formatCode(cur))
+}
+
+// clipboardCopy 复制到剪贴板；用变量便于测试替换，避免单测污染使用者的剪贴板。
+var clipboardCopy = copyToClipboard
+
+// GetExpiresAt 获取过期时间（零值 = 本进程存活期间一直有效）
 func (s *ShareMode) GetExpiresAt() time.Time {
 	return s.expiresAt
 }

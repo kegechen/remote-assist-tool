@@ -26,6 +26,8 @@ type relayOptions struct {
 	certFile       string
 	keyFile        string
 	codeTTL        time.Duration
+	codeMaxAge     time.Duration
+	legacyExpiry   bool
 	codeLength     int
 	auditLog       string
 	plain          bool
@@ -111,6 +113,8 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		TLSCertFile:           opts.certFile,
 		TLSKeyFile:            opts.keyFile,
 		CodeTTL:               opts.codeTTL,
+		CodeMaxAge:            opts.codeMaxAge,
+		LegacyCodeExpiry:      opts.legacyExpiry,
 		CodeLength:            opts.codeLength,
 		AuditLogFile:          opts.auditLog,
 		UseTLS:                !opts.plain,
@@ -169,7 +173,9 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.StringVar(&opts.listenAddr, "listen", opts.listenAddr, "Listen address")
 	fs.StringVar(&opts.certFile, "cert", "", "TLS certificate file")
 	fs.StringVar(&opts.keyFile, "key", "", "TLS key file")
-	fs.DurationVar(&opts.codeTTL, "ttl", opts.codeTTL, "Assist code TTL")
+	fs.DurationVar(&opts.codeTTL, "ttl", opts.codeTTL, "Assist code TTL: how long a code is kept after its share goes offline (with --legacy-code-expiry: hard lifetime from issue)")
+	fs.DurationVar(&opts.codeMaxAge, "code-max-age", 0, "Absolute max lifetime of an assist code even while its share stays online (0 = unlimited; codes live as long as the share process)")
+	fs.BoolVar(&opts.legacyExpiry, "legacy-code-expiry", false, "Restore the old hard --ttl expiry; disables fixed codes across share/help reconnects")
 	fs.IntVar(&opts.codeLength, "length", opts.codeLength, "Assist code length")
 	fs.StringVar(&opts.auditLog, "audit", opts.auditLog, "Audit log file")
 	fs.BoolVar(&opts.plain, "plain", false, "Use plain TCP (insecure, for dev only)")
@@ -201,6 +207,9 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	}
 	if opts.codeTTL <= 0 {
 		return relayOptions{}, fmt.Errorf("ttl must be positive")
+	}
+	if opts.codeMaxAge < 0 {
+		return relayOptions{}, fmt.Errorf("code-max-age must not be negative")
 	}
 	opts.advertiseSTUN = splitList(*advertiseSTUN)
 	if err := relay.ValidateAdvertiseSTUN(opts.advertiseSTUN); err != nil {

@@ -366,6 +366,10 @@ func runShare(args []string) {
 		log.Fatalf("Error: %v", err)
 	}
 
+	if expiresAt.IsZero() {
+		fmt.Printf("\nSession ended. Code %s is no longer valid\n", code)
+		return
+	}
 	fmt.Printf("\nSession ended. Code %s expired at %s\n", code, expiresAt.Local().Format("2006-01-02 15:04:05"))
 }
 

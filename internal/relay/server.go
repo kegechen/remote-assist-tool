@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,14 +111,20 @@ const (
 
 // Config 服务器配置
 type Config struct {
-	ListenAddr     string
-	TLSCertFile    string
-	TLSKeyFile     string
-	CodeTTL        time.Duration
-	CodeLength     int
-	AuditLogFile   string
-	UseTLS         bool
-	STUNListenAddr string // STUN server listen address (empty to disable)
+	ListenAddr  string
+	TLSCertFile string
+	TLSKeyFile  string
+	// CodeTTL 默认 30m。sticky 模式（默认）下它是「share 掉线后码的保留宽限」，share 在线期间码一直有效；
+	// LegacyCodeExpiry=true 时恢复旧语义：从签发起算的硬 TTL。
+	CodeTTL time.Duration
+	// CodeMaxAge >0 给码设绝对寿命上限（从签发起算，share 在线也到期）；0=不限（默认）。legacy 模式忽略。
+	CodeMaxAge time.Duration
+	// LegacyCodeExpiry 关闭「码在 share 在线期间恒定有效」，回到纯 TTL 过期。
+	LegacyCodeExpiry bool
+	CodeLength       int
+	AuditLogFile     string
+	UseTLS           bool
+	STUNListenAddr   string // STUN server listen address (empty to disable)
 	// QUICListenAddr 额外在 UDP 上监听 QUIC（空=关闭）。TCP 被丢弃回程时给新版客户端兜底，
 	// 必须同时开 TLS。通常与 ListenAddr 同端口号（如 :8443），客户端不需要额外配置。
 	QUICListenAddr string
@@ -262,6 +270,8 @@ func NewServer(cfg *Config) (*Server, error) {
 	srv.sessions.onHelpCleared = srv.notifyShareHelpGone
 	// 断线宽限与协助码 TTL 一致：使用中断开后，原码再保留一个 TTL。
 	srv.sessions.reconnectGrace = cfg.CodeTTL
+	srv.sessions.sticky = !cfg.LegacyCodeExpiry
+	srv.sessions.maxAge = cfg.CodeMaxAge
 	return srv, nil
 }
 
@@ -639,6 +649,8 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		client.Version = sanitizePeerString(req.Version)
 		client.Host = sanitizePeerString(req.Host)
 		client.supportsUpdateNotice = req.SupportsUpdateNotice
+		client.supportsStickyCode = req.SupportsStickyCode
+		client.requestCode = req.RequestCode
 		return s.handleRegister(client)
 	case proto.MsgJoinRequest:
 		// join 只能在 new 状态执行一次
@@ -741,10 +753,11 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	var reused bool
 	var sessionID string
 	var reuseResult *ReuseSessionResult
+	var reportedExpiry time.Time
 
 	// 如果有 ClientID，尝试原子复用现有会话
 	if client.ClientID != "" {
-		result, ok := s.sessions.ReuseSessionByClientID(client.ClientID, client)
+		result, ok := s.sessions.ReuseSessionByClientID(client.ClientID, client, client.supportsStickyCode)
 		if !ok && result != nil && result.Conflict {
 			// 不能落到下面「另建会话」：那会让两个进程各占一个协助码继续抢，还白占配额。
 			log.Printf("Share register rejected (client_id conflict) client_fp=%s (version: %s, host: %s); online share version: %s",
@@ -758,6 +771,7 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 			// 复用成功
 			code = result.Code
 			expiresAt = result.ExpiresAt
+			reportedExpiry = result.ReportedExpiry
 			reused = true
 			sessionID = result.SessionID
 			reuseResult = result
@@ -789,12 +803,31 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 		if s.sourceIPLimitsDisabled() {
 			maxPerIP = 0
 		}
-		session, err := s.sessions.createPendingSession(code, client, s.config.CodeTTL, client.ClientID, host, maxPerIP, s.limits.MaxActiveSessionsTotal)
+		var session *TunnelSession
+		var err error
+		// share 请求复用上次的码（relay 重启 / 离线超宽限后重连）：码合法且空闲才复用，否则落回新码，
+		// 由 share 对比 RegisterResponse.Code 发现并提示。
+		if s.canHonorRequestedCode(client.requestCode) {
+			session, err = s.sessions.createPendingSessionExact(client.requestCode, client, s.config.CodeTTL, client.ClientID, host, maxPerIP, s.limits.MaxActiveSessionsTotal)
+			if err == nil {
+				code = client.requestCode
+			} else if !errors.Is(err, ErrCodeTaken) {
+				s.sendError(client, "SESSION_LIMIT", err.Error())
+				return true
+			} else {
+				log.Printf("Requested code %s unavailable (taken), issuing a new one", logger.MaskCode(client.requestCode))
+				session = nil
+			}
+		}
+		if session == nil {
+			session, err = s.sessions.createPendingSession(code, client, s.config.CodeTTL, client.ClientID, host, maxPerIP, s.limits.MaxActiveSessionsTotal)
+		}
 		if err != nil {
 			s.sendError(client, "SESSION_LIMIT", err.Error())
 			return true
 		}
 		expiresAt = session.ExpiresAt
+		reportedExpiry = s.sessions.reportedExpiry(session, client.supportsStickyCode, s.config.CodeTTL)
 		sessionID = session.ID
 		logger.LogCodeGenerated(code, client.ID, session.ExpiresAt)
 		log.Printf("Share client registered, code=%s (version: %s, host: %s)", logger.MaskCode(code), client.Version, client.Host)
@@ -803,9 +836,11 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	// 注册成功，设置状态为 share
 	client.Type = connStateShare
 
+	_ = expiresAt
 	resp := &proto.RegisterResponse{
 		Code:        code,
-		ExpiresAt:   expiresAt.Unix(),
+		ExpiresAt:   unixOrZero(reportedExpiry),
+		CodeSticky:  s.sessions.sticky && !s.config.NoAuth,
 		UpdateInfo:  s.updateInfo(),
 		STUNServers: s.config.AdvertiseSTUN,
 	}
@@ -1087,4 +1122,26 @@ type connWrapper struct {
 
 func (w *connWrapper) RemoteAddr() string {
 	return w.Conn.RemoteAddr().String()
+}
+
+// unixOrZero 零值时间返回 0（协议里表示「无固定到期」），否则返回 Unix 秒。
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// canHonorRequestedCode 请求复用的码是否值得尝试：no-auth 恒用固定码不处理；其余要求长度等于本 relay
+// 码长且字符都在码字符集内（防任意字符串当码）。只做格式校验，是否被占用由建会话时原子判定。
+func (s *Server) canHonorRequestedCode(code string) bool {
+	if code == "" || s.config.NoAuth || !s.sessions.sticky || len(code) != s.config.CodeLength {
+		return false
+	}
+	for _, r := range code {
+		if !strings.ContainsRune(charset, r) {
+			return false
+		}
+	}
+	return true
 }
