@@ -279,6 +279,32 @@ main{flex:1;display:flex;min-height:0;min-width:0}
 #desk-view[data-s=error] .dk-ov button{display:inline-flex}
 #deskToast{position:absolute;left:50%;top:16px;transform:translateX(-50%);max-width:80%;padding:7px 14px;border-radius:var(--r-md);background:var(--toast-bg);border:1px solid rgba(var(--err-rgb),.5);color:var(--err);font-size:12px;display:none;z-index:3;box-shadow:0 8px 24px rgba(0,0,0,.4)}
 @keyframes dkSpin{to{transform:rotate(360deg)}}
+/* ===== 连接中提示（屏幕中央）+ 选项「?」气泡；全部走主题变量 ===== */
+.spin{display:inline-block;width:16px;height:16px;flex:none;border:2px solid var(--line-hi);border-top-color:var(--accent);border-radius:50%;animation:dkSpin .8s linear infinite;vertical-align:-3px}
+#connect.loading{display:inline-flex;align-items:center;gap:7px;opacity:1;cursor:progress}
+#connect.loading .spin{width:12px;height:12px;border-color:rgba(var(--accent-rgb),.35);border-top-color:var(--accent-ink)}
+#connToast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2000;display:none;max-width:min(440px,calc(100vw - 32px));min-width:240px;padding:14px 18px;border-radius:14px;background:var(--pop-solid);color:var(--text);border:1px solid var(--line-hi);box-shadow:var(--shadow),0 18px 48px rgba(0,0,0,.28);font-size:13px;line-height:1.55}
+#connToast .ct-row{display:flex;align-items:flex-start;gap:10px}
+#connToast .ct-msg{font-weight:600;overflow-wrap:anywhere}
+#connToast .ct-sub{color:var(--muted);font-size:12px;font-weight:400;margin-top:2px;overflow-wrap:anywhere}
+#connToast .ct-ico{flex:none;width:16px;height:16px;margin-top:2px;display:none;font-weight:700;text-align:center;line-height:16px}
+#connToast .ct-act{display:none;justify-content:flex-end;gap:8px;margin-top:12px}
+#connToast .ct-act button{height:28px;padding:0 12px;font-size:12px}
+#connToast.connecting .ct-act.c,#connToast.retry .ct-act.c,#connToast.confirm .ct-act.f{display:flex}
+#connToast.error{background:var(--toast-bg);border-color:rgba(var(--err-rgb),.55)}
+#connToast.error .ct-msg,#connToast.error .ct-ico{color:var(--err)}
+#connToast.warn{border-color:rgba(var(--warn-rgb),.6)}
+#connToast.warn .ct-msg,#connToast.warn .ct-ico{color:var(--warn)}
+#connToast.confirm{border-color:rgba(var(--warn-rgb),.6)}
+#connToast.confirm .ct-msg{color:var(--warn)}
+#connToast.error .ct-ico,#connToast.warn .ct-ico,#connToast.confirm .ct-ico{display:block}
+#connToast.error .spin,#connToast.warn .spin,#connToast.confirm .spin{display:none}
+.qm{flex:none;width:16px;height:16px;min-width:16px;padding:0;margin:0 0 0 -3px;border-radius:50%;background:var(--fill);color:var(--muted);border:1px solid var(--line-hi);font-size:11px;font-weight:700;line-height:14px;text-align:center;cursor:help}
+.qm:hover,.qm.on{background:var(--fill-hover);color:var(--text);border-color:var(--accent);filter:none}
+.qm:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tip{position:fixed;z-index:3000;display:none;width:min(320px,calc(100vw - 24px));padding:10px 12px;border-radius:var(--r-md);background:var(--pop-solid);color:var(--text);border:1px solid var(--line-hi);box-shadow:var(--shadow);font-size:12px;line-height:1.6;font-weight:400}
+.tip b{color:var(--warn)}
+@media (max-width:900px){#connToast{padding:12px 14px}}
 /* 窄窗口：头部换行、工具栏紧凑，不出现横向溢出 */
 @media (max-width:1100px){.brand .bname{display:none}}
 @media (max-width:900px){
@@ -314,8 +340,8 @@ main{flex:1;display:flex;min-height:0;min-width:0}
     <div class="brand"><svg viewBox="0 0 28 28" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--brand1)"/><stop offset="1" style="stop-color:var(--brand2)"/></linearGradient></defs><rect x="1" y="1" width="26" height="26" rx="8" fill="url(#lg)" fill-opacity=".22" stroke="url(#lg)" stroke-width="1.4"/><path d="M8 10.5h12v7H8z" fill="none" stroke="url(#lg)" stroke-width="1.6" stroke-linejoin="round"/><path d="M11.5 20.5h5" stroke="url(#lg)" stroke-width="1.6" stroke-linecap="round"/></svg><span class="bname">Remote Assist</span></div>
     <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code"></div>
     <div class="hgrp"><span class="lbl">Relay</span><input class="server" id="server" placeholder="host:port"></div>
-    <label class="chk"><input type="checkbox" id="noauth"><span>NoAuth</span></label>
-    <label class="chk" title="对端是 0.0.x 旧版时才需要勾选：以 v1 兼容模式连接，会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络。对端是新版时勾选也仍走 v2。"><input type="checkbox" id="legacy"><span>兼容旧版</span></label>
+    <label class="chk"><input type="checkbox" id="noauth" aria-describedby="tipNoauth"><span>NoAuth</span></label><button type="button" class="qm" id="qmNoauth" data-tip="tipNoauth" aria-label="NoAuth 说明" aria-describedby="tipNoauth" aria-expanded="false">?</button>
+    <label class="chk"><input type="checkbox" id="legacy" aria-describedby="tipLegacy"><span>禁止降级</span></label><button type="button" class="qm" id="qmLegacy" data-tip="tipLegacy" aria-label="禁止自动降级说明" aria-describedby="tipLegacy" aria-expanded="false">?</button>
     <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop）">远程桌面</button></div>
     <button id="status" title="连接详情" disabled>未连接</button>
     <button class="sm" id="themeBtn" title="主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg></button>
@@ -339,6 +365,9 @@ main{flex:1;display:flex;min-height:0;min-width:0}
     </div>
   </main>
 </div>
+<div id="connToast" role="status" aria-live="polite" data-state=""><div class="ct-row"><span class="spin" aria-hidden="true"></span><span class="ct-ico" aria-hidden="true">!</span><div><div class="ct-msg" id="connToastMsg"></div><div class="ct-sub" id="connToastSub"></div></div></div><div class="ct-act c"><button type="button" class="sm" id="connCancel">取消连接 (Esc)</button></div><div class="ct-act f"><button type="button" class="sm" id="connLegacyNo">取消</button><button type="button" id="connLegacyOk">以兼容模式继续</button></div></div>
+<div class="tip" id="tipNoauth" role="tooltip"><b>NoAuth（免协助码）</b><br>不输入协助码直接连接。仅当被控端以 share --standalone --no-auth 启动、且网络完全可信（内网）时使用：任何能连到该中继的设备都能控制被控端。</div>
+<div class="tip" id="tipLegacy" role="tooltip"><b>禁止自动降级（高级）</b><br>默认按新版协议 v2 连接；若对端是 0.0.x 旧版，在本机/内网中继上会自动改用 v1 兼容模式重试一次（公网中继上会先询问您）。勾选后永不降级，遇到旧版对端直接报错，更安全。<br>兼容模式会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络。</div>
 <div id="conn-info"></div>
 <div id="ctxmenu"></div>
 <div id="themeMenu" role="menu" aria-label="主题"></div>
@@ -350,14 +379,17 @@ const $=s=>document.querySelector(s),status=$('#status');
 // 设不了头，只能退回 query 参数（令牌本身即凭据，跨站方拿不到，同样安全）。
 const TOKEN=new URLSearchParams(location.search).get('token')||'';
 function withToken(path){return path+(path.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN)}
+let connecting=null,protoLegacy=false;
 let connected=false,cmdHistory=[],histIdx=-1,currentFilePath='',peerVersion='',helpVersion='',peerHost='';
 let tabs=[],activeTab=null;
 const ICO={dir:'<svg viewBox="0 0 16 16"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.5 1.7H13c.7 0 1.2.5 1.2 1.2v6c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z"/></svg>',drv:'<svg viewBox="0 0 16 16"><rect x="1.8" y="8" width="12.4" height="5" rx="1.4"/><path d="M3 8l1.6-4.5c.2-.5.6-.8 1.1-.8h4.6c.5 0 .9.3 1.1.8L13 8"/><path d="M11 10.5h.01"/></svg>',fil:'<svg viewBox="0 0 16 16"><path d="M4 1.8h5.2L12.6 5.2V13c0 .7-.5 1.2-1.2 1.2H4.6c-.7 0-1.2-.5-1.2-1.2V3c0-.7.5-1.2 1.2-1.2z"/><path d="M9 1.9v3.4h3.4"/></svg>'};
 function mkIco(k){const e=document.createElement('span');e.className='ico '+k;e.innerHTML=ICO[k];return e}
 
-function setStatus(ok,text){connected=ok;status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');status.disabled=!ok;if(!ok)$('#conn-info').style.display='none';renderConnBtn()}
+function setStatus(ok,text){connected=ok;if(ok&&protoLegacy)text+=' · v1 兼容';status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');status.disabled=!ok;if(!ok)$('#conn-info').style.display='none';renderConnBtn()}
 // 连接与断开共用一个按钮：连上了它就是「断开」，没连就是「连接」。
-function renderConnBtn(){const b=$('#connect');if(!b)return;b.textContent=connected?'断开':'连接';b.className=connected?'sec':''}
+function renderConnBtn(){const b=$('#connect');if(!b)return;
+  if(connecting){b.disabled=true;b.className='loading';b.innerHTML='<span class="spin" aria-hidden="true"></span>连接中…';b.setAttribute('aria-busy','true');return}
+  b.removeAttribute('aria-busy');b.disabled=false;b.textContent=connected?'断开':'连接';b.className=connected?'sec':''}
 
 const es=new EventSource(withToken('/api/events')); // EventSource 设不了自定义头，只能走 query
 // 后端广播的全是具名事件（event: xxx，不带 data 字段），而 onmessage 只对带 data 的帧
@@ -460,19 +492,79 @@ document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
   na.addEventListener('change',syncNA);syncNA();
 })();
 
-async function doConnect(){
-  const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked,legacy=$('#legacy').checked;
+// ========== 连接流程：中央提示 + 取消 + 旧版自动降级 ==========
+// 状态机：idle → connecting →（对端是旧版则 retry，由后端 SSE 通知）→ 成功 / 失败 / 需确认降级。
+// connecting 非空期间连接按钮禁用，重复点击、回车都不会并发发起第二次。
+let toastTimer=0;
+const CONNECT_ABORT_MS=50000; // 略长于后端总时限（45s），让后端先给出归一化原因
+function connToastHide(){clearTimeout(toastTimer);const t=$('#connToast');t.style.display='none';t.className='';t.setAttribute('data-state','')}
+function connToastShow(state,msg,sub,autoHideMs){
+  clearTimeout(toastTimer);
+  const t=$('#connToast');t.className=state;t.setAttribute('data-state',state);
+  $('#connToastMsg').textContent=msg;$('#connToastSub').textContent=sub||'';
+  $('#connToastSub').style.display=sub?'block':'none';
+  t.querySelector('.ct-ico').textContent=state==='error'?'×':'!';
+  t.style.display='block';
+  if(autoHideMs)toastTimer=setTimeout(connToastHide,autoHideMs);
+}
+function connectLabel(server,code){
+  if(server)return server;
+  const at=String(code||'').indexOf('@');
+  return at>=0?code.slice(at+1).trim():'被协助端';
+}
+function cancelConnect(){if(connecting)connecting.ctrl.abort()}
+$('#connCancel').onclick=cancelConnect;
+$('#connLegacyNo').onclick=()=>{connToastHide();setStatus(false,'未连接')};
+$('#connLegacyOk').onclick=()=>{connToastHide();doConnect(true)};
+es.addEventListener('connect-fallback',()=>{if(connecting)connToastShow('retry','对端是旧版，正在以兼容模式重试…','仅限可信网络；兼容模式安全性较低')});
+
+async function doConnect(allowLegacy){
+  if(connecting)return;
+  const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked,noDown=$('#legacy').checked;
+  const label=connectLabel(server,code);
+  const ctrl=new AbortController();connecting={ctrl};
   resetRemoteState(); // 可能换了一台远端，旧缓存一律作废
   setStatus(false,'连接中...');
-  const r=await api('/api/connect',{code,server,no_auth:noauth,min_proto:legacy?'1':''});
+  connToastShow('connecting','正在连接 '+label+'…','按 Esc 或点「取消连接」可中止');
+  const timer=setTimeout(()=>ctrl.abort(),CONNECT_ABORT_MS);
+  let r;
+  try{
+    const resp=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},
+      body:JSON.stringify({code,server,no_auth:noauth,no_downgrade:noDown,allow_legacy:!!allowLegacy}),signal:ctrl.signal});
+    r=await resp.json();
+  }catch(e){r=ctrl.signal.aborted?{ok:false,code:'canceled'}:{ok:false,code:'other',reason:'请求失败',error:String(e)}}
+  clearTimeout(timer);connecting=null;renderConnBtn();
   if(r.ok){
-    const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();window.PtyTerm&&PtyTerm.connected();openTerm();termOnConnected();
-    if(d.warning)termLog('<span class="err">[警告] '+esc(d.warning)+'</span>');
-  }else{
-    setStatus(false,'失败');termLog('<span class="err">'+esc(r.error)+'</span>');
-    // 报错里的指引是写给 AI 的（connect 的 min_proto 参数），GUI 用户对应的是「兼容旧版」复选框。
-    if(!legacy&&String(r.error).includes('min_proto="1"'))termLog('<span class="err">对端是旧版本：如确认处于可信网络，可勾选「兼容旧版」后重新连接；更稳妥的做法是升级对端。</span>');
+    const d=parseMCP(r.result);
+    protoLegacy=String(d.proto_version||'')==='1';
+    setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();window.PtyTerm&&PtyTerm.connected();openTerm();termOnConnected();
+    if(protoLegacy||r.fallback){
+      const m='对端是旧版，已用兼容模式连接：安全性较低，仅限可信网络';
+      connToastShow('warn',m,'协议版本 v1（AAD 绑定、强制密文参数、抗重放已关闭）',9000);
+      termLog('<span class="err">[警告] '+esc(m)+'</span>');
+    }else{
+      connToastHide();
+      if(d.warning)termLog('<span class="err">[警告] '+esc(d.warning)+'</span>');
+    }
+    return;
   }
+  if(r.code==='canceled'){
+    connToastHide();setStatus(false,'未连接');termLog('<span class="meta">已取消连接</span>');return;
+  }
+  setStatus(false,'失败');
+  if(r.error)termLog('<span class="err">'+esc(r.error)+'</span>');
+  if(r.code==='peer_legacy'&&r.needs_confirm){
+    // 公网中继上不自动降级：中继是不可信第三方，可伪造「旧版」应答诱导降级，必须由用户确认
+    connToastShow('confirm','对端似乎是旧版，需用户确认才能用兼容模式连接',
+      '当前中继 '+label+' 不在内网/本机。兼容模式会关闭 AAD 绑定与抗重放，中继可能借此诱导降级或篡改。仅当确认对端确为旧版、且信任该中继时继续。');
+    return;
+  }
+  let msg=r.reason||'连接失败';
+  let sub='';
+  if(r.code==='peer_legacy')sub='已勾选「禁止降级」；取消勾选后可自动以兼容模式连接，或升级对端。';
+  else if(r.code==='bad_code')sub='请核对协助码，并确认被协助端已启动 share。';
+  else if(r.code==='timeout'||r.code==='unreachable'||r.code==='refused')sub='请检查中继地址「'+label+'」与网络。';
+  connToastShow('error',msg,sub,6000);
 }
 async function doDisconnect(){
   await api('/api/disconnect',{});
@@ -487,14 +579,56 @@ async function doDisconnect(){
 function resetRemoteState(){
   driveLoadGeneration++;
   for(const k in treeCache)delete treeCache[k];
-  remoteOS='';
+  remoteOS='';protoLegacy=false;
   $('#treePath').value='';
   peerVersion='';helpVersion='';peerHost='';$('#upgrade-notice').style.display='none';$('#upgrade-notice').className='';
 }
 $('#connect').onclick=async()=>{
+  if(connecting)return;
   const b=$('#connect');b.disabled=true;
-  try{connected?await doDisconnect():await doConnect()}finally{b.disabled=false;renderConnBtn()}
+  try{connected?await doDisconnect():await doConnect(false)}finally{if(!connecting){b.disabled=false;renderConnBtn()}}
 };
+
+// ========== 「?」气泡说明：悬停/聚焦显示，点击固定（窄屏/触屏靠点击开合），Esc 关闭 ==========
+(function(){
+  const btns=Array.from(document.querySelectorAll('.qm'));
+  function tipOf(b){return document.getElementById(b.getAttribute('data-tip'))}
+  function place(b){
+    const t=tipOf(b),r=b.getBoundingClientRect();
+    t.style.display='block';
+    const w=t.offsetWidth,vw=document.documentElement.clientWidth;
+    let x=Math.min(Math.max(8,r.left+r.width/2-w/2),vw-w-8);
+    let y=r.bottom+8;
+    if(y+t.offsetHeight>window.innerHeight-8)y=Math.max(8,r.top-t.offsetHeight-8);
+    t.style.left=x+'px';t.style.top=y+'px';
+  }
+  function show(b){place(b);b.setAttribute('aria-expanded','true')}
+  function hide(b){tipOf(b).style.display='none';b.classList.remove('on');b.setAttribute('aria-expanded','false');b._pin=false}
+  function hideAll(except){btns.forEach(x=>{if(x!==except)hide(x)})}
+  btns.forEach(b=>{
+    b.addEventListener('mouseenter',()=>{hideAll(b);show(b)});
+    b.addEventListener('mouseleave',()=>{if(!b._pin)hide(b)});
+    b.addEventListener('focus',()=>{hideAll(b);show(b)});
+    b.addEventListener('blur',()=>{if(!b._pin)hide(b)});
+    b.addEventListener('click',e=>{
+      e.preventDefault();e.stopPropagation();
+      if(b._pin){hide(b);return}
+      hideAll(b);show(b);b._pin=true;b.classList.add('on');
+    });
+  });
+  document.addEventListener('click',()=>hideAll(null));
+  window.addEventListener('resize',()=>hideAll(null));
+  document.addEventListener('keydown',e=>{
+    if(e.key!=='Escape')return;
+    if(btns.some(b=>tipOf(b).style.display==='block')){hideAll(null);e._tipClosed=true}
+  },true);
+})();
+// Esc 取消连接 / 关掉连接提示（气泡优先，见上方捕获阶段处理）
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape'||e._tipClosed)return;
+  if(connecting){e.preventDefault();cancelConnect();return}
+  if($('#connToast').style.display==='block'&&$('#connToast').className!=='confirm')connToastHide();
+});
 
 function versionParts(s){
   const m=String(s||'').match(/(?:^|\s)v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?/i);
@@ -537,7 +671,6 @@ $('#upgrade-file').onchange=async()=>{
     const newVersion=r.peer_version||r.new_version||peerVersion;
     btn.style.display='none';resetRemoteState();$('#upgrade-notice').style.display='flex';$('#upgrade-notice').className='success';
     peerVersion=newVersion;$('#upgrade-msg').textContent='share 已升级到 '+newVersion+(r.warning?'；'+r.warning:'');loadDrives();
-    $('#legacy').checked=false; // 对端已是当前版本，不必再降级；留着勾选，下次手动连另一台 0.0.x 会不经拦截直接降级
   }catch(e){$('#upgrade-msg').textContent='升级请求失败: '+String(e);btn.disabled=false}
   finally{connBtn.disabled=false;renderConnBtn()}
 };
