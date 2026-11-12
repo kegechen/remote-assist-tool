@@ -11,6 +11,7 @@ require (
 
 require (
 	github.com/akavel/rsrc v0.10.2 // indirect
+	github.com/ebitengine/purego v0.10.2
 	github.com/jezek/xgb v1.3.1 // indirect
 	golang.org/x/net v0.43.0 // indirect
 )
