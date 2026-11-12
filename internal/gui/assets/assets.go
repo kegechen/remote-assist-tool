@@ -24,6 +24,14 @@ html,body{height:100%;font-family:Consolas,"Microsoft YaHei",monospace;font-size
 header{padding:5px 12px;background:#181825;border-bottom:1px solid #313244;display:flex;gap:6px;align-items:center}
 header input{background:#313244;border:1px solid #45475a;color:#cdd6f4;padding:3px 8px;border-radius:3px}
 header input.code{width:130px}
+.codebox{display:inline-flex;align-items:center;gap:3px;background:#313244;border:1px solid #45475a;border-radius:6px;padding:0 6px;height:26px;transition:border-color .15s,box-shadow .15s,opacity .15s}
+.codebox:focus-within{border-color:#89b4fa;box-shadow:0 0 0 2px rgba(137,180,250,.25)}
+.codebox i{color:#6c7086;font-style:normal;user-select:none}
+header .codebox input.cseg{width:5.2ch;background:transparent;border:0;outline:0;padding:0;text-align:center;color:#cdd6f4;font:inherit;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+header .codebox input.cseg::placeholder{color:#585b70;letter-spacing:.08em}
+.codebox.off,.codebox.off:focus-within{opacity:.45;border-color:#45475a;box-shadow:none}
+.codebox.off input.cseg{cursor:not-allowed}
+@media (prefers-reduced-motion:reduce){.codebox{transition:none}}
 header input.server{width:160px}
 button{background:#89b4fa;color:#11111b;border:none;padding:3px 10px;border-radius:3px;cursor:pointer;font-weight:bold;font-size:12px}
 button:hover{background:#74a0f0}
@@ -173,7 +181,7 @@ main{flex:1;display:flex;min-height:0}
 <div id="app">
   <header>
     <span class="meta">Code:</span>
-    <input class="code" id="code" placeholder="ABCD-EFGHIJ">
+    <span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code">
     <span class="meta">Relay:</span>
     <input class="server" id="server" placeholder="host:port">
     <label class="meta"><input type="checkbox" id="noauth"> NoAuth</label>
@@ -248,6 +256,54 @@ async function showConnectionInfo(){
 status.onclick=e=>{e.stopPropagation();const panel=$('#conn-info');if(panel.style.display==='block')panel.style.display='none';else showConnectionInfo()};
 $('#conn-info').onclick=e=>e.stopPropagation();
 document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
+
+// ========== 协助码分段输入 ==========
+// 三格各 4 位；隐藏的 #code 始终是数据源（12 位无分隔大写，或粘贴的 code@host:port 原串）。
+(function(){
+  const segs=Array.from(document.querySelectorAll('#codeBox .cseg')),hid=$('#code');
+  const clean=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  let raw=''; // 非空表示 #code 保留粘贴的原串（含 @host:port）
+  function sync(){hid.value=raw||segs.map(s=>s.value).join('')}
+  // 从第 start 格开始铺满字符，返回应聚焦的格序号与光标位置
+  function fill(str,start){
+    let i=start,pos=0;
+    for(let k=start;k<segs.length;k++)segs[k].value='';
+    while(str&&i<segs.length){const part=str.slice(0,4);segs[i].value=part;str=str.slice(4);pos=part.length;if(str&&i<segs.length-1)i++;else break}
+    return{i,pos};
+  }
+  function focusAt(i,pos){const s=segs[i];s.focus();const p=pos==null?s.value.length:pos;s.setSelectionRange(p,p)}
+  segs.forEach((s,idx)=>{
+    s.addEventListener('input',()=>{
+      raw='';
+      const v=clean(s.value);
+      if(v.length>4){const r=fill(v,idx);focusAt(r.i,r.pos)}
+      else{s.value=v;if(v.length===4&&idx<2&&s.selectionStart>=4)focusAt(idx+1,0)}
+      sync();
+    });
+    s.addEventListener('keydown',e=>{
+      if(e.isComposing)return;
+      if(e.key==='Enter'){e.preventDefault();if(!connected)$('#connect').click();return}
+      if(e.key==='-'||e.key==='_'||e.key===' '){e.preventDefault();if(s.value.length>0&&idx<2)focusAt(idx+1,0);return} // 空格里的分隔符忽略：敲满 4 位已自动跳格，再按 - 不能多跳一格
+      const atStart=s.selectionStart===0&&s.selectionEnd===0,atEnd=s.selectionStart===s.value.length&&s.selectionEnd===s.value.length;
+      if(e.key==='Backspace'&&atStart&&idx>0){e.preventDefault();const p=segs[idx-1];p.value=p.value.slice(0,-1);raw='';sync();focusAt(idx-1);return}
+      if(e.key==='ArrowLeft'&&atStart&&idx>0){e.preventDefault();focusAt(idx-1);return}
+      if(e.key==='ArrowRight'&&atEnd&&idx<2){e.preventDefault();focusAt(idx+1,0)}
+    });
+    s.addEventListener('paste',e=>{
+      e.preventDefault();
+      const t=(e.clipboardData||window.clipboardData).getData('text').trim();
+      const at=t.indexOf('@'),body=clean(at>=0?t.slice(0,at):t);
+      const r=fill(body,body.length>=12?0:idx);
+      raw=at>=0?t:'';
+      focusAt(r.i,r.pos);sync();
+    });
+  });
+  // 外部直接改 #code.value 后可派发 input 事件让三格跟随
+  hid.addEventListener('input',()=>{const t=hid.value;const at=t.indexOf('@');fill(clean(at>=0?t.slice(0,at):t),0);raw=at>=0?t:''});
+  const na=$('#noauth');
+  function syncNA(){const off=na.checked;segs.forEach(s=>s.disabled=off);$('#codeBox').classList.toggle('off',off)}
+  na.addEventListener('change',syncNA);syncNA();
+})();
 
 async function doConnect(){
   const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked,legacy=$('#legacy').checked;
