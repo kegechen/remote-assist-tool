@@ -739,6 +739,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		go s.guardLoop()
 	}
 	s.mu.Unlock()
+	go s.watchPeer(context.Background(), mc) // 对端静默消失时主动发现并触发重连
 
 	s.broadcast("event: connected\n")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": json.RawMessage(out.Raw), "fallback": out.FellBack})
@@ -884,6 +885,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool, minP
 	s.connected = true
 	s.recordConnectMetadata(res, code, server, noAuth, minProto)
 	s.mu.Unlock()
+	go s.watchPeer(context.Background(), client)
 	s.broadcast("event: connected\n")
 	return reconnectOK
 }
