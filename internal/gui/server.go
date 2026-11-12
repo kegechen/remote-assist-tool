@@ -26,6 +26,9 @@ import (
 	"github.com/remote-assist/tool/internal/gui/assets"
 )
 
+// connectTotalTimeout 一次连接（含最多一次降级重试）的总时限。
+const connectTotalTimeout = 45 * time.Second
+
 // Server 是 GUI 的后端：托管前端静态页 + 通过 JSON 把请求转发给 MCP 子进程。
 type Server struct {
 	binPath       string
@@ -45,7 +48,8 @@ type Server struct {
 	lastCode     string
 	lastServer   string
 	lastNoAuth   bool
-	lastMinProto string // 勾选「兼容旧版」时为 "1"；自动重连必须沿用，否则断线重连会退回默认值被拒
+	connectCancel context.CancelFunc // 正在建立中的 /api/connect，被新连接/取消顶替时调用
+	lastMinProto string // 经降级/用户确认以 v1 连上时为 "1"；自动重连必须沿用，否则断线重连会退回默认值被拒
 	protoVersion string
 	peerVersion  string
 	helpVersion  string
@@ -603,8 +607,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Code   string `json:"code"`
 		Server string `json:"server"`
 		NoAuth bool   `json:"no_auth"`
-		// MinProto 对应「兼容旧版」复选框，透传给 connect 工具的 min_proto；取值由 help 校验。
+		// MinProto 显式指定 connect 的 min_proto（旧接口，单次直连不自动重试）；取值由 help 校验。
 		MinProto string `json:"min_proto"`
+		// AllowLegacy 用户已确认以兼容模式（v1）连接；NoDowngrade 为「禁止自动降级」高级选项。
+		AllowLegacy bool `json:"allow_legacy"`
+		NoDowngrade bool `json:"no_downgrade"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -616,14 +623,30 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// 关掉旧的子进程（如果有的话），再起新的。同时自增 connGen：用户发起了新的连接意图，
 	// 任何正在退避/连接中的过期自动重连都应就此作废，不得回头覆盖这次连接。
+	// 同理上一次尚在建立中的 /api/connect 也要取消（重复点击不并发）。
+	ctx, cancel := context.WithTimeout(r.Context(), connectTotalTimeout)
+	defer cancel()
 	s.mu.Lock()
 	if s.client != nil {
 		s.client.Close()
 		s.client = nil
 		s.connected = false
 	}
+	if s.connectCancel != nil {
+		s.connectCancel()
+	}
 	s.connGen++
+	gen := s.connGen
+	s.connectCancel = cancel
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		// 只清自己登记的那一份，不碰后来者的
+		if s.connGen == gen {
+			s.connectCancel = nil
+		}
+		s.mu.Unlock()
+	}()
 
 	// bootstrap 模式：子进程进入等待 connect 工具的状态，不预先传 --code / --no-auth，
 	// 否则会走 NewHelpModeMCP（无 connect 工具）。server/code/no_auth 全部通过 connect
@@ -635,38 +658,59 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		spawnArgs = append(spawnArgs, "--server", s.defaultServer)
 	}
 
-	client, err := NewMCPClient(s.binPath, spawnArgs)
+	mc, err := NewMCPClient(s.binPath, spawnArgs)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if err := client.Initialize(ctx); err != nil {
-		client.Close()
+	// 取消/被新连接顶替：必须杀掉子进程，否则它还在后台把连接建起来，成为没人管的「幽灵连接」。
+	superseded := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return ctx.Err() != nil || s.connGen != gen
+	}
+	if err := mc.Initialize(ctx); err != nil {
+		mc.Close()
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "initialize failed: " + err.Error()})
 		return
 	}
 
-	// connect 工具建立隧道
-	res, err := client.CallTool(ctx, "connect", connectToolArgs(req.Code, req.Server, req.NoAuth, req.MinProto))
-	if err != nil {
+	// connect 工具建立隧道；对端是旧版时按策略自动降级重试一次
+	policy := fallbackPolicy{
+		MinProto:    req.MinProto,
+		AllowLegacy: req.AllowLegacy,
+		NoDowngrade: req.NoDowngrade,
+		LAN:         isLANRelay(req.Server, s.defaultServer),
+	}
+	call := func(c context.Context, minProto string) (json.RawMessage, error) {
+		return mc.CallTool(c, "connect", connectToolArgs(req.Code, req.Server, req.NoAuth, minProto))
+	}
+	out, err := connectWithFallback(ctx, call, policy, func() { s.broadcast("event: connect-fallback\ndata: 1\n") })
+	if err != nil || superseded() {
+		if superseded() {
+			mc.Close()
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "已取消", "code": reasonCanceled, "reason": "已取消"})
+			return
+		}
 		// connect 失败：不杀子进程（MCP server 仍存活在 bootstrap 状态），
 		// 用户修正参数后可再次点击连接（下次进来会先关掉这个旧进程再起新的）。
 		s.mu.Lock()
-		s.client = client
+		s.client = mc
 		s.connected = false
 		s.mu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "connect failed: " + err.Error()})
+		code, reason := classifyConnectError(err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "connect failed: " + err.Error(), "code": code, "reason": reason,
+			"needs_confirm": out.NeedsAsk, "attempts": out.Attempts, "server": req.Server,
+		})
 		return
 	}
 
 	s.mu.Lock()
-	s.client = client
+	s.client = mc
 	s.connected = true
-	// 缓存连接参数，供子进程意外退出时自动重连
-	s.recordConnectMetadata(res, req.Code, req.Server, req.NoAuth, req.MinProto)
+	// 缓存连接参数，供子进程意外退出时自动重连；降级后沿用 min_proto=1，避免每次重连先失败一次
+	s.recordConnectMetadata(out.Raw, req.Code, req.Server, req.NoAuth, out.MinProto)
 	if !s.guardStarted {
 		s.guardStarted = true
 		go s.guardLoop()
@@ -674,7 +718,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	s.broadcast("event: connected\n")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": json.RawMessage(res)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": json.RawMessage(out.Raw), "fallback": out.FellBack})
 }
 
 func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
