@@ -54,10 +54,14 @@ func normalizeCode(code string) string {
 	}, code)
 }
 
-// FormatCode formats a code for display
+// FormatCode 把协助码每 4 位用 - 分组显示（XXXX-XXXX-XXXX）；输入时 - 可有可无，见 normalizeCode。
 func FormatCode(code string) string {
-	if len(code) <= 4 {
-		return code
+	var sb strings.Builder
+	for i, r := range code {
+		if i > 0 && i%4 == 0 {
+			sb.WriteByte('-')
+		}
+		sb.WriteRune(r)
 	}
-	return code[:4] + "-" + code[4:]
+	return sb.String()
 }

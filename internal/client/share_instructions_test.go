@@ -17,7 +17,7 @@ func TestFormatShareInstructions(t *testing.T) {
 	got := formatShareInstructions("ABCD123456", "Windows 11 amd64 / host-01", cfg, expiresAt)
 	wants := []string{
 		"请通过 remote-debug MCP 连接并协助排查此设备",
-		"协助码: ABCD-123456",
+		"协助码: ABCD-1234-56",
 		"本机标识: Windows 11 amd64 / host-01",
 		"中转服务: 23.95.78.14:8443 (TLS，跳过证书校验)",
 		"有效期至: 2026-08-18 15:21:15",

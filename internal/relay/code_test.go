@@ -74,7 +74,8 @@ func TestFormatCode(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"ABCDEFGHIJ", "ABCD-EFGHIJ"},
+		{"ABCDEFGHJKMN", "ABCD-EFGH-JKMN"},
+		{"ABCDEFGHIJ", "ABCD-EFGH-IJ"},
 		{"ABCD", "ABCD"},
 		{"", ""},
 	}
@@ -113,6 +114,15 @@ func TestCodeUppercaseAndDigitsOnly(t *testing.T) {
 			if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
 				t.Fatalf("协助码含非大写字母/数字字符 %q: %q", c, code)
 			}
+		}
+	}
+}
+
+// 输入协助码时 - / 空格 / _ 都不是必须的，带不带结果一致。
+func TestNormalizeCodeDashOptional(t *testing.T) {
+	for _, in := range []string{"ABCDEFGHJKMN", "ABCD-EFGH-JKMN", "abcd"[:0] + "ABCD EFGH JKMN", "ABCD_EFGH_JKMN", "ABCD-EFGHJKMN"} {
+		if got := normalizeCode(in); got != "ABCDEFGHJKMN" {
+			t.Errorf("normalizeCode(%q)=%q", in, got)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -1076,11 +1077,16 @@ func (s *ShareMode) GetExpiresAt() time.Time {
 	return s.expiresAt
 }
 
+// formatCode 把协助码每 4 位用 - 分组显示（XXXX-XXXX-XXXX）。
 func formatCode(code string) string {
-	if len(code) < 4 {
-		return code
+	var sb strings.Builder
+	for i, r := range code {
+		if i > 0 && i%4 == 0 {
+			sb.WriteByte('-')
+		}
+		sb.WriteRune(r)
 	}
-	return code[:4] + "-" + code[4:]
+	return sb.String()
 }
 
 // daemonSink share 端把 Tool 消息转给 agent.Daemon 的契约
