@@ -142,8 +142,7 @@ main{flex:1;display:flex;min-height:0}
 #deskCtl:checked{background:#89b4fa}
 #deskCtl:checked::after{transform:translateX(12px);background:#11111b}
 #desk-view{position:relative;flex:1;min-height:0;overflow:auto;background:#11111b;display:flex;padding:14px}
-#deskCv{display:block;margin:auto;max-width:100%;max-height:100%;border-radius:8px;background:#000;box-shadow:0 0 0 1px #313244,0 8px 28px rgba(0,0,0,.5);cursor:default;transition:box-shadow .15s}
-#desk-view.actual #deskCv{max-width:none;max-height:none}
+#deskCv{display:block;margin:auto;flex:none;border-radius:8px;background:#000;box-shadow:0 0 0 1px #313244,0 8px 28px rgba(0,0,0,.5);cursor:default;transition:box-shadow .15s}
 #desk-view.ro #deskCv{cursor:default}
 #desk-view:focus-within #deskCv{box-shadow:0 0 0 2px #89b4fa,0 0 18px rgba(137,180,250,.25),0 8px 28px rgba(0,0,0,.5)}
 #desk-view.ro:focus-within #deskCv{box-shadow:0 0 0 2px #585b70,0 8px 28px rgba(0,0,0,.5)}
@@ -205,7 +204,7 @@ main{flex:1;display:flex;min-height:0}
         <div id="term-box"><div id="term-output"><div id="term-log"></div><div class="input-row"><span class="prompt">$</span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="命令输入"></div></div></div>
         <div id="search-box"><div class="sp"><label>正则:</label><input id="grepPattern" placeholder="TODO"><label>目录:</label><input id="grepRoot" placeholder="C:\\"><button class="sm" id="grepRun">搜索</button></div><div id="search-output"></div></div>
         <div id="proc-box"><div id="proc-output"></div></div>
-        <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-lbl">宽度</span><select id="deskW" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="2">2</option><option value="5" selected>5</option><option value="10">10</option><option value="15">15</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="40">低</option><option value="60" selected>中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div class="dk-chip" id="deskStat"></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
+        <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-lbl">宽度</span><select id="deskW" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="0" selected>自动</option><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="30">30</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="0" selected>自动</option><option value="40">低</option><option value="60">中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div class="dk-chip" id="deskStat"></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
         <div id="file-box"><div id="file-hdr"><span class="path" id="fpath"></span><span class="info" id="finfo"></span><button class="sm image-tool" id="fZoomOut" title="缩小" aria-label="缩小">−</button><button class="sm image-tool" id="fZoomFit" title="适合窗口">适配</button><button class="sm image-tool" id="fZoomIn" title="放大" aria-label="放大">+</button><button class="sm image-tool" id="fDownload" title="另存为" aria-label="另存为">⇩</button><button class="sm" id="fEdit" style="display:none">编辑</button><button class="sm" id="fSave" style="display:none;background:#a6e3a1">保存</button><button class="sm" id="fCancel" style="display:none">取消</button></div><div id="file-content"></div><div id="file-editor"><textarea id="fEditor"></textarea></div></div>
       </div>
     </div>
@@ -239,7 +238,7 @@ es.addEventListener('lost',()=>{setStatus(false,'丢失');termLog('<span class="
 es.addEventListener('upgrade-progress',e=>{const n=$('#upgrade-notice');n.style.display='flex';n.className='';$('#upgrade-msg').textContent=e.data});
 es.onerror=()=>{};
 
-async function api(path,body){const ctrl=new AbortController();const t=setTimeout(()=>ctrl.abort(),30000);try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},body:JSON.stringify(body||{}),signal:ctrl.signal});return await r.json()}catch(e){return{ok:false,error:String(e)}}finally{clearTimeout(t)}}
+async function api(path,body,sig){const ctrl=new AbortController();if(sig){if(sig.aborted)ctrl.abort();else sig.addEventListener('abort',()=>ctrl.abort(),{once:true})}const t=setTimeout(()=>ctrl.abort(),30000);try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},body:JSON.stringify(body||{}),signal:ctrl.signal});return await r.json()}catch(e){return{ok:false,error:String(e)}}finally{clearTimeout(t)}}
 
 function formatConnectedTime(seconds){
   seconds=Math.max(0,Number(seconds)||0);if(seconds<60)return seconds+' 秒';if(seconds<3600)return Math.floor(seconds/60)+' 分钟';return Math.floor(seconds/3600)+' 小时 '+Math.floor(seconds%3600/60)+' 分钟';
@@ -403,6 +402,7 @@ function activateTab(id){
   const t=tabs.find(x=>x.id===id);
   if(!t)return;
   activeTab=id;
+  if(id!=='desk')deskAbort();
   BOXES.forEach(x=>$('#'+x).style.display='none');
   $('#'+t.boxId).style.display='flex';
   renderTabs();
@@ -952,35 +952,85 @@ function deskSyncDisplays(n){
   for(let i=0;i<n;i++){const o=document.createElement('option');o.value=i;o.textContent='显示器 '+(i+1)+(i===0?'（主）':'');sel.appendChild(o)}
   if(cur&&+cur<n)sel.value=cur;
 }
+// 取一帧：返回 {r,t0,t1}，由调用方按顺序 await，保证画面按序绘制。
+function deskFetch(args,sig){const t0=performance.now();return api('/api/call',{tool:'screen_capture',args},sig).then(r=>({r,t0,t1:performance.now()}))}
+// 自适应策略（帧率选“自动”时）：
+//  - 上限 30 fps；请求是「请求-应答」，帧率受往返时延限制，所以同时保持 2 个请求在途（流水线），
+//    用网络空闲时间换帧率；
+//  - 用帧时延的指数滑动平均(ema)判断链路好坏：>400ms 降画质到“低”，>900ms 再把宽度压到 800 并收成单请求；
+//    恢复到 <150ms 后再升回用户选择的档位（留迟滞，避免来回抖动）。
 async function deskStart(forceLoading){
   if(desk.running)return;
   if(!connected){deskState('idle','尚未连接对端：请先在顶部输入协助码并点击「连接」');return}
   desk.running=true;const my=++desk.loopId;desk.frames=0;desk.bytes=0;desk.t0=performance.now();
   if(forceLoading||$('#desk-view').dataset.s!=='live')deskState('loading','正在获取画面…');
   const cv=$('#deskCv'),ctx=cv.getContext('2d');
+  const ac=new AbortController();desk.ac=ac;
+  let ema=0,level=0,lastStart=0,inflight=[],fail=null;
+  const params=()=>{
+    const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
+    let w=wSel,q=qSel;
+    // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35），很慢时再把宽度压到 800
+    if(!qSel){q=[70,50,35][level];if(level>=2)w=Math.min(w,800)}
+    return{display:+$('#deskDisp').value||0,max_width:w,quality:q};
+  };
+  const issue=()=>{lastStart=performance.now();inflight.push(deskFetch(params(),ac.signal))};
   while(my===desk.loopId&&connected&&activeTab==='desk'){
-    const t1=performance.now();
-    const r=await api('/api/call',{tool:'screen_capture',args:{display:+$('#deskDisp').value||0,max_width:+$('#deskW').value,quality:+$('#deskQ').value}});
+    const fpsSel=+$('#deskFps').value,auto=!fpsSel,anyAuto=auto||!+$('#deskQ').value;
+    const interval=1000/(auto?30:fpsSel);
+    const depth=auto&&level<2?2:1; // 仅帧率“自动”时才用流水线
+    // 补足在途请求；相邻两次请求至少间隔 interval/depth，避免一次性打出两个相同的帧
+    while(inflight.length<depth){
+      const gap=interval/depth-(performance.now()-lastStart);
+      if(gap>0&&inflight.length>0)break;
+      if(gap>0)await new Promise(res=>setTimeout(res,gap));
+      if(my!==desk.loopId)break;
+      issue();
+    }
+    if(!inflight.length)break;
+    const {r,t0,t1}=await inflight.shift();
     if(my!==desk.loopId)break;
-    const rtt=Math.round(performance.now()-t1);
-    if(!r.ok){deskState('error',deskErrText(r.error));break}
-    let d;try{d=parseMCP(r.result)}catch(e){deskState('error','解析帧失败');break}
-    if(!d||!d.data){deskState('error',deskErrText(JSON.stringify(d||{})));break}
+    const rtt=Math.round(t1-t0);
+    if(!r.ok){fail=deskErrText(r.error);break}
+    let d;try{d=parseMCP(r.result)}catch(e){fail='解析帧失败';break}
+    if(!d||!d.data){fail=deskErrText(JSON.stringify(d||{}));break}
+    if(anyAuto){
+      ema=ema?ema*0.8+rtt*0.2:rtt;
+      if(ema>900)level=2;else if(ema>400)level=Math.max(level,1);else if(ema<150)level=0;
+      else if(ema<300&&level===2)level=1;
+    }else{ema=rtt;level=0}
     try{
       const bm=await createImageBitmap(deskBytesToBlob(d.data));
       if(cv.width!==d.width||cv.height!==d.height){cv.width=d.width;cv.height=d.height}
+      // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
+      if(d.screen_width&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
       ctx.drawImage(bm,0,0);if(bm.close)bm.close();
-    }catch(e){deskState('error','绘制帧失败: '+e);break}
+    }catch(e){fail='绘制帧失败: '+e;break}
     if($('#desk-view').dataset.s!=='live')deskState('live','');
     $('#deskPillTxt').textContent='已连接 · '+rtt+' ms';
     deskSyncDisplays(d.displays||1);
     desk.frames++;desk.bytes+=d.data.length*0.75;
     const sec=(performance.now()-desk.t0)/1000;
-    if(desk.frames%5===0&&sec>0){const st=(desk.frames/sec).toFixed(1)+' fps · '+(desk.bytes/desk.frames/1024).toFixed(0)+' KB/帧 · '+d.screen_width+'x'+d.screen_height;$('#deskStat').textContent=st;$('#deskPill').title=st}
-    const wait=1000/(+$('#deskFps').value||5)-(performance.now()-t1);
-    if(wait>0)await new Promise(res=>setTimeout(res,wait));
+    if(desk.frames%5===0&&sec>0){
+      const st=(desk.frames/sec).toFixed(1)+' fps · '+(desk.bytes/desk.frames/1024).toFixed(0)+' KB/帧 · '+d.screen_width+'x'+d.screen_height+(anyAuto&&level?' · 网络较慢，已自动降质':'');
+      $('#deskStat').textContent=st;$('#deskPill').title=st;
+      if(desk.frames>=60){desk.frames=0;desk.bytes=0;desk.t0=performance.now()} // 滚动窗口，反映最近的帧率
+    }
   }
-  if(my===desk.loopId){desk.running=false;if(!connected)deskState('idle','连接已断开，请重新连接对端')}
+  ac.abort();
+  if(desk.ac===ac)desk.ac=null;
+  if(my===desk.loopId){desk.running=false;if(fail)deskState('error',fail);else if(!connected)deskState('idle','连接已断开，请重新连接对端')}
+}
+function deskAbort(){if(desk.ac){desk.ac.abort();desk.ac=null;desk.loopId++;desk.running=false}}
+// 画面显示尺寸：适应窗口=按屏幕宽高比缩放到视口内；原始大小=1 屏幕像素对应 1 CSS 像素（可滚动）
+function deskLayout(){
+  const view=$('#desk-view'),cv=$('#deskCv');
+  if(!desk.sw||!desk.sh||!view)return;
+  if(view.classList.contains('actual')){cv.style.width=desk.sw+'px';cv.style.height=desk.sh+'px';return}
+  const cs=getComputedStyle(view),aw=view.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight),ah=view.clientHeight-parseFloat(cs.paddingTop)-parseFloat(cs.paddingBottom);
+  if(aw<=0||ah<=0)return;
+  const k=Math.min(aw/desk.sw,ah/desk.sh,2);
+  cv.style.width=Math.max(1,Math.floor(desk.sw*k))+'px';cv.style.height=Math.max(1,Math.floor(desk.sh*k))+'px';
 }
 function deskPos(e){const cv=$('#deskCv'),r=cv.getBoundingClientRect();return{x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}}
 function deskBtn(e){return e.button===2?'right':(e.button===1?'middle':'left')}
@@ -1048,7 +1098,9 @@ async function deskFlush(){
     view.classList.toggle('actual',actual);
     fit.setAttribute('aria-pressed',String(actual));
     $('#deskFitTxt').textContent=actual?'原始大小':'适应窗口';
+    deskLayout();
   };
+  if(window.ResizeObserver)new ResizeObserver(()=>deskLayout()).observe(view);else window.addEventListener('resize',deskLayout);
   const full=$('#deskFull');
   if(!view.requestFullscreen)full.style.display='none';
   full.onclick=()=>{if(document.fullscreenElement)document.exitFullscreen();else view.requestFullscreen().catch(e=>deskToast('无法进入全屏: '+e))};
