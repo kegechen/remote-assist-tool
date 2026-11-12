@@ -466,7 +466,7 @@ async function doConnect(){
   setStatus(false,'连接中...');
   const r=await api('/api/connect',{code,server,no_auth:noauth,min_proto:legacy?'1':''});
   if(r.ok){
-    const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();openTerm();termOnConnected();
+    const d=parseMCP(r.result);setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();window.PtyTerm&&PtyTerm.connected();openTerm();termOnConnected();
     if(d.warning)termLog('<span class="err">[警告] '+esc(d.warning)+'</span>');
   }else{
     setStatus(false,'失败');termLog('<span class="err">'+esc(r.error)+'</span>');
@@ -476,6 +476,7 @@ async function doConnect(){
 }
 async function doDisconnect(){
   await api('/api/disconnect',{});
+  window.PtyTerm&&PtyTerm.disconnected();
   setStatus(false,'未连接');
   resetRemoteState();
   $('#tree').innerHTML='';closeAllTabs();openTerm(); // 终端是常驻页，断开后仍留着
@@ -680,7 +681,7 @@ function makeFileDecoder(){
 }
 // 点击终端空白处（不是在选文字）就聚焦输入框，和真实终端一致
 $('#term-output').addEventListener('mouseup',e=>{if(!String(window.getSelection()).length&&e.target!==$('#termInput'))$('#termInput').focus()});
-function openTerm(){openTab('term','终端','term-box',()=>{$('#termInput').focus()},true)}
+function openTerm(){openTab('term','终端','term-box',()=>{if(window.PtyTerm&&PtyTerm.show())return;$('#termInput').focus()},true)}
 function termHasSelection(){return String(window.getSelection()).length>0}
 $('#termInput').addEventListener('keydown',e=>{
   const inp=$('#termInput');
@@ -1442,5 +1443,7 @@ function b64FromText(s){return b64FromBytes(new TextEncoder().encode(s))}
 
 openTerm();
 </script>
+<link rel="stylesheet" href="/assets/pty/pty_term.css">
+<script src="/assets/pty/pty_term.js"></script>
 </body>
 </html>`)

@@ -1,0 +1,6 @@
+/* 真终端（xterm.js）页样式。颜色走 CSS 变量（--term-bg/--term-fg 等，由主题提供，缺省时脚本内给深色默认值）。 */
+#xterm-host{display:none;flex:1;min-height:0;overflow:hidden;background:var(--term-bg,#0c0d1b)}
+#term-box.pty-on #term-output{display:none}
+#term-box.pty-on #xterm-host{display:block}
+#xterm-host .xterm{height:100%;padding:10px 12px;box-sizing:border-box}
+#xterm-host .xterm-viewport{background-color:transparent !important}

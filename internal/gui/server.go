@@ -104,6 +104,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/connect", s.handleConnect)
 	mux.HandleFunc("/api/call", s.handleCall)
 	mux.HandleFunc("/api/exec/stream", s.handleExecStream)
+	mux.HandleFunc("/api/pty/open", s.handlePTYOpen)
+	mux.HandleFunc("/api/pty/write", s.handlePTYWrite)
+	mux.HandleFunc("/api/pty/resize", s.handlePTYResize)
+	mux.HandleFunc("/api/pty/close", s.handlePTYClose)
+	mux.HandleFunc("/assets/", s.handleAssets)
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/download", s.handleDownload)
@@ -141,7 +146,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			http.Error(w, "forbidden: bad origin", http.StatusForbidden)
 			return
 		}
-		if r.URL.Path != "/" && !s.tokenOK(r) {
+		if r.URL.Path != "/" && !isPublicAsset(r) && !s.tokenOK(r) {
 			http.Error(w, "forbidden: 缺少或错误的访问令牌（请用启动时打印的带 token 的地址打开）", http.StatusForbidden)
 			return
 		}
