@@ -101,6 +101,72 @@ main{flex:1;display:flex;min-height:0}
 #ctxmenu .ci{padding:4px 14px;font-size:12px;cursor:pointer;color:#cdd6f4;white-space:nowrap}
 #ctxmenu .ci:hover{background:#313244}
 #ctxmenu .ci.danger{color:#f38ba8}
+#desk-box{display:none;flex-direction:column;flex:1;min-height:0}
+#desk-bar{display:flex;gap:6px 14px;align-items:center;padding:7px 10px;background:#181825;border-bottom:1px solid #313244;font-size:12px;color:#9399b2;flex-wrap:wrap}
+#desk-bar .dk-grp{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+#desk-bar .dk-acts{margin-left:auto}
+#desk-bar .dk-sep{width:1px;height:16px;background:#313244}
+#desk-bar .dk-lbl{color:#6c7086;font-size:11px;user-select:none}
+.dk-pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:12px;background:#11111b;border:1px solid #313244;color:#bac2de;font-size:12px;white-space:nowrap;cursor:default}
+.dk-dot{width:7px;height:7px;border-radius:50%;background:#6c7086;flex:none}
+.dk-pill[data-s=loading] .dk-dot{background:#f9e2af;animation:dkPulse 1.2s ease-in-out infinite}
+.dk-pill[data-s=live] .dk-dot{background:#a6e3a1;box-shadow:0 0 0 3px rgba(166,227,161,.15)}
+.dk-pill[data-s=error] .dk-dot{background:#f38ba8}
+.dk-pill[data-s=error]{color:#f38ba8}
+@keyframes dkPulse{0%,100%{opacity:1}50%{opacity:.35}}
+.dk-seg{display:inline-flex;background:#11111b;border:1px solid #313244;border-radius:7px;padding:2px;gap:2px}
+#desk-bar .dk-seg button{background:transparent;color:#9399b2;border:0;border-radius:5px;height:20px;min-width:26px;padding:0 8px;font-size:12px;font-weight:normal;transition:background .15s,color .15s}
+#desk-bar .dk-seg button:hover{background:#262637;color:#cdd6f4}
+#desk-bar .dk-seg button[aria-pressed=true]{background:#313244;color:#89b4fa;font-weight:bold}
+#desk-bar .dk-btn{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:6px;font-size:12px;font-weight:normal;transition:background .15s,border-color .15s,color .15s}
+#desk-bar .dk-btn:hover{background:#3b3d52;border-color:#585b70}
+#desk-bar .dk-btn:active{background:#262637}
+#desk-bar .dk-btn[aria-pressed=true]{color:#89b4fa;border-color:#89b4fa}
+#desk-bar .dk-btn svg,.dk-ov button svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+#desk-bar select{appearance:none;-webkit-appearance:none;color-scheme:dark;background:#11111b url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239399b2' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 8px center;color:#cdd6f4;border:1px solid #313244;border-radius:7px;height:26px;padding:0 24px 0 9px;font-size:12px;font-family:inherit;cursor:pointer;transition:border-color .15s}
+#desk-bar select:hover{border-color:#585b70}
+#desk-bar .dk-hide{display:none}
+#desk-bar button:focus-visible,#desk-bar select:focus-visible,#deskCtl:focus-visible,.dk-ov button:focus-visible{outline:2px solid #89b4fa;outline-offset:1px}
+.dk-sw{display:inline-flex;align-items:center;gap:7px;cursor:pointer;color:#bac2de;user-select:none}
+#deskCtl{appearance:none;-webkit-appearance:none;position:relative;width:28px;height:16px;border-radius:8px;background:#45475a;margin:0;cursor:pointer;transition:background .15s;flex:none}
+#deskCtl::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#cdd6f4;transition:transform .15s}
+#deskCtl:checked{background:#89b4fa}
+#deskCtl:checked::after{transform:translateX(12px);background:#11111b}
+#desk-view{position:relative;flex:1;min-height:0;overflow:auto;background:#11111b;display:flex;padding:14px}
+#deskCv{display:block;margin:auto;max-width:100%;max-height:100%;border-radius:8px;background:#000;box-shadow:0 0 0 1px #313244,0 8px 28px rgba(0,0,0,.5);cursor:default;transition:box-shadow .15s}
+#desk-view.actual #deskCv{max-width:none;max-height:none}
+#desk-view.ro #deskCv{cursor:default}
+#desk-view:focus-within #deskCv{box-shadow:0 0 0 2px #89b4fa,0 0 18px rgba(137,180,250,.25),0 8px 28px rgba(0,0,0,.5)}
+#desk-view.ro:focus-within #deskCv{box-shadow:0 0 0 2px #585b70,0 8px 28px rgba(0,0,0,.5)}
+#desk-view:not([data-s=live]) #deskCv{opacity:0;pointer-events:none}
+#desk-view[data-s=loading] #deskCv{opacity:.3}
+#deskKb{position:absolute;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none}
+.dk-chip{position:absolute;display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:10px;background:rgba(17,17,27,.72);color:#9399b2;font-size:11px;pointer-events:none;white-space:nowrap;z-index:1}
+#deskHint{left:22px;top:22px}
+#deskHint span{display:none;align-items:center;gap:5px}
+#desk-view .h-off{display:inline-flex}
+#desk-view:focus-within .h-off{display:none}
+#desk-view:focus-within .h-on{display:inline-flex;color:#89b4fa}
+#desk-view.ro .h-off,#desk-view.ro .h-on{display:none}
+#desk-view.ro .h-ro{display:inline-flex;color:#f9e2af}
+#desk-view:not([data-s=live]) #deskHint,#desk-view:not([data-s=live]) #deskStat{display:none}
+#deskStat{right:22px;bottom:22px;font-variant-numeric:tabular-nums}
+#deskStat:empty{display:none}
+.dk-ov{position:absolute;left:0;top:0;right:0;bottom:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;z-index:2}
+#desk-view:not([data-s=live]) .dk-ov{display:flex}
+.dk-ic{width:44px;height:44px;border-radius:50%;background:#181825;border:1px solid #313244;display:flex;align-items:center;justify-content:center;color:#9399b2}
+.dk-ic svg{display:none;width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+#desk-view[data-s=idle] .ic-n,#desk-view[data-s=error] .ic-e{display:block}
+#desk-view[data-s=loading] .sp{display:block;animation:dkSpin 1s linear infinite}
+#desk-view[data-s=error] .dk-ic{color:#f38ba8;border-color:rgba(243,139,168,.4)}
+#deskMsg{max-width:420px;line-height:1.6;font-size:13px;color:#bac2de}
+#deskMsg.err{color:#f38ba8}
+.dk-ov button{display:none;align-items:center;gap:5px;height:28px;padding:0 14px;font-size:12px;font-weight:normal;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:6px;transition:background .15s}
+.dk-ov button:hover{background:#3b3d52}
+#desk-view[data-s=error] .dk-ov button{display:inline-flex}
+#deskToast{position:absolute;left:50%;top:14px;transform:translateX(-50%);max-width:80%;padding:5px 12px;border-radius:6px;background:#181825;border:1px solid rgba(243,139,168,.5);color:#f38ba8;font-size:12px;display:none;z-index:3}
+@keyframes dkSpin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){#desk-box *,#desk-box *::before,#desk-box *::after{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
@@ -114,6 +180,7 @@ main{flex:1;display:flex;min-height:0}
     <label class="meta" title="对端是 0.0.x 旧版时才需要勾选：以 v1 兼容模式连接，会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络。对端是新版时勾选也仍走 v2。"><input type="checkbox" id="legacy"> 兼容旧版</label>
     <button id="connect">连接</button>
     <button class="sm" id="btnProc">进程</button>
+    <button class="sm" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop）">远程桌面</button>
     <button id="status" title="连接详情" disabled>未连接</button>
   </header>
   <div id="upgrade-notice"><span class="msg" id="upgrade-msg"></span><button class="sm" id="upgrade-select">选择升级包</button><input type="file" id="upgrade-file" style="display:none"></div>
@@ -129,6 +196,7 @@ main{flex:1;display:flex;min-height:0}
         <div id="term-box"><div class="input-row"><span class="prompt">$</span><input id="termInput" placeholder="输入命令" autocomplete="off"></div><div id="term-output"></div></div>
         <div id="search-box"><div class="sp"><label>正则:</label><input id="grepPattern" placeholder="TODO"><label>目录:</label><input id="grepRoot" placeholder="C:\\"><button class="sm" id="grepRun">搜索</button></div><div id="search-output"></div></div>
         <div id="proc-box"><div id="proc-output"></div></div>
+        <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-lbl">宽度</span><select id="deskW" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="2">2</option><option value="5" selected>5</option><option value="10">10</option><option value="15">15</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="40">低</option><option value="60" selected>中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div class="dk-chip" id="deskStat"></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
         <div id="file-box"><div id="file-hdr"><span class="path" id="fpath"></span><span class="info" id="finfo"></span><button class="sm image-tool" id="fZoomOut" title="缩小" aria-label="缩小">−</button><button class="sm image-tool" id="fZoomFit" title="适合窗口">适配</button><button class="sm image-tool" id="fZoomIn" title="放大" aria-label="放大">+</button><button class="sm image-tool" id="fDownload" title="另存为" aria-label="另存为">⇩</button><button class="sm" id="fEdit" style="display:none">编辑</button><button class="sm" id="fSave" style="display:none;background:#a6e3a1">保存</button><button class="sm" id="fCancel" style="display:none">取消</button></div><div id="file-content"></div><div id="file-editor"><textarea id="fEditor"></textarea></div></div>
       </div>
     </div>
@@ -265,7 +333,7 @@ $('#upgrade-file').onchange=async()=>{
 // ========== Tabs ==========
 // tab \u7684 id \u53ea\u662f\u5185\u90e8\u6807\u8bc6\uff08\u53ef\u80fd\u542b\u8def\u5f84\u91cc\u7684 : \ /\uff09\uff0c\u4e0d\u662f DOM \u5143\u7d20 id\u2014\u2014
 // \u6bcf\u4e2a tab \u663e\u5f0f\u8bb0\u5f55\u81ea\u5df1\u8be5\u663e\u793a\u54ea\u4e2a box\uff0c\u5426\u5219 $('#'+id) \u4f1a\u62ff\u8def\u5f84\u53bb\u5f53\u9009\u62e9\u5668\u7528\u3002
-const BOXES=['term-box','search-box','proc-box','file-box'];
+const BOXES=['term-box','search-box','proc-box','file-box','desk-box'];
 // fixed=true 的页常驻、不给关闭叉。终端就是这种：顶部的「终端」按钮已移除，
 // 若还能把它关掉就再也开不出来了。
 function openTab(id,title,boxId,showFn,fixed){
@@ -784,6 +852,151 @@ function ctxDownload(p){
 
 // ========== parseMCP ==========
 function parseMCP(res){if(!res)return{};let d=typeof res==='string'?JSON.parse(res):res;if(d&&d.content&&Array.isArray(d.content)&&d.content[0]&&d.content[0].text!==undefined){try{d=JSON.parse(d.content[0].text)}catch{}}return d||{}}
+
+// ========== 远程桌面 ==========
+// 画面：循环调用 screen_capture（请求-应答，串行，不堆积）；操控：鼠标/键盘事件排队，
+// 合并连续 move 后串行调用 input，保证事件顺序。坐标一律按 0..1 归一化回传，由对端映射到真实像素。
+const desk={running:false,loopId:0,queue:[],sending:false,pressed:new Set(),frames:0,t0:0,bytes:0,disp:1,toastTimer:0};
+function openDesk(){openTab('desk','远程桌面','desk-box',()=>{deskStart()},false)}
+$('#btnDesk').onclick=()=>openDesk();
+// 刷新/重连：先切到“加载中”态（旧画面变暗并显示覆盖层），首帧到达后回到 live
+$('#deskGo').onclick=()=>{desk.loopId++;desk.running=false;deskStart(true)};
+$('#deskRetry').onclick=()=>$('#deskGo').click();
+// 文字提示：现在位于画面中央覆盖层，出错时 class=err
+function deskMsg(s,isErr){const m=$('#deskMsg');m.textContent=s||'';m.className=isErr?'err':''}
+// 界面状态：idle 未连接 / loading 等首帧 / live 有画面 / error 出错。同步画面区、状态胶囊与覆盖层文案
+const DESK_PILL={idle:'未连接',loading:'连接中…',live:'已连接',error:'出错'};
+function deskState(st,msg){
+  $('#desk-view').dataset.s=st;
+  const p=$('#deskPill');p.dataset.s=st;p.title=msg||'';
+  $('#deskPillTxt').textContent=DESK_PILL[st]||st;
+  deskMsg(st==='live'?'':msg,st==='error');
+}
+// 有画面时的非致命错误（如输入下发失败）：用顶部短暂提示，不遮挡画面
+function deskToast(s){
+  const t=$('#deskToast');t.textContent=s;t.style.display='block';
+  clearTimeout(desk.toastTimer);desk.toastTimer=setTimeout(()=>{t.style.display='none'},4000);
+}
+function deskErrText(e){
+  const s=String(e||'');
+  if(s.indexOf('desktop_disabled')>=0)return '对端未启用远程桌面：请让对端用 share --enable-desktop 重新启动';
+  if(s.indexOf('desktop_unsupported')>=0)return '对端系统暂不支持远程桌面';
+  if(s.indexOf('unknown_tool')>=0)return '对端版本过旧，没有远程桌面功能';
+  return s;
+}
+function deskBytesToBlob(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type:'image/jpeg'})}
+function deskSyncDisplays(n){
+  $('#deskDisp').classList.toggle('dk-hide',n<=1);
+  if(n===desk.disp)return;desk.disp=n;
+  const sel=$('#deskDisp'),cur=sel.value;sel.innerHTML='';
+  for(let i=0;i<n;i++){const o=document.createElement('option');o.value=i;o.textContent='显示器 '+(i+1)+(i===0?'（主）':'');sel.appendChild(o)}
+  if(cur&&+cur<n)sel.value=cur;
+}
+async function deskStart(forceLoading){
+  if(desk.running)return;
+  if(!connected){deskState('idle','尚未连接对端：请先在顶部输入协助码并点击「连接」');return}
+  desk.running=true;const my=++desk.loopId;desk.frames=0;desk.bytes=0;desk.t0=performance.now();
+  if(forceLoading||$('#desk-view').dataset.s!=='live')deskState('loading','正在获取画面…');
+  const cv=$('#deskCv'),ctx=cv.getContext('2d');
+  while(my===desk.loopId&&connected&&activeTab==='desk'){
+    const t1=performance.now();
+    const r=await api('/api/call',{tool:'screen_capture',args:{display:+$('#deskDisp').value||0,max_width:+$('#deskW').value,quality:+$('#deskQ').value}});
+    if(my!==desk.loopId)break;
+    const rtt=Math.round(performance.now()-t1);
+    if(!r.ok){deskState('error',deskErrText(r.error));break}
+    let d;try{d=parseMCP(r.result)}catch(e){deskState('error','解析帧失败');break}
+    if(!d||!d.data){deskState('error',deskErrText(JSON.stringify(d||{})));break}
+    try{
+      const bm=await createImageBitmap(deskBytesToBlob(d.data));
+      if(cv.width!==d.width||cv.height!==d.height){cv.width=d.width;cv.height=d.height}
+      ctx.drawImage(bm,0,0);if(bm.close)bm.close();
+    }catch(e){deskState('error','绘制帧失败: '+e);break}
+    if($('#desk-view').dataset.s!=='live')deskState('live','');
+    $('#deskPillTxt').textContent='已连接 · '+rtt+' ms';
+    deskSyncDisplays(d.displays||1);
+    desk.frames++;desk.bytes+=d.data.length*0.75;
+    const sec=(performance.now()-desk.t0)/1000;
+    if(desk.frames%5===0&&sec>0){const st=(desk.frames/sec).toFixed(1)+' fps · '+(desk.bytes/desk.frames/1024).toFixed(0)+' KB/帧 · '+d.screen_width+'x'+d.screen_height;$('#deskStat').textContent=st;$('#deskPill').title=st}
+    const wait=1000/(+$('#deskFps').value||5)-(performance.now()-t1);
+    if(wait>0)await new Promise(res=>setTimeout(res,wait));
+  }
+  if(my===desk.loopId){desk.running=false;if(!connected)deskState('idle','连接已断开，请重新连接对端')}
+}
+function deskPos(e){const cv=$('#deskCv'),r=cv.getBoundingClientRect();return{x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}}
+function deskBtn(e){return e.button===2?'right':(e.button===1?'middle':'left')}
+function deskPush(ev){
+  if(!connected||!$('#deskCtl').checked)return;
+  const q=desk.queue;
+  if(ev.type==='move'&&q.length&&q[q.length-1].type==='move')q[q.length-1]=ev;else q.push(ev);
+  deskFlush();
+}
+async function deskFlush(){
+  if(desk.sending)return;desk.sending=true;
+  try{
+    while(desk.queue.length){
+      const evs=desk.queue.splice(0,100);
+      const r=await api('/api/call',{tool:'input',args:{display:+$('#deskDisp').value||0,events:evs}});
+      if(!r.ok){deskToast(deskErrText(r.error));desk.queue=desk.queue.filter(x=>x.type==='up'||x.type==='key_up');break}
+    }
+  }finally{desk.sending=false}
+}
+(function(){
+  const cv=$('#deskCv'),kb=$('#deskKb');
+  cv.addEventListener('mousemove',e=>{const p=deskPos(e);deskPush({type:'move',x:p.x,y:p.y})});
+  cv.addEventListener('mousedown',e=>{kb.focus();e.preventDefault();(desk.downBtns=desk.downBtns||new Set()).add(e.button);const p=deskPos(e);deskPush({type:'down',x:p.x,y:p.y,button:deskBtn(e)})});
+  const upHandler=e=>{e.preventDefault();const p=deskPos(e);deskPush({type:'up',x:p.x,y:p.y,button:deskBtn(e)})};
+  window.addEventListener('mouseup',e=>{if(desk.downBtns&&desk.downBtns.has(e.button)){desk.downBtns.delete(e.button);upHandler(e)}});
+  cv.addEventListener('contextmenu',e=>e.preventDefault());
+  cv.addEventListener('wheel',e=>{e.preventDefault();const p=deskPos(e);const dy=Math.max(-1200,Math.min(1200,Math.round(e.deltaY*1.2)));if(dy)deskPush({type:'wheel',x:p.x,y:p.y,dy:dy})},{passive:false});
+  kb.addEventListener('keydown',e=>{if(e.isComposing||e.key==='Process')return;
+    if(!$('#deskCtl').checked)return;
+    e.preventDefault();
+    // 可打印字符且没按 Ctrl/Alt/Meta：直接发文本，避开键盘布局/Shift 状态差异
+    if(e.key.length===1&&!e.ctrlKey&&!e.altKey&&!e.metaKey){deskPush({type:'text',text:e.key});return}
+    desk.pressed.add(e.key);deskPush({type:'key_down',key:e.key});
+  });
+  kb.addEventListener('keyup',e=>{
+    if(!$('#deskCtl').checked)return;
+    e.preventDefault();
+    if(!desk.pressed.has(e.key))return;
+    desk.pressed.delete(e.key);deskPush({type:'key_up',key:e.key});
+  });
+  // 失焦时把还按着的键都抬起，防止对端卡键（比如按着 Ctrl 切走焦点）
+  kb.addEventListener('blur',()=>{for(const k of desk.pressed)deskPush({type:'key_up',key:k});desk.pressed.clear()});
+  // 输入法/非键盘来源的文本：隐藏 textarea 接收 composition 与 input，提交后转成 text 事件并清空。
+  // Chrome 的最终 input(insertCompositionText) 先于 compositionend，Firefox 相反，所以 input 里一律忽略合成类事件，只在 compositionend 发送，避免重复。
+  kb.addEventListener('compositionend',e=>{if(e.data&&$('#deskCtl').checked)deskPush({type:'text',text:e.data});kb.value=''});
+  kb.addEventListener('input',e=>{if(e.isComposing||e.inputType==='insertCompositionText')return;const t=e.data||'';if(t&&$('#deskCtl').checked)deskPush({type:'text',text:t});kb.value=''});
+})();
+// 工具栏交互：分段按钮（同步底层 select）、适应/原始大小、全屏、只看不控
+(function(){
+  const view=$('#desk-view');
+  document.querySelectorAll('#desk-bar .dk-seg').forEach(seg=>{
+    const sel=$('#'+seg.dataset.for);
+    const sync=()=>seg.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.v===sel.value)));
+    for(const o of sel.options){
+      const b=document.createElement('button');b.type='button';b.dataset.v=o.value;b.textContent=o.textContent;
+      b.onclick=()=>{sel.value=o.value;sel.dispatchEvent(new Event('change'));sync()};
+      seg.appendChild(b);
+    }
+    sel.addEventListener('change',sync);sync();
+  });
+  $('#deskDisp').classList.add('dk-hide');
+  const fit=$('#deskFit');
+  fit.onclick=()=>{
+    const actual=!view.classList.contains('actual');
+    view.classList.toggle('actual',actual);
+    fit.setAttribute('aria-pressed',String(actual));
+    $('#deskFitTxt').textContent=actual?'原始大小':'适应窗口';
+  };
+  const full=$('#deskFull');
+  if(!view.requestFullscreen)full.style.display='none';
+  full.onclick=()=>{if(document.fullscreenElement)document.exitFullscreen();else view.requestFullscreen().catch(e=>deskToast('无法进入全屏: '+e))};
+  document.addEventListener('fullscreenchange',()=>{full.lastChild.textContent=document.fullscreenElement===view?'退出全屏':'全屏'});
+  const ctl=$('#deskCtl');
+  const syncCtl=()=>view.classList.toggle('ro',!ctl.checked);
+  ctl.addEventListener('change',syncCtl);syncCtl();
+})();
 
 // ========== 工具函数 ==========
 function formatSize(n){if(!n)return'';if(n<1024)return n+'B';if(n<1024*1024)return(n/1024).toFixed(1)+'K';return(n/1024/1024).toFixed(1)+'M'}
