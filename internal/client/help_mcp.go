@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/remote-assist/tool/internal/mcp"
@@ -198,6 +199,11 @@ func mcpIncompatHint(e *proto.IncompatibleVersionError) string {
 		peer = "v" + e.Got
 	}
 	head := fmt.Sprintf("工具协议版本不兼容：对端（%s）只支持 %s，本端要求 v%s，已拒绝本次连接。", e.PeerSide, peer, e.Want)
+	// 对端明确只支持 v1、而本端要求更高：这是 GUI 自动降级的唯一触发条件。带上固定前缀
+	// 标记，GUI 据此识别（见 IsLegacyPeerError），不去匹配会随改文案漂移的人话。
+	if e.Got == proto.ToolProtocolVersionV1 && e.Want != proto.ToolProtocolVersionV1 {
+		head = LegacyPeerMarker + head
+	}
 	if e.Want == proto.ToolProtocolVersionV1 {
 		// 本端已经放宽到最低了，再降也没有更低的版本可降，只能升级对端。
 		return head + fmt.Sprintf("请将%s升级到 1.0.0 及以上。", e.PeerSide)
@@ -205,6 +211,23 @@ func mcpIncompatHint(e *proto.IncompatibleVersionError) string {
 	return head + fmt.Sprintf("请将%s升级到 1.0.0 及以上；若暂时无法升级，"+
 		"先向用户说明风险并取得同意，再调用 connect 并带上 min_proto=\"1\" 以兼容模式重试"+
 		"（在当前会话中直接调用即可，不必改任何配置；兼容模式会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络）。", e.PeerSide)
+}
+
+// LegacyPeerMarker 标在 connect 失败文案最前面：握手结果明确是「对端只支持 v1（0.0.x 旧版）」。
+const LegacyPeerMarker = "[peer_legacy_v1]"
+
+// IsLegacyPeerError 判断 connect 的失败文案是否为「对端是 0.0.x 旧版、协议版本不兼容」。
+//
+// 判据是固定前缀而不是子串：错误文案里还可能出现对端回传的 ErrorMsg（例如
+// "对端拒绝工具通道握手：<对端原文>"），恶意对端/中继若在原文里夹带标记，不能借此
+// 诱导调用方降级。标记只会由本端 mcpIncompatHint 写在 "handshake failed: " 之后的最前面。
+func IsLegacyPeerError(msg string) bool {
+	const prefix = "handshake failed: "
+	msg = strings.TrimSpace(msg)
+	if i := strings.Index(msg, prefix); i >= 0 && i <= 16 {
+		msg = msg[i+len(prefix):]
+	}
+	return strings.HasPrefix(msg, LegacyPeerMarker)
 }
 
 // sessionFromAck 校验 share 的应答并派生本次会话。
