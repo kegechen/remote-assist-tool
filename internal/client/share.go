@@ -49,6 +49,7 @@ type ShareMode struct {
 	expiresAt      time.Time
 	sbCfg          agent.SandboxConfig
 	minProto       string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
+	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭
 	daemon         *agent.Daemon
 	daemonOnce     sync.Once
 
@@ -1236,6 +1237,9 @@ func (s *ShareMode) handleRelayToolHello(msg *proto.Message) error {
 	return nil
 }
 
+// SetEnableDesktop 开关远程桌面工具；必须在 Run 之前调用。
+func (s *ShareMode) SetEnableDesktop(on bool) { s.enableDesktop = on }
+
 // ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅轮换会话。
 // sync.Once 保证 reg/goroutine 只初始化一次；每次 hello 后都用最新会话覆盖。
 func (s *ShareMode) ensureDaemon(sess proto.Session) {
@@ -1252,6 +1256,9 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		reg.Register(tools.NewGrep(sb))
 		reg.Register(tools.NewProcessList())
 		reg.Register(tools.NewTailLog(sb))
+		// 远程桌面工具始终注册，未启用时调用会返回 desktop_disabled 并提示开关，便于排查。
+		reg.Register(tools.NewScreenCapture(s.enableDesktop))
+		reg.Register(tools.NewInput(s.enableDesktop))
 		d := agent.NewDaemon(reg, s.client, sess)
 		d.OnActivity = func(line string) { s.println(line) }
 		if s.console != nil {

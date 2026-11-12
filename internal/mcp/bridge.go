@@ -38,7 +38,7 @@ const (
 // 兜底；exec/grep/glob/read_file/write_file/文件传输等可能合理长跑的仍用 10 分钟。
 func fallbackTimeoutFor(name string) time.Duration {
 	switch name {
-	case "stat", "list_dir", "process_list", "tail_log":
+	case "stat", "list_dir", "process_list", "tail_log", "screen_capture", "input":
 		return callToolQuickFallbackTimeout
 	default:
 		return callToolFallbackTimeout

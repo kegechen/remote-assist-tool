@@ -62,6 +62,10 @@ func classifyError(err error) (code, msg string) {
 	switch {
 	case strings.Contains(s, "path_outside_root"):
 		return "path_outside_root", s
+	case strings.Contains(s, "desktop_disabled"):
+		return "desktop_disabled", s
+	case strings.Contains(s, "desktop_unsupported"):
+		return "desktop_unsupported", s
 	case strings.Contains(s, "exec_denied"):
 		return "exec_denied", s
 	case strings.Contains(s, "deadline_exceeded"), strings.Contains(s, "context deadline exceeded"):
@@ -80,7 +84,7 @@ func classifyError(err error) (code, msg string) {
 // mcp.fallbackTimeoutFor 呼应，但更紧（share 端先于 host 兜底返回，避免误报 tunnel_lost）。
 func defaultToolTimeout(tool string) time.Duration {
 	switch tool {
-	case "stat", "list_dir", "process_list", "tail_log", "glob":
+	case "stat", "list_dir", "process_list", "tail_log", "glob", "screen_capture", "input":
 		return 30 * time.Second
 	default:
 		return 5 * time.Minute
@@ -325,8 +329,13 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		d.OnTransfer(ev)
 	} else {
 		argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
-		log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
-		if d.OnActivity != nil {
+		// 远程桌面是高频调用（每秒数次抓屏/输入）：成功的不逐条记日志/刷控制台，失败的照常显示；
+		// input 的参数（按键文本）本来就不进摘要。
+		quiet := (req.Tool == "screen_capture" || req.Tool == "input") && resp.OK
+		if !quiet {
+			log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
+		}
+		if d.OnActivity != nil && !quiet {
 			d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
 				time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
 		}
