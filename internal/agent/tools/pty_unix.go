@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	cpty "github.com/creack/pty"
 )
@@ -134,6 +135,34 @@ func (p *unixPTY) Kill() {
 }
 
 func (p *unixPTY) Finish() {}
+
+// Interrupt 绕过可能被卡住的输入写入：取 PTY 的前台进程组（TIOCGPGRP），直接递送控制字符对应的信号。
+// 用 SyscallConn 而非 Fd()，避免把 master 切成阻塞模式而影响 Read/Close 行为。
+func (p *unixPTY) Interrupt(b byte) bool {
+	var sig syscall.Signal
+	switch b {
+	case 0x03:
+		sig = syscall.SIGINT
+	case 0x1a:
+		sig = syscall.SIGTSTP
+	case 0x1c:
+		sig = syscall.SIGQUIT
+	default:
+		return false
+	}
+	rc, err := p.f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	var pgrp int32
+	var errno syscall.Errno
+	if err := rc.Control(func(fd uintptr) {
+		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(syscall.TIOCGPGRP), uintptr(unsafe.Pointer(&pgrp)))
+	}); err != nil || errno != 0 || pgrp <= 0 {
+		return false
+	}
+	return syscall.Kill(-int(pgrp), sig) == nil
+}
 
 func (p *unixPTY) Close() {
 	p.Kill()

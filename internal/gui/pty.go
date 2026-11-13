@@ -33,8 +33,44 @@ type ptyClientCalls interface {
 type ptyEntry struct {
 	client ptyClientCalls
 	cancel context.CancelFunc
-	wmu    sync.Mutex // 同一会话的输入串行
+	// wsem 同一会话的普通输入串行（容量 1 的信号量，等待时可超时/随请求取消）。
+	// 紧急输入（Ctrl+C 等）不经过它，否则会排在被卡住的大块写入后面。
+	wsem chan struct{}
 }
+
+func newPTYEntry(c ptyClientCalls, cancel context.CancelFunc) *ptyEntry {
+	return &ptyEntry{client: c, cancel: cancel, wsem: make(chan struct{}, 1)}
+}
+
+// isUrgentPTYInput 短且含 Ctrl+C(0x03)/Ctrl+Z(0x1a)/Ctrl+\(0x1c) 的输入走优先通道，不排队等普通写入。
+// 与被控端 pty.go 的判定一致；长度上限把恰好含 0x03 的大段粘贴排除在外。
+func isUrgentPTYInput(b []byte) bool {
+	if len(b) == 0 || len(b) > 64 {
+		return false
+	}
+	for _, c := range b {
+		if c == 0x03 || c == 0x1a || c == 0x1c {
+			return true
+		}
+	}
+	return false
+}
+
+// acquire 取会话输入顺序锁；请求取消或超过 ptyCallTimeout 放弃。
+func (e *ptyEntry) acquire(ctx context.Context) bool {
+	t := time.NewTimer(ptyCallTimeout)
+	defer t.Stop()
+	select {
+	case e.wsem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return false
+	}
+}
+
+func (e *ptyEntry) release() { <-e.wsem }
 
 // ptySessions 会话 id → 条目。id 是 128 位随机数，跨 Server 实例也不会冲突，故用包级表。
 var ptySessions sync.Map
@@ -90,7 +126,7 @@ func (s *Server) handlePTYOpen(w http.ResponseWriter, r *http.Request) {
 	// 不设超时：终端是长会话；结束靠 r.Context（浏览器断开）/ pty_close / shell 退出。
 	// 被控端 pty_open 自身有 24h 上限。
 	ctx, cancel := context.WithCancel(r.Context())
-	entry := &ptyEntry{client: client, cancel: cancel}
+	entry := newPTYEntry(client, cancel)
 	ptySessions.Store(id, entry)
 	defer func() {
 		cancel()
@@ -170,9 +206,15 @@ func (s *Server) handlePTYWrite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// 同一会话的输入串行：锁内完成整次调用，到达顺序即送达顺序。注意：不得记录 req.Data。
-	e.wmu.Lock()
-	defer e.wmu.Unlock()
+	// 普通输入同一会话串行：锁内完成整次调用，到达顺序即送达顺序。注意：不得记录 req.Data。
+	// 紧急输入（Ctrl+C 等）不取锁，直接送达：前面的大块写入若被对端卡住，它不能排在后面。
+	if !isUrgentPTYInput(req.Data) {
+		if !e.acquire(r.Context()) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "pty_write_blocked: 终端输入拥塞，请稍后重试或按 Ctrl+C"})
+			return
+		}
+		defer e.release()
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), ptyCallTimeout)
 	defer cancel()
 	if _, err := e.client.CallTool(ctx, "pty_write", map[string]any{"session": req.ID, "data": req.Data}); err != nil {
@@ -204,8 +246,12 @@ func (s *Server) handlePTYResize(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	e.wmu.Lock() // 与输入共用顺序，避免 resize 插到半条输入前后造成错位感
-	defer e.wmu.Unlock()
+	// 与输入共用顺序，避免 resize 插到半条输入前后造成错位感；等不到锁（输入被卡住）就放弃，不拖累前端。
+	if !e.acquire(r.Context()) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "pty_write_blocked: 终端输入拥塞"})
+		return
+	}
+	defer e.release()
 	ctx, cancel := context.WithTimeout(r.Context(), ptyCallTimeout)
 	defer cancel()
 	if _, err := e.client.CallTool(ctx, "pty_resize", map[string]any{"session": req.ID, "cols": req.Cols, "rows": req.Rows}); err != nil {

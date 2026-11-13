@@ -164,8 +164,18 @@
       return;
     }
     if (state !== 'live' && state !== 'opening') return;
+    // Ctrl+C / Ctrl+Z / Ctrl+\ 不并入 6ms 批次、不排在进行中的大块写入后面：立即单独发送（后端同样走优先通道）。
+    if (sessionId && isUrgentInput(bytes)) {
+      post('/api/pty/write', { id: sessionId, data: bytesToB64(bytes) }).catch(function () {});
+      return;
+    }
     sendQ.push(bytes);
     if (!flushing && !flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+  }
+  function isUrgentInput(bytes) {
+    if (!bytes.length || bytes.length > 64) return false;
+    for (var i = 0; i < bytes.length; i++) if (bytes[i] === 3 || bytes[i] === 26 || bytes[i] === 28) return true;
+    return false;
   }
   function waitSession() {
     if (sessionId) return Promise.resolve(true);
