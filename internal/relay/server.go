@@ -888,6 +888,12 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 // 返回 closeConn=true 时读循环应关闭连接（第 MaxJoinFailures 次失败或畸形）。
 func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 	code = normalizeCode(code)
+	// 本 relay 发的码只含大写字母和数字（见 charset），按大写比对，手打成小写也能加入。
+	// 不能放到客户端做：协助端不知道对端 relay 新旧，旧版 relay 发的是大小写混合码。
+	// NoAuth 的固定码是小写的 proto.NoAuthCode，保持原样。
+	if !s.config.NoAuth {
+		code = strings.ToUpper(code)
+	}
 	host := clientHost(client)
 
 	// per-IP 限流（可旁路）：拒绝后不扣全局令牌，但仍计一次失败。
