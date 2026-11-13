@@ -283,7 +283,8 @@ func TestMarkConnectionLostOnlyClearsCurrentClient(t *testing.T) {
 	}
 	select {
 	case event := <-events:
-		if event != "event: lost\n" {
+		// 必须是 lost 事件，且带 data 行（浏览器不派发没有 data 的 SSE 事件）
+		if !strings.HasPrefix(event, "event: lost\n") || !strings.Contains(event, "data:") {
 			t.Fatalf("event = %q", event)
 		}
 	default:

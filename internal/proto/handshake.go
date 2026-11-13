@@ -174,7 +174,7 @@ func DeriveSessionKey(code, nonceShare, nonceHelp, version string) [32]byte {
 const NoAuthCode = "noauth"
 
 // toolCapabilities 两端通告的能力集，share 与 help 共用一份，避免两处各写一列表后漂移。
-var toolCapabilities = []string{"exec", "read_file", "write_file", "list_dir", "stat", "glob", "grep", "process_list", "tail_log"}
+var toolCapabilities = []string{"exec", "read_file", "write_file", "list_dir", "stat", "glob", "grep", "process_list", "tail_log", "screen_capture", "input", "pty_open", "pty_write", "pty_resize", "pty_close"}
 
 // ToolCapabilities 返回能力集副本。
 func ToolCapabilities() []string {

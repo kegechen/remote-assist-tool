@@ -26,6 +26,9 @@ import (
 	"github.com/remote-assist/tool/internal/gui/assets"
 )
 
+// connectTotalTimeout 一次连接（含最多一次降级重试）的总时限。
+var connectTotalTimeout = 45 * time.Second // 变量仅为便于测试缩短
+
 // Server 是 GUI 的后端：托管前端静态页 + 通过 JSON 把请求转发给 MCP 子进程。
 type Server struct {
 	binPath       string
@@ -45,7 +48,12 @@ type Server struct {
 	lastCode     string
 	lastServer   string
 	lastNoAuth   bool
-	lastMinProto string // 勾选「兼容旧版」时为 "1"；自动重连必须沿用，否则断线重连会退回默认值被拒
+	connectCancel context.CancelFunc // 正在建立中的 /api/connect，被新连接/取消顶替时调用
+	dropClient      *MCPClient // 与 dropWhy 配对：哪条 client 是因何被 watchPeer 主动关闭的
+	dropWhy         dropInfo
+	reconnectFail   dropInfo // 最近一次重连失败的可归类原因
+	reconnectFailOK bool
+	lastMinProto string // 经降级/用户确认以 v1 连上时为 "1"；自动重连必须沿用，否则断线重连会退回默认值被拒
 	protoVersion string
 	peerVersion  string
 	helpVersion  string
@@ -104,6 +112,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/connect", s.handleConnect)
 	mux.HandleFunc("/api/call", s.handleCall)
 	mux.HandleFunc("/api/exec/stream", s.handleExecStream)
+	mux.HandleFunc("/api/pty/open", s.handlePTYOpen)
+	mux.HandleFunc("/api/pty/write", s.handlePTYWrite)
+	mux.HandleFunc("/api/pty/resize", s.handlePTYResize)
+	mux.HandleFunc("/api/pty/close", s.handlePTYClose)
+	mux.HandleFunc("/assets/", s.handleAssets)
 	mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/download", s.handleDownload)
@@ -141,7 +154,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			http.Error(w, "forbidden: bad origin", http.StatusForbidden)
 			return
 		}
-		if r.URL.Path != "/" && !s.tokenOK(r) {
+		if r.URL.Path != "/" && !isPublicAsset(r) && !s.tokenOK(r) {
 			http.Error(w, "forbidden: 缺少或错误的访问令牌（请用启动时打印的带 token 的地址打开）", http.StatusForbidden)
 			return
 		}
@@ -565,7 +578,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// normalizeSSEEvent 保证 SSE 事件带 data 行。按规范，没有 data 的事件浏览器不会派发，
+// 此前 connected/disconnected/reconnecting/lost 等只写 event 行，页面一直收不到。
+// 不带冒号的行（如 "retry 1/3"）会被当作未知字段忽略，这里一并转成 data 行。
+func normalizeSSEEvent(msg string) string {
+	var event string
+	var data []string
+	for _, line := range strings.Split(strings.TrimRight(msg, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			event = line
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, line)
+		case line != "":
+			data = append(data, "data: "+line)
+		}
+	}
+	if len(data) == 0 {
+		data = []string{"data: "}
+	}
+	return event + "\n" + strings.Join(data, "\n") + "\n"
+}
+
 func (s *Server) broadcast(msg string) {
+	msg = normalizeSSEEvent(msg)
 	s.sseMu.Lock()
 	defer s.sseMu.Unlock()
 	for ch := range s.sseSubs {
@@ -594,28 +630,41 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
-		Code   string `json:"code"`
-		Server string `json:"server"`
-		NoAuth bool   `json:"no_auth"`
-		// MinProto 对应「兼容旧版」复选框，透传给 connect 工具的 min_proto；取值由 help 校验。
-		MinProto string `json:"min_proto"`
-	}
+	var req connectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
+	// 允许在协助码框里直接粘贴「协助码@中转地址」，省去单独填 Relay。
+	req.Code, req.Server = splitCodeServer(req.Code, req.Server)
+
 	// 关掉旧的子进程（如果有的话），再起新的。同时自增 connGen：用户发起了新的连接意图，
 	// 任何正在退避/连接中的过期自动重连都应就此作废，不得回头覆盖这次连接。
+	// 同理上一次尚在建立中的 /api/connect 也要取消（重复点击不并发）。
+	ctx, cancel := context.WithTimeout(r.Context(), connectTotalTimeout)
+	defer cancel()
 	s.mu.Lock()
 	if s.client != nil {
 		s.client.Close()
 		s.client = nil
 		s.connected = false
 	}
+	if s.connectCancel != nil {
+		s.connectCancel()
+	}
 	s.connGen++
+	gen := s.connGen
+	s.connectCancel = cancel
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		// 只清自己登记的那一份，不碰后来者的
+		if s.connGen == gen {
+			s.connectCancel = nil
+		}
+		s.mu.Unlock()
+	}()
 
 	// bootstrap 模式：子进程进入等待 connect 工具的状态，不预先传 --code / --no-auth，
 	// 否则会走 NewHelpModeMCP（无 connect 工具）。server/code/no_auth 全部通过 connect
@@ -627,46 +676,81 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		spawnArgs = append(spawnArgs, "--server", s.defaultServer)
 	}
 
-	client, err := NewMCPClient(s.binPath, spawnArgs)
+	mc, err := NewMCPClient(s.binPath, spawnArgs)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	if err := client.Initialize(ctx); err != nil {
-		client.Close()
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "initialize failed: " + err.Error()})
+	// 取消/被新连接顶替：必须杀掉子进程，否则它还在后台把连接建起来，成为没人管的「幽灵连接」。
+	// 注意区分：用户取消 / 被新连接顶替才算“已取消”；自己的总时限到点（DeadlineExceeded）是超时，
+	// 要走失败分类给出“连接超时”，不能误报成取消。
+	superseded := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return errors.Is(ctx.Err(), context.Canceled) || s.connGen != gen
+	}
+	if err := mc.Initialize(ctx); err != nil {
+		mc.Close()
+		// 总时限在初始化阶段就到点（负载很高/子进程迟迟不应答）：同样按超时/取消归类，不留无 code 的 500
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "initialize failed: " + err.Error(), "code": reasonTimeout, "reason": "连接超时"})
+		case errors.Is(ctx.Err(), context.Canceled):
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "已取消", "code": reasonCanceled, "reason": "已取消"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "initialize failed: " + err.Error()})
+		}
 		return
 	}
 
-	// connect 工具建立隧道
-	res, err := client.CallTool(ctx, "connect", connectToolArgs(req.Code, req.Server, req.NoAuth, req.MinProto))
-	if err != nil {
+	// connect 工具建立隧道；对端是旧版时按策略自动降级重试一次
+	policy := fallbackPolicy{
+		MinProto:    req.MinProto,
+		AllowLegacy: req.AllowLegacy,
+		LAN:         isLANRelay(req.Server, s.defaultServer),
+	}
+	call := func(c context.Context, minProto string) (json.RawMessage, error) {
+		return mc.CallTool(c, "connect", connectToolArgs(req.Code, req.Server, req.NoAuth, minProto))
+	}
+	out, err := connectWithFallback(ctx, call, policy, func() { s.broadcast("event: connect-fallback\ndata: 1\n") })
+	if err != nil || superseded() {
+		if superseded() {
+			mc.Close()
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "已取消", "code": reasonCanceled, "reason": "已取消"})
+			return
+		}
 		// connect 失败：不杀子进程（MCP server 仍存活在 bootstrap 状态），
 		// 用户修正参数后可再次点击连接（下次进来会先关掉这个旧进程再起新的）。
 		s.mu.Lock()
-		s.client = client
+		s.client = mc
 		s.connected = false
 		s.mu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "connect failed: " + err.Error()})
+		code, reason := classifyConnectError(err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && code != reasonPeerLegacy {
+			// 总时限到点：无论底层错误怎么包装，都归为超时（保持不重试、不降级）
+			code, reason = reasonTimeout, "连接超时"
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "connect failed: " + err.Error(), "code": code, "reason": reason,
+			"needs_confirm": out.NeedsAsk, "attempts": out.Attempts, "server": req.Server,
+		})
 		return
 	}
 
 	s.mu.Lock()
-	s.client = client
+	s.client = mc
 	s.connected = true
-	// 缓存连接参数，供子进程意外退出时自动重连
-	s.recordConnectMetadata(res, req.Code, req.Server, req.NoAuth, req.MinProto)
+	// 缓存连接参数，供子进程意外退出时自动重连；降级后沿用 min_proto=1，避免每次重连先失败一次
+	s.recordConnectMetadata(out.Raw, req.Code, req.Server, req.NoAuth, out.MinProto)
 	if !s.guardStarted {
 		s.guardStarted = true
 		go s.guardLoop()
 	}
 	s.mu.Unlock()
+	go s.watchPeer(context.Background(), mc) // 对端静默消失时主动发现并触发重连
 
 	s.broadcast("event: connected\n")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": json.RawMessage(res)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": json.RawMessage(out.Raw), "fallback": out.FellBack})
 }
 
 func (s *Server) handleDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -718,6 +802,11 @@ func (s *Server) guardLoop() {
 			continue
 		}
 		wasConnected := s.connected
+		why := dropByCode(dropLocalExit) // 没人标注原因就是子进程自己退出
+		if s.dropClient == client {
+			why = s.dropWhy
+		}
+		s.dropClient, s.dropWhy = nil, dropInfo{}
 		code, server, noAuth, minProto := s.lastCode, s.lastServer, s.lastNoAuth, s.lastMinProto
 		gen := s.connGen
 		s.connected = false
@@ -733,7 +822,7 @@ func (s *Server) guardLoop() {
 		}
 
 		// 自动重连，轻量退避，最多 6 次（约 1+2+3+4+5+5 = 20s）
-		s.broadcast("event: reconnecting\n")
+		s.broadcast(sseEventWithInfo("reconnecting", why, nil))
 		outcome := reconnectFailed
 		backoff := []time.Duration{1, 2, 3, 4, 5, 5}
 		for attempt, d := range backoff {
@@ -742,12 +831,16 @@ func (s *Server) guardLoop() {
 			if outcome != reconnectFailed {
 				break
 			}
-			s.broadcast(fmt.Sprintf("event: reconnect-fail\nretry %d/%d\n", attempt+1, len(backoff)))
+			// 重连时的拨号/握手错误比最初的断线原因更接近“现在为什么连不上”
+			if info, ok := s.takeReconnectFailure(); ok {
+				why = info
+			}
+			s.broadcast(sseEventWithInfo("reconnect-fail", why, map[string]any{"retry": attempt + 1, "max": len(backoff)}))
 		}
 		// reconnectSuperseded：用户在退避/连接期间自己接管了连接（主动断开或改连别的
 		// share）。别再广播 lost 盖掉用户当前看到的状态；仅在重连确实彻底失败时才报 lost。
 		if outcome == reconnectFailed {
-			s.broadcast("event: lost\n")
+			s.broadcast(sseEventWithInfo("lost", why, nil))
 		}
 	}
 }
@@ -760,6 +853,30 @@ const (
 	reconnectOK                                 // 已重连并安装为当前 client
 	reconnectSuperseded                         // 用户已接管连接意图，放弃这次过期重连
 )
+
+// setDropReason 登记 client 被主动关闭的原因，供 guardLoop 在它退出后广播。
+func (s *Server) setDropReason(c *MCPClient, why dropInfo) {
+	s.mu.Lock()
+	s.dropClient, s.dropWhy = c, why
+	s.mu.Unlock()
+}
+
+// noteReconnectFailure 记录最近一次重连失败的可归类原因；无法归类则保持为空。
+func (s *Server) noteReconnectFailure(err error) {
+	info, ok := classifyReconnectError(err)
+	s.mu.Lock()
+	s.reconnectFail, s.reconnectFailOK = info, ok
+	s.mu.Unlock()
+}
+
+// takeReconnectFailure 取走并清空 noteReconnectFailure 记录的原因。
+func (s *Server) takeReconnectFailure() (dropInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.reconnectFail, s.reconnectFailOK
+	s.reconnectFail, s.reconnectFailOK = dropInfo{}, false
+	return info, ok
+}
 
 // tryReconnect 用缓存参数重建子进程并完成 connect。gen 是守护线程发起重连时捕获的连接
 // 代次：建好连接后若 s.connGen 已变，说明用户在此期间主动断开或改连了别的 share，这条
@@ -795,6 +912,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool, minP
 	res, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth, minProto))
 	if err != nil {
 		client.Close()
+		s.noteReconnectFailure(err)
 		return reconnectFailed
 	}
 	s.mu.Lock()
@@ -809,6 +927,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool, minP
 	s.connected = true
 	s.recordConnectMetadata(res, code, server, noAuth, minProto)
 	s.mu.Unlock()
+	go s.watchPeer(context.Background(), client)
 	s.broadcast("event: connected\n")
 	return reconnectOK
 }
@@ -963,7 +1082,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case msg := <-ch:
-			fmt.Fprintf(w, "%s\n\n", msg)
+			fmt.Fprintf(w, "%s\n", msg) // msg 已以换行结尾，再补一个空行作为事件结束
 			flusher.Flush()
 		case <-ticker.C:
 			fmt.Fprintf(w, "event: ping\n\n")
@@ -976,4 +1095,18 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// splitCodeServer 把「协助码@host:port」拆成协助码和中转地址。server 已显式给出时以它为准；
+// 没有 @ 时原样返回。协助码本身不含 @，所以按最后一个 @ 切分是安全的。
+func splitCodeServer(code, server string) (string, string) {
+	code = strings.TrimSpace(code)
+	i := strings.LastIndex(code, "@")
+	if i < 0 {
+		return code, server
+	}
+	if strings.TrimSpace(server) == "" {
+		server = strings.TrimSpace(code[i+1:])
+	}
+	return strings.TrimSpace(code[:i]), server
 }

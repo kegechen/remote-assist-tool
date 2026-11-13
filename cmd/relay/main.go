@@ -21,11 +21,18 @@ import (
 	"github.com/remote-assist/tool/internal/version"
 )
 
+// defaultCodeMaxAge 协助码绝对寿命默认上限：固定码在 share 在线期间不按 TTL 过期，没有上限时
+// 泄露的码就永久有效；24h 覆盖一整个工作日的长时协助，又把泄露窗口收敛到一天。--code-max-age 0 可显式关闭。
+const defaultCodeMaxAge = 24 * time.Hour
+
 type relayOptions struct {
 	listenAddr     string
 	certFile       string
 	keyFile        string
 	codeTTL        time.Duration
+	codeMaxAge     time.Duration
+	stateDir       string
+	legacyExpiry   bool
 	codeLength     int
 	auditLog       string
 	plain          bool
@@ -111,6 +118,9 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		TLSCertFile:           opts.certFile,
 		TLSKeyFile:            opts.keyFile,
 		CodeTTL:               opts.codeTTL,
+		CodeMaxAge:            opts.codeMaxAge,
+		StateDir:              opts.stateDir,
+		LegacyCodeExpiry:      opts.legacyExpiry,
 		CodeLength:            opts.codeLength,
 		AuditLogFile:          opts.auditLog,
 		UseTLS:                !opts.plain,
@@ -155,7 +165,8 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	opts := relayOptions{
 		listenAddr:    ":8443",
 		codeTTL:       30 * time.Minute,
-		codeLength:    10,
+		codeMaxAge:    defaultCodeMaxAge,
+		codeLength:    12,
 		auditLog:      "audit.log",
 		certsDir:      "./certs",
 		trustSourceIP: true,
@@ -169,7 +180,10 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.StringVar(&opts.listenAddr, "listen", opts.listenAddr, "Listen address")
 	fs.StringVar(&opts.certFile, "cert", "", "TLS certificate file")
 	fs.StringVar(&opts.keyFile, "key", "", "TLS key file")
-	fs.DurationVar(&opts.codeTTL, "ttl", opts.codeTTL, "Assist code TTL")
+	fs.DurationVar(&opts.codeTTL, "ttl", opts.codeTTL, "Assist code TTL: how long a code is kept after its share goes offline (with --legacy-code-expiry: hard lifetime from issue)")
+	fs.DurationVar(&opts.codeMaxAge, "code-max-age", opts.codeMaxAge, "Absolute max lifetime of an assist code, counted from first issue and NOT reset by reuse, even while its share stays online (0 = unlimited: a leaked code then stays valid as long as its share runs)")
+	fs.StringVar(&opts.stateDir, "state-dir", "", "Directory to persist the code-reuse signing key (file reuse-secret, mode 0600). Without it the key lives in memory only: after a relay restart every share gets a NEW assist code (nobody can reclaim an old code). With it, a restarted relay lets the original share reclaim its code via its reuse token")
+	fs.BoolVar(&opts.legacyExpiry, "legacy-code-expiry", false, "Restore the old hard --ttl expiry; disables fixed codes across share/help reconnects")
 	fs.IntVar(&opts.codeLength, "length", opts.codeLength, "Assist code length")
 	fs.StringVar(&opts.auditLog, "audit", opts.auditLog, "Audit log file")
 	fs.BoolVar(&opts.plain, "plain", false, "Use plain TCP (insecure, for dev only)")
@@ -201,6 +215,9 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	}
 	if opts.codeTTL <= 0 {
 		return relayOptions{}, fmt.Errorf("ttl must be positive")
+	}
+	if opts.codeMaxAge < 0 {
+		return relayOptions{}, fmt.Errorf("code-max-age must not be negative")
 	}
 	opts.advertiseSTUN = splitList(*advertiseSTUN)
 	if err := relay.ValidateAdvertiseSTUN(opts.advertiseSTUN); err != nil {

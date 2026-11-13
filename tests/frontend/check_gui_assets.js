@@ -20,12 +20,12 @@ if (!htmlMatch) {
   process.exit(1);
 }
 const html = htmlMatch[1];
-const jsMatch = html.match(/<script>([\s\S]*?)<\/script>/);
+const jsBlocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]; const jsMatch = jsBlocks.length ? jsBlocks : null; // 主题脚本块 + 业务脚本块，按页面顺序合并执行
 if (!jsMatch) {
   console.error('FAIL: IndexHTML 里没有 <script> 块');
   process.exit(1);
 }
-const js = jsMatch[1];
+const js = jsMatch.map((m) => m[1]).join('\n');
 
 let failed = 0;
 const check = (name, ok, detail) => {
@@ -53,7 +53,7 @@ function mkEl(id) {
   const cls = new Set();
   return {
     id, style: {}, dataset: {}, children: [], _text: '', _html: '', _h: {},
-    classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c) },
+    classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c), toggle: (c, on) => { if (on === undefined ? !cls.has(c) : on) cls.add(c); else cls.delete(c); } },
     set textContent(v) { this._text = String(v); },
     get textContent() { return this._text; },
     // 真实 DOM 里 innerHTML='' 会连子节点一起清掉，stub 也照做，否则 renderTabs 重绘后
@@ -65,7 +65,9 @@ function mkEl(id) {
     // 记下 listener 以便测试里手动触发（拖拽这类交互只能这么测）
     addEventListener(type, fn) { (this._h[type] || (this._h[type] = [])).push(fn); },
     _fire(type, ev) { (this._h[type] || []).forEach((f) => f(ev)); },
-    setPointerCapture() {}, releasePointerCapture() {},
+    setPointerCapture() {}, releasePointerCapture() {}, setAttribute() {},
+    insertAdjacentHTML(pos, h) { this._html += String(h); },
+    querySelector() { return mkEl('anon'); }, removeAttribute() {}, getAttribute() { return null; }, querySelectorAll() { return []; },
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 260, height: 600 }),
     scrollTop: 0, scrollHeight: 0, value: '', disabled: false,
   };
@@ -82,20 +84,20 @@ const document = {
     }
     return els.get(ident) || null;
   },
-  createElement: () => mkEl('created'),
+  querySelectorAll: () => [], createElement: () => mkEl('created'),
   createTextNode: (value) => { const el = mkEl('text'); el.textContent = value; return el; },
   addEventListener() {},
-  body: mkEl('body'),
+  documentElement: mkEl('html'), body: mkEl('body'),
 };
 const ctx = {
   document, console,
   EventSource: function () { return { addEventListener() {}, onmessage: null, onerror: null }; },
   fetch: async () => ({ json: async () => ({ ok: true, result: {} }) }),
-  setTimeout, clearTimeout, AbortController, TextEncoder, TextDecoder, btoa, atob, URLSearchParams,
+  setTimeout, clearTimeout, performance, AbortController, TextEncoder, TextDecoder, btoa, atob, URLSearchParams,
   location: { search: '?token=test-token-123', href: 'http://127.0.0.1:8731/?token=test-token-123' },
   URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
   Blob: function () {},
-  window: { innerWidth: 1280, innerHeight: 800 },
+  window: { innerWidth: 1280, innerHeight: 800, addEventListener() {} },
 };
 ctx.globalThis = ctx;
 vm.createContext(ctx);
@@ -186,9 +188,11 @@ for (const [label, bytes, want] of [
 const cssMatch = html.match(/<style>([\s\S]*?)<\/style>/);
 const css = cssMatch ? cssMatch[1] : '';
 for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-output', '#term-box', '#file-box', '#search-box', '#proc-box']) {
-  const rule = css.match(new RegExp(sel.replace(/[#]/g, '\\$&') + '\\{([^}]*)\\}'));
-  check(`${sel} 可滚动(min-height:0)`, !!rule && /min-height:0/.test(rule[1]),
-    rule ? `规则里没有 min-height:0: ${rule[1]}` : '找不到该 CSS 规则');
+  const bodies = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter((m) => m[1].split(',').map((x) => x.trim()).includes(sel))
+    .map((m) => m[2]);
+  check(`${sel} 可滚动(min-height:0)`, bodies.some((b) => /min-height:0/.test(b)),
+    bodies.length ? `规则里没有 min-height:0: ${bodies.join(' | ')}` : '找不到该 CSS 规则');
 }
 
 // ---------- 7. 目录树宽度拖拽 ----------
@@ -267,7 +271,7 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   ctx.setUpgradeInfo({ peer_version: '0.0.6', help_version: '0.0.6' });
   check('同版本隐藏升级条', els.get('upgrade-notice').style.display === 'none');
 
-  const term = els.get('term-output');term.innerHTML='';
+  const term = els.get('term-log');term.innerHTML='';
   ctx.execEvent({type:'result',result:{stdout:'old stdout',stderr:'old stderr',exit_code:0}},{});
   check('0.0.5 最终响应 stdout 可见', term.children.some((n)=>n.textContent==='old stdout'));
   check('0.0.5 最终响应 stderr 可见', term.children.some((n)=>n.textContent==='old stderr'));
@@ -292,7 +296,7 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   els.get('status').onclick({stopPropagation(){}});
   check('点击状态显示详情面板', els.get('conn-info').style.display === 'block');
   check('状态面板请求即时延迟', /\/api\/status/.test(js) && /latency_ms/.test(js));
-  check('状态面板显示 P2P 或 Relay', /P2P 直连/.test(js) && /Relay 中转/.test(js));
+  check('状态面板区分 P2P 直连 / UDP 中继 / 中继转发', /P2P 直连/.test(js) && /UDP 中继/.test(js) && /中继转发/.test(js));
   els.get('conn-info').style.display='none';
 }
 
@@ -311,10 +315,97 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   check('终端页关不掉', !!still);
 }
 
-// ---------- 14. 兼容旧版复选框 ----------
-// 复选框要真的把 min_proto 送到后端，失败时要把写给 AI 的 min_proto 指引翻译成
-// GUI 上能操作的话，降级成功要把警告亮出来——三处任何一处断了，用户都无从得知。
+// ---------- 16. 画面尺寸 / 数据量上限 ----------
+// 被控端不可信：单边限 16384 挡不住面积（16384x16384 的画布约 1GB），还可能在 width/height
+// 里报小尺寸、实际塞一张巨图。净化要按面积封顶、限制数据量，并在解码前读 JPEG 头里的真实尺寸。
+{
+  const big = ctx.deskSanitize({ width: 16384, height: 16384, data: 'AAAA' });
+  check('面积超限的帧被标记拒绝', !!big.bad && big.width === 0 && big.height === 0 && big.data === '');
+  const ok = ctx.deskSanitize({ width: 1920, height: 1080, data: 'AAAA' });
+  check('正常尺寸的帧不被拒绝', !ok.bad && ok.width === 1920 && ok.height === 1080 && ok.data === 'AAAA');
+  const huge = ctx.deskSanitize({ width: 100, height: 100, data: 'A'.repeat(16 * 1024 * 1024 + 4) });
+  check('数据量超限的帧被标记拒绝', !!huge.bad && huge.data === '');
+
+  // agent 实际产出的 JPEG（并行条带拼接，含 RST 标记）：48x640
+  const real = Uint8Array.from(Buffer.from('/9j/2wCEAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk8BDg4OExETJhUVJk81LTVPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT//AABEIAoAAMAMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/3QAEAA//2gAMAwEAAhEDEQA/APMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9DzCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//R8wooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//0vMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9PzCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//U8wooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//1fMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9bzCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//Z', 'base64'));
+  const sz = ctx.deskJpegSize(real);
+  check('从 agent 实际产出的 JPEG 读出真实尺寸', !!sz && sz.w === 48 && sz.h === 640, JSON.stringify(sz));
+  check('正常尺寸可解码', ctx.deskFrameOK(sz));
+  // 构造：SOI + APP0 + SOF0(40000x40000)
+  const bomb = Uint8Array.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00,
+    0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x9C, 0x40, 0x9C, 0x40, 0x01, 0x01, 0x11, 0x00]);
+  const bsz = ctx.deskJpegSize(bomb);
+  check('读出 JPEG 头里声明的巨大尺寸', !!bsz && bsz.w === 40000 && bsz.h === 40000, JSON.stringify(bsz));
+  check('巨大尺寸拒绝解码', !ctx.deskFrameOK(bsz));
+  check('非 JPEG 拒绝解码', !ctx.deskFrameOK(ctx.deskJpegSize(Uint8Array.from([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0, 0, 0]))));
+  // 接线：帧循环必须先拒绝 bad 帧、先查真实尺寸再 createImageBitmap
+  const loop = js.slice(js.indexOf('d=deskSanitize(parseMCP(r.result))'));
+  check('帧循环拒绝 bad 帧', /^[^\n]*\n\s*if\(d&&d\.bad\)\{fail=d\.bad;break\}/.test(loop.replace(/\r/g, '')));
+  const iOK = loop.indexOf('deskFrameOK(deskJpegSize('), iDec = loop.indexOf('createImageBitmap(');
+  check('解码前先检查真实尺寸', iOK > 0 && iDec > iOK);
+}
+
+// ---------- 15. 快捷键按钮 ----------
+// 桌面页：每个组合键必须在「一次 input 调用」里发完整的 按下…抬起，修饰键才不会卡住；
+// 允许操控关闭时不得发送；发送失败要有可见提示。终端页：紧急输入失败（pty_write_blocked）不得被吞掉。
+const keysChecks = (async () => {
+  const ev = (id, darwin) => JSON.stringify(ctx.deskComboEvents(id, darwin));
+  const seq = (...a) => JSON.stringify(a.map(([t, k]) => ({ type: t, key: k })));
+  check('Ctrl+C 序列', ev('ctrl-c', false) === seq(['key_down', 'Control'], ['key_down', 'c'], ['key_up', 'c'], ['key_up', 'Control']), ev('ctrl-c', false));
+  check('Alt+Tab 序列', ev('alt-tab', false) === seq(['key_down', 'Alt'], ['key_down', 'Tab'], ['key_up', 'Tab'], ['key_up', 'Alt']), ev('alt-tab', false));
+  check('Win 键序列', ev('win', false) === seq(['key_down', 'Meta'], ['key_up', 'Meta']), ev('win', false));
+  check('Esc 序列', ev('esc', false) === seq(['key_down', 'Escape'], ['key_up', 'Escape']), ev('esc', false));
+  check('macOS 对端 Ctrl+V 换成 Cmd(Meta)+V', ev('ctrl-v', true) === seq(['key_down', 'Meta'], ['key_down', 'v'], ['key_up', 'v'], ['key_up', 'Meta']), ev('ctrl-v', true));
+  check('macOS 对端 Esc 不变', ev('esc', true) === ev('esc', false));
+  check('识别 darwin 对端', ctx.peerHostIsDarwin('alice@mac darwin arm64') === true && ctx.peerHostIsDarwin('darwin-box linux amd64') === false);
+
+  const realApi = ctx.api;
+  const apiCalls = [];
+  let apiReply = { ok: true, result: {} };
+  ctx.api = async (path, body) => { apiCalls.push({ path, body }); return apiReply; };
+  vm.runInContext('connected=true', ctx);
+  const ctl = els.get('deskCtl'), toast = els.get('deskToast');
+  ctl.checked = true; toast.textContent = '';
+  const ok = await ctx.deskCombo('ctrl-c');
+  check('Ctrl+C 只发一次 input 调用且含 4 个事件', ok === true && apiCalls.length === 1 && apiCalls[0].body.tool === 'input' && apiCalls[0].body.args.events.length === 4, JSON.stringify(apiCalls));
+  apiCalls.length = 0; ctl.checked = false;
+  const off = await ctx.deskCombo('ctrl-c');
+  check('关闭「允许操控」时不发送并提示', off === false && apiCalls.length === 0 && /允许操控/.test(toast.textContent), toast.textContent);
+  ctx.deskKeysSync();
+  check('关闭「允许操控」时按钮禁用', els.get('deskK-ctrl-c').disabled === true && els.get('deskK-win').disabled === true);
+  ctl.checked = true; ctx.deskKeysSync();
+  check('开启「允许操控」时按钮可用', els.get('deskK-ctrl-c').disabled === false);
+  apiReply = { ok: false, error: 'desktop_disabled' }; toast.textContent = '';
+  const bad = await ctx.deskCombo('alt-tab');
+  check('发送失败时 deskToast 可见提示', bad === false && /快捷键发送失败/.test(toast.textContent), toast.textContent);
+  ctx.api = realApi;
+
+  // 终端页：单独加载 pty_term.js
+  const ptyEls = new Map(['ptyKeyMsg'].map((id) => [id, mkEl(id)]));
+  let reply = { ok: false, error: 'pty_write_blocked: 终端输入被阻塞' };
+  const pctx = {
+    document: { querySelector: (sel) => ptyEls.get(sel.slice(1)) || null, createElement: () => mkEl('c'), head: mkEl('head'), body: mkEl('body') },
+    window: { addEventListener() {} },
+    location: { search: '?token=t' }, URLSearchParams, TextEncoder, TextDecoder, btoa, atob, setTimeout, clearTimeout,
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    fetch: async () => ({ ok: reply.ok, status: reply.ok ? 200 : 502, json: async () => reply }),
+  };
+  vm.createContext(pctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'gui', 'assets', 'pty', 'pty_term.js'), 'utf8'), pctx, { filename: 'pty_term.js' });
+  const PT = pctx.window.PtyTerm;
+  const res = await PT._sendUrgent(new Uint8Array([3]));
+  const msg = ptyEls.get('ptyKeyMsg').textContent;
+  check('Ctrl+C 被阻塞时终端页给出可见提示', res === false && /阻塞/.test(msg), msg);
+  reply = { ok: true }; ptyEls.get('ptyKeyMsg').textContent = '';
+  check('Ctrl+C 成功时不提示', (await PT._sendUrgent(new Uint8Array([3]))) === true && ptyEls.get('ptyKeyMsg').textContent === '');
+})();
+
+// ---------- 14. 旧版对端降级 ----------
+// PR #4 去掉了「兼容旧版」复选框，改由后端按策略降级：内网/本机中继自动降级，公网中继
+// 返回 needs_confirm，必须由用户确认后带 allow_legacy=true 重连（中继可伪造「旧版」诱导降级）。
+// 降级成功要把警告亮出来；未确认前前端不得自行重试。
 (async () => {
+  await keysChecks;
   const calls = [];
   let connectReply = { ok: true, result: {} };
   ctx.fetch = async (p, opts) => {
@@ -322,60 +413,35 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
     calls.push({ path: p, body });
     return { json: async () => (p === '/api/connect' ? connectReply : { ok: true, result: {} }) };
   };
-  const term = els.get('term-output');
-  const lastConnect = () => calls.filter((c) => c.path === '/api/connect').pop();
+  const term = els.get('term-log');
+  const connects = () => calls.filter((c) => c.path === '/api/connect');
+  const lastConnect = () => connects().pop();
   const mcpText = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });
 
-  els.get('legacy').checked = false;
   connectReply = { ok: true, result: mcpText({ connected: true, proto_version: '2' }) };
   term.innerHTML = '';
   await ctx.doConnect();
-  check('未勾选兼容旧版时 min_proto 为空', !!lastConnect() && lastConnect().body.min_proto === '');
+  check('默认连接不允许降级(allow_legacy=false)', !!lastConnect() && lastConnect().body.allow_legacy === false);
   check('谈成 v2 不显示警告', !/\[警告\]/.test(term.innerHTML));
 
-  els.get('legacy').checked = true;
-  connectReply = { ok: true, result: mcpText({ connected: true, proto_version: '1', warning: '已降级到 v1 兼容模式' }) };
+  connectReply = { ok: false, code: 'peer_legacy', needs_confirm: true, reason: '对端是旧版', error: 'connect failed: peer is legacy' };
   term.innerHTML = '';
+  const n0 = connects().length;
   await ctx.doConnect();
-  check('勾选兼容旧版时送出 min_proto=1', !!lastConnect() && lastConnect().body.min_proto === '1');
-  check('降级成功时终端显示警告', /\[警告\].*已降级到 v1 兼容模式/.test(term.innerHTML));
+  check('公网中继遇旧版对端：不自动降级重试', connects().length === n0 + 1);
+  check('公网中继遇旧版对端：弹出确认提示', els.get('connToast').dataset.state === undefined
+    ? els.get('connToast').className === 'confirm' : els.get('connToast').dataset.state === 'confirm');
 
-  els.get('legacy').checked = false;
-  connectReply = { ok: false, error: 'connect failed: handshake failed: 对端只支持 v1……再调用 connect 并带上 min_proto="1"' };
+  connectReply = { ok: true, fallback: true, result: mcpText({ connected: true, proto_version: '1' }) };
   term.innerHTML = '';
-  await ctx.doConnect();
-  check('旧版对端被拒时提示勾选兼容旧版', /勾选「兼容旧版」/.test(term.innerHTML));
-
-  els.get('legacy').checked = true;
-  term.innerHTML = '';
-  await ctx.doConnect();
-  check('已勾选时不重复提示勾选', !/勾选「兼容旧版」/.test(term.innerHTML));
-
-  // 判据要窄：参数校验错误里也出现 min_proto 这个词（"connect accepts only: ..., min_proto"），
-  // 那不是对端太旧，不该把用户引向降级。
-  els.get('legacy').checked = false;
-  connectReply = { ok: false, error: 'connect failed: bad args: json: unknown field "x" (connect accepts only: code, server, no_auth, min_proto; ...)' };
-  term.innerHTML = '';
-  await ctx.doConnect();
-  check('参数错误不误报为旧版对端', !/勾选「兼容旧版」/.test(term.innerHTML));
-
-  // 通道内升级成功后取消勾选：对端已是当前版本。
-  els.get('legacy').checked = true;
-  ctx.confirm = () => true;
-  const realFetch = ctx.fetch;
-  ctx.fetch = async (p, opts) => p === '/api/upgrade'
-    ? { json: async () => ({ ok: true, peer_version: '1.0.1' }) }
-    : realFetch(p, opts);
-  ctx.FormData = function () { this.append = () => {}; };
-  els.get('upgrade-file').files = [{ name: 'remote.exe' }];
-  await els.get('upgrade-file').onchange();
-  check('升级成功后取消勾选兼容旧版', els.get('legacy').checked === false);
-  ctx.fetch = realFetch;
+  await ctx.doConnect(true);
+  check('用户确认后带 allow_legacy=true', !!lastConnect() && lastConnect().body.allow_legacy === true);
+  check('降级成功时终端显示警告', /\[警告\].*兼容模式/.test(term.innerHTML));
 
   console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
   process.exit(failed ? 1 : 0);
 })().catch((e) => {
-  check('兼容旧版复选框', false, `${e.name}: ${e.message}`);
+  check('旧版对端降级', false, `${e.name}: ${e.message}`);
   console.log(`\n${failed} 项失败`);
   process.exit(1);
 });

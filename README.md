@@ -259,6 +259,8 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--listen` | `:8443` | Listen address |
 | `--cert` / `--key` | - | TLS certificate / private key files |
 | `--ttl` | `30m` | Assist code lifetime |
+| `--code-max-age` | `24h` | Absolute lifetime of an assist code, counted from first issue and never reset by reconnects/reuse, even while its share stays online. `0` disables the cap (a leaked code then stays valid as long as its share runs) |
+| `--state-dir` | empty | Persist the code-reuse signing key (`reuse-secret`, mode 0600). Empty = key kept in memory only: after a relay restart every share receives a new assist code and nobody can reclaim an old one (so a leaked code cannot be grabbed by a third party). Set it if shares should keep their code across relay restarts; only the original share (holding its reuse token) can reclaim it. The Windows service enables it by default |
 | `--length` | `10` | Assist code length |
 | `--audit` | `audit.log` | Audit log file |
 | `--stun` | empty | STUN/UDP relay listen address; e.g. `:3478`, empty disables it |
@@ -314,6 +316,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--code-file` | - | After registration, atomically write the assist code + expiry as JSON to this file (for a host program to read) |
 | `--root` | - | Optional: confine the file tools to this subtree (unset = unrestricted). Protection against slips, not a security boundary |
 | `--allow-exec` | - | exec command allow list (comma-separated; empty = bound only by the deny list) |
+| `--enable-desktop` | `false` | Allow the helper to view this screen and control mouse/keyboard (remote desktop). Off by default; when on, the console warns the first time each helper session views / controls the screen; an in-channel upgrade turns it off (restart share with the flag to re-enable) |
 | `--deny-exec` | `rm,shutdown,reboot,mkfs,dd` | exec command deny list |
 | `--elevate` | `false` | Windows: request administrator privileges via UAC at startup |
 | `--unsafe-exec` | `false` | **Dangerous**: disables the exec deny/allow lists so any command can run (startup shows a 5-second red confirmation countdown). Does not affect `--root` |

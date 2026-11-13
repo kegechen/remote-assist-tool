@@ -78,13 +78,16 @@ func TestExecStreamingClosesInheritedPipesOnTimeout(t *testing.T) {
 	tool := NewExec(nil)
 	start := time.Now()
 	var err error
-	runWithin(t, 2*time.Second, "streaming exec", func() {
+	// 超时 100ms；管道被孙进程占着时靠 2s 的 WaitDelay 兜底强制关闭，所以真正“卡住”的特征是
+	// 逼近甚至超过 execWaitDelay。上限取 4s：既能抓住“管道没被关闭、无限等待”的回归，
+	// 又不会在机器繁忙（并行编译、浏览器测试）时因调度延迟误报（实测繁忙时会到 1.2s）。
+	runWithin(t, 4*time.Second, "streaming exec", func() {
 		_, err = tool.Run(context.Background(), args, &timedSink{})
 	})
 	if err == nil {
 		t.Fatal("期望超时错误")
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("继承输出管道的孙进程不应让 streaming exec 卡住: %v", elapsed)
 	}
 	// pipe holder 会自行退出，避免测试留下外部进程。

@@ -6,19 +6,19 @@ import (
 )
 
 func TestCodeGeneration(t *testing.T) {
-	cm := NewCodeManager(10)
+	cm := NewCodeManager(12)
 
 	code, err := cm.Generate()
 	if err != nil {
 		t.Fatalf("Generate failed: %v", err)
 	}
 
-	if len(code) != 10 {
-		t.Errorf("Expected code length 10, got %d", len(code))
+	if len(code) != 12 {
+		t.Errorf("Expected code length 12, got %d", len(code))
 	}
 
 	// Verify character set
-	validChars := "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	validChars := "ABCDEFGHJKMNPQRSTUVWXYZ23456789" // 只允许大写字母和数字
 	for _, c := range code {
 		if !strings.ContainsRune(validChars, c) {
 			t.Errorf("Invalid character in code: %c", c)
@@ -74,7 +74,8 @@ func TestFormatCode(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"ABCDEFGHIJ", "ABCD-EFGHIJ"},
+		{"ABCDEFGHJKMN", "ABCD-EFGH-JKMN"},
+		{"ABCDEFGHIJ", "ABCD-EFGH-IJ"},
 		{"ABCD", "ABCD"},
 		{"", ""},
 	}
@@ -95,5 +96,33 @@ func TestDefaultCodeLength(t *testing.T) {
 	}
 	if len(code) != defaultCodeLength {
 		t.Errorf("Expected default length %d, got %d", defaultCodeLength, len(code))
+	}
+}
+
+// 协助码只能由大写字母和数字组成，任何位置都不能出现小写字母。
+func TestCodeUppercaseAndDigitsOnly(t *testing.T) {
+	cm := NewCodeManager(0)
+	for i := 0; i < 2000; i++ {
+		code, err := cm.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(code) != 12 {
+			t.Fatalf("默认长度应为 12，得到 %d (%q)", len(code), code)
+		}
+		for _, c := range code {
+			if !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+				t.Fatalf("协助码含非大写字母/数字字符 %q: %q", c, code)
+			}
+		}
+	}
+}
+
+// 输入协助码时 - / 空格 / _ 都不是必须的，带不带结果一致。
+func TestNormalizeCodeDashOptional(t *testing.T) {
+	for _, in := range []string{"ABCDEFGHJKMN", "ABCD-EFGH-JKMN", "abcd"[:0] + "ABCD EFGH JKMN", "ABCD_EFGH_JKMN", "ABCD-EFGHJKMN"} {
+		if got := normalizeCode(in); got != "ABCDEFGHJKMN" {
+			t.Errorf("normalizeCode(%q)=%q", in, got)
+		}
 	}
 }

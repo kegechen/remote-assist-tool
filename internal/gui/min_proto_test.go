@@ -95,6 +95,9 @@ func runFakeMCP(logPath string) {
 			continue
 		}
 		var result any = map[string]any{}
+		if req.Method == "tools/call" && req.Params.Name == "connect" && os.Getenv("RAT_GUI_FAKE_MCP_HANG") == "1" {
+			continue // 模拟连接黑洞地址：connect 永不应答
+		}
 		if req.Method == "tools/call" && req.Params.Name == "connect" {
 			os.WriteFile(logPath, req.Params.Arguments, 0o644)
 			result = map[string]any{"content": []map[string]any{{"type": "text", "text": `{"connected":true,"proto_version":"1"}`}}}

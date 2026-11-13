@@ -1,0 +1,15 @@
+/* 真终端（xterm.js）页样式。颜色走 CSS 变量（--term-bg/--term-fg 等，由主题提供，缺省时脚本内给深色默认值）。 */
+#xterm-host{display:none;flex:1;min-height:0;overflow:hidden;background:var(--term-bg,#0c0d1b)}
+#term-box.pty-on #term-output{display:none}
+#term-box.pty-on #xterm-host{display:block}
+#xterm-host .xterm{height:100%;padding:10px 12px;box-sizing:border-box}
+#xterm-host .xterm-viewport{background-color:transparent !important}
+#term-box.pty-on #term-status{display:none}
+/* 终端快捷键工具栏：仅真终端模式显示，样式沿用主题变量（深/浅色均适用） */
+#pty-keys{display:none;flex:none;align-items:center;gap:6px;padding:4px 12px;border-bottom:1px solid var(--line)}
+#term-box.pty-on #pty-keys{display:flex}
+#pty-keys button{height:24px;padding:0 10px;font-size:12px;font-family:var(--mono,inherit);background:var(--fill);color:var(--text);border:1px solid var(--line);border-radius:var(--r-md,8px);cursor:pointer}
+#pty-keys button:hover:not(:disabled){background:var(--fill-hover);border-color:var(--line-hi)}
+#pty-keys button:disabled{opacity:.45;cursor:default}
+#pty-keys button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+#pty-keys .pk-msg{margin-left:auto;font-size:12px;color:var(--err)}

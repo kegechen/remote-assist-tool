@@ -32,14 +32,20 @@ const (
 	// 异常时快速失败，不必干等 10 分钟。只用于“确定性快、输出有界”的工具，避免重蹈
 	// 上面提到的“60s 硬切误杀长跑工具”覆辙。
 	callToolQuickFallbackTimeout = 2 * time.Minute
+	// ptyOpenFallbackTimeout pty_open 长会话的兜底上限。
+	ptyOpenFallbackTimeout = 24 * time.Hour
 )
 
 // fallbackTimeoutFor 按工具名选择兜底超时。只有确定快、输出有界的元数据类工具走短
 // 兜底；exec/grep/glob/read_file/write_file/文件传输等可能合理长跑的仍用 10 分钟。
 func fallbackTimeoutFor(name string) time.Duration {
 	switch name {
-	case "stat", "list_dir", "process_list", "tail_log":
+	case "stat", "list_dir", "process_list", "tail_log", "screen_capture", "input",
+		"pty_write", "pty_resize", "pty_close":
 		return callToolQuickFallbackTimeout
+	case "pty_open":
+		// 真终端是无终止的长流，不能被 10 分钟兜底误杀（与 agent.PTYOpenTimeout 一致）。
+		return ptyOpenFallbackTimeout
 	default:
 		return callToolFallbackTimeout
 	}

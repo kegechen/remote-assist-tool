@@ -259,6 +259,8 @@ MCP server 名建议用 `remote-debug`。
 | `--listen` | `:8443` | 监听地址 |
 | `--cert` / `--key` | - | TLS 证书 / 私钥文件 |
 | `--ttl` | `30m` | 协助码有效期 |
+| `--code-max-age` | `24h` | 协助码绝对寿命：从首次签发起算，重连/复用都不重置，share 一直在线也到期。`0` 关闭上限（泄露的码将在其 share 在线期间一直有效） |
+| `--state-dir` | 空 | 把「码复用令牌」的签名密钥落盘（`reuse-secret`，权限 0600）。为空时密钥只在内存：relay 重启后所有 share 换新协助码、任何人都无法取回旧码（泄露的码因此不会被第三方抢占）。希望 relay 重启后 share 的码不变就设置它，只有持有复用令牌的原 share 才能取回原码。Windows 服务默认开启 |
 | `--length` | `10` | 协助码长度 |
 | `--audit` | `audit.log` | 审计日志文件 |
 | `--stun` | 空 | STUN/UDP relay 监听地址；例如 `:3478`，空则禁用 |
@@ -314,6 +316,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--code-file` | - | 注册后把协助码+有效期以 JSON 原子写到该文件（供宿主程序读取） |
 | `--root` | - | 可选：把文件工具限制在该子树（未设 = 不限制）。防手滑，非安全边界 |
 | `--allow-exec` | - | exec 命令白名单（逗号分隔，空=仅受黑名单约束） |
+| `--enable-desktop` | `false` | 允许协助端查看本机屏幕并操控键鼠（远程桌面）。默认关闭；开启后每个协助会话首次看屏、首次操控时控制台会醒目提示；通道内升级后自动关闭（需重新带参数启动 share） |
 | `--deny-exec` | `rm,shutdown,reboot,mkfs,dd` | exec 命令黑名单 |
 | `--elevate` | `false` | Windows：启动时经 UAC 请求管理员权限 |
 | `--unsafe-exec` | `false` | **危险**：关闭 exec 黑/白名单，任意命令可跑（启动有 5 秒红色确认倒计时）。不影响 `--root` |

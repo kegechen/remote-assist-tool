@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	charset           = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
-	defaultCodeLength = 10
+	// 协助码只含大写字母和数字，并去掉易混淆的 I L O 0 1（共 31 个字符）。
+	// 字符集比旧版（54 个，大小写混合）小，所以默认长度由 10 提到 12，熵约 59 bit，不低于旧版的约 57 bit。
+	charset           = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+	defaultCodeLength = 12
 )
 
 // CodeManager generates assistance codes
@@ -52,10 +54,14 @@ func normalizeCode(code string) string {
 	}, code)
 }
 
-// FormatCode formats a code for display
+// FormatCode 把协助码每 4 位用 - 分组显示（XXXX-XXXX-XXXX）；输入时 - 可有可无，见 normalizeCode。
 func FormatCode(code string) string {
-	if len(code) <= 4 {
-		return code
+	var sb strings.Builder
+	for i, r := range code {
+		if i > 0 && i%4 == 0 {
+			sb.WriteByte('-')
+		}
+		sb.WriteRune(r)
 	}
-	return code[:4] + "-" + code[4:]
+	return sb.String()
 }

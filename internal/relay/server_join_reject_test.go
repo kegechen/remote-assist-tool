@@ -52,7 +52,8 @@ func parseLastJoinResponse(t *testing.T, buf *bytes.Buffer) *proto.JoinResponse 
 // TestJoinAllInternalFailuresReturnSamePublicError 验证 invalid/expired/has_helper/disconnected
 // 四类内部 Join 失败对外返回完全相同的公开响应，不泄露会话状态。
 func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
-	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false}
+	// 场景二依赖硬 TTL 过期，故用 legacy 过期语义；sticky 下 share 在线的码不按 TTL 过期。
+	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false, LegacyCodeExpiry: true}
 	srv, _ := NewServer(cfg)
 
 	// 场景一：code 不存在 → ErrCodeInvalid
@@ -104,7 +105,8 @@ func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
 
 // TestJoinFiveInternalFailuresCloseConnection 连续 5 次内部 Join 失败后连接关闭。
 func TestJoinFiveInternalFailuresCloseConnection(t *testing.T) {
-	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false}
+	// 场景二依赖硬 TTL 过期，故用 legacy 过期语义；sticky 下 share 在线的码不按 TTL 过期。
+	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false, LegacyCodeExpiry: true}
 	srv, _ := NewServer(cfg)
 
 	conn := &capturingConn{remoteAddr: "10.1.1.1:6000"}
@@ -152,7 +154,8 @@ func TestJoinFiveLimiterRejectionsCloseConnection(t *testing.T) {
 
 // TestJoinFourFailsThenValidSucceeds 前 4 次失败、第 5 次合法 code 时 Join 成功，不被提前关闭。
 func TestJoinFourFailsThenValidSucceeds(t *testing.T) {
-	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false}
+	// 场景二依赖硬 TTL 过期，故用 legacy 过期语义；sticky 下 share 在线的码不按 TTL 过期。
+	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false, LegacyCodeExpiry: true}
 	srv, _ := NewServer(cfg)
 
 	share := &ClientConn{ID: "share-valid", Conn: &capturingConn{remoteAddr: "10.3.3.3:8000"}}

@@ -62,6 +62,10 @@ func classifyError(err error) (code, msg string) {
 	switch {
 	case strings.Contains(s, "path_outside_root"):
 		return "path_outside_root", s
+	case strings.Contains(s, "desktop_disabled"):
+		return "desktop_disabled", s
+	case strings.Contains(s, "desktop_unsupported"):
+		return "desktop_unsupported", s
 	case strings.Contains(s, "exec_denied"):
 		return "exec_denied", s
 	case strings.Contains(s, "deadline_exceeded"), strings.Contains(s, "context deadline exceeded"):
@@ -75,13 +79,20 @@ func classifyError(err error) (code, msg string) {
 	}
 }
 
+// PTYOpenTimeout pty_open（真终端长会话）的执行上限。mcp.fallbackTimeoutFor 与之保持一致。
+const PTYOpenTimeout = 24 * time.Hour
+
 // defaultToolTimeout 给未显式带 DeadlineMs 的工具请求兜底执行上限，按工具分档：
 // 元数据类快工具短兜底；exec / grep / 文件传输等可能合理长跑的给更长上限。与 host 端
 // mcp.fallbackTimeoutFor 呼应，但更紧（share 端先于 host 兜底返回，避免误报 tunnel_lost）。
 func defaultToolTimeout(tool string) time.Duration {
 	switch tool {
-	case "stat", "list_dir", "process_list", "tail_log", "glob":
+	case "stat", "list_dir", "process_list", "tail_log", "glob", "screen_capture", "input",
+		"pty_write", "pty_resize", "pty_close":
 		return 30 * time.Second
+	case "pty_open":
+		// 终端会话是无终止的长流，不套 5 分钟兜底；取消 / 断线由 ctx 取消与会话清理负责。
+		return PTYOpenTimeout
 	default:
 		return 5 * time.Minute
 	}
@@ -107,6 +118,12 @@ type Daemon struct {
 	// OnTransfer 可选钩子：成功的文件传输分块改由它接收（见 parseTransfer），
 	// 不再触发 OnActivity。未设置时传输分块照旧逐条走 OnActivity。
 	OnTransfer func(TransferEvent)
+	// OnDesktopUse 可选钩子：每个协助会话内，首次成功查看屏幕（screen_capture）、首次成功注入键鼠（input）
+	// 时各触发一次，供 share 打印醒目提示。远程桌面的成功调用在日志/控制台里是静默的（高频），
+	// 没有这个钩子被协助方就完全不知道屏幕正被查看或操控。会话换 key（新的协助端握手）后重新提示。
+	OnDesktopUse func(tool string)
+	deskMu       sync.Mutex
+	deskSeen     map[string]bool
 }
 
 func NewDaemon(reg *Registry, conn MsgConn, sess proto.Session) *Daemon {
@@ -126,6 +143,10 @@ func (d *Daemon) RotateSession(sess proto.Session) {
 	// 换 key ⟹ 新会话，抗重放窗口必须跟着重置：新会话的调用 ID 与旧会话无关，
 	// 留着旧位会把合法请求误判成重放。
 	d.replay.reset()
+	// 新会话的协助端可能是另一个人，远程桌面的醒目提示要重新出现。
+	d.deskMu.Lock()
+	d.deskSeen = nil
+	d.deskMu.Unlock()
 	d.cancels.Range(func(k, v any) bool {
 		if cancel, ok := v.(context.CancelFunc); ok {
 			cancel()
@@ -317,6 +338,9 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if !resp.OK {
 		status = "err:" + resp.ErrorCode
 	}
+	if resp.OK && (req.Tool == "screen_capture" || req.Tool == "input") {
+		d.noteDesktopUse(sess, req.Tool)
+	}
 	dur := time.Since(start).Milliseconds()
 	// 文件传输分块交给 OnTransfer 聚合成进度，不再逐块各打一行活动和一行日志——
 	// 一个几十 MB 的文件就是上百块，刷屏且淹没其他调用。失败的分块仍走常规路径，
@@ -325,8 +349,14 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		d.OnTransfer(ev)
 	} else {
 		argsSummary := summarizeArgs(req.Tool, req.ArgsJSON)
-		log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
-		if d.OnActivity != nil {
+		// 远程桌面是高频调用（每秒数次抓屏/输入）：成功的不逐条记日志/刷控制台，失败的照常显示；
+		// input 的参数（按键文本）本来就不进摘要。
+		// pty_write / pty_resize 是逐按键级别的高频调用，同样静默（输入内容本就不进摘要）。
+		quiet := (req.Tool == "screen_capture" || req.Tool == "input" || req.Tool == "pty_write" || req.Tool == "pty_resize") && resp.OK
+		if !quiet {
+			log.Printf("tool | %s | %s | %dms | %s", req.Tool, argsSummary, dur, status)
+		}
+		if d.OnActivity != nil && !quiet {
 			d.OnActivity(fmt.Sprintf("[%s] %s: %s (%dms, %s)",
 				time.Now().Format("15:04:05"), req.Tool, argsSummary, dur, status))
 		}
@@ -353,6 +383,28 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 //
 // v1 会话下保持 0.0.x 的旧行为：空 result 不封。那时的接收侧正是按 len(result) > 0
 // 决定要不要解密的，这里若强行封一个 "{}"，对端会把它当成真实结果解出来。
+// noteDesktopUse 本会话首次成功使用某个远程桌面工具时触发 OnDesktopUse（每个工具每会话一次）。
+// sess 是该请求所属的会话：旧会话的在途请求在换 key 之后才完成时不计入，否则会把新会话的
+// 「已提示」位提前占掉，新协助端第一次看屏/操控时就不再提示。钩子在锁外调用，避免打印阻塞其他请求。
+func (d *Daemon) noteDesktopUse(sess proto.Session, tool string) {
+	d.deskMu.Lock()
+	if sess != d.currentSession() {
+		d.deskMu.Unlock()
+		return
+	}
+	first := !d.deskSeen[tool]
+	if first {
+		if d.deskSeen == nil {
+			d.deskSeen = map[string]bool{}
+		}
+		d.deskSeen[tool] = true
+	}
+	d.deskMu.Unlock()
+	if first && d.OnDesktopUse != nil {
+		d.OnDesktopUse(tool)
+	}
+}
+
 func (d *Daemon) sendResp(sess proto.Session, resp proto.ToolResp) error {
 	if sess.Active() {
 		plain := resp.ResultJSON
