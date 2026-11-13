@@ -315,6 +315,36 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   check('终端页关不掉', !!still);
 }
 
+// ---------- 16. 画面尺寸 / 数据量上限 ----------
+// 被控端不可信：单边限 16384 挡不住面积（16384x16384 的画布约 1GB），还可能在 width/height
+// 里报小尺寸、实际塞一张巨图。净化要按面积封顶、限制数据量，并在解码前读 JPEG 头里的真实尺寸。
+{
+  const big = ctx.deskSanitize({ width: 16384, height: 16384, data: 'AAAA' });
+  check('面积超限的帧被标记拒绝', !!big.bad && big.width === 0 && big.height === 0 && big.data === '');
+  const ok = ctx.deskSanitize({ width: 1920, height: 1080, data: 'AAAA' });
+  check('正常尺寸的帧不被拒绝', !ok.bad && ok.width === 1920 && ok.height === 1080 && ok.data === 'AAAA');
+  const huge = ctx.deskSanitize({ width: 100, height: 100, data: 'A'.repeat(16 * 1024 * 1024 + 4) });
+  check('数据量超限的帧被标记拒绝', !!huge.bad && huge.data === '');
+
+  // agent 实际产出的 JPEG（并行条带拼接，含 RST 标记）：48x640
+  const real = Uint8Array.from(Buffer.from('/9j/2wCEAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk8BDg4OExETJhUVJk81LTVPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT//AABEIAoAAMAMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/3QAEAA//2gAMAwEAAhEDEQA/APMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9DzCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//R8wooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//0vMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9PzCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//U8wooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD//1fMKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9bzCiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKAP//Z', 'base64'));
+  const sz = ctx.deskJpegSize(real);
+  check('从 agent 实际产出的 JPEG 读出真实尺寸', !!sz && sz.w === 48 && sz.h === 640, JSON.stringify(sz));
+  check('正常尺寸可解码', ctx.deskFrameOK(sz));
+  // 构造：SOI + APP0 + SOF0(40000x40000)
+  const bomb = Uint8Array.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00,
+    0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x9C, 0x40, 0x9C, 0x40, 0x01, 0x01, 0x11, 0x00]);
+  const bsz = ctx.deskJpegSize(bomb);
+  check('读出 JPEG 头里声明的巨大尺寸', !!bsz && bsz.w === 40000 && bsz.h === 40000, JSON.stringify(bsz));
+  check('巨大尺寸拒绝解码', !ctx.deskFrameOK(bsz));
+  check('非 JPEG 拒绝解码', !ctx.deskFrameOK(ctx.deskJpegSize(Uint8Array.from([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0, 0, 0]))));
+  // 接线：帧循环必须先拒绝 bad 帧、先查真实尺寸再 createImageBitmap
+  const loop = js.slice(js.indexOf('d=deskSanitize(parseMCP(r.result))'));
+  check('帧循环拒绝 bad 帧', /^[^\n]*\n\s*if\(d&&d\.bad\)\{fail=d\.bad;break\}/.test(loop.replace(/\r/g, '')));
+  const iOK = loop.indexOf('deskFrameOK(deskJpegSize('), iDec = loop.indexOf('createImageBitmap(');
+  check('解码前先检查真实尺寸', iOK > 0 && iDec > iOK);
+}
+
 // ---------- 15. 快捷键按钮 ----------
 // 桌面页：每个组合键必须在「一次 input 调用」里发完整的 按下…抬起，修饰键才不会卡住；
 // 允许操控关闭时不得发送；发送失败要有可见提示。终端页：紧急输入失败（pty_write_blocked）不得被吞掉。

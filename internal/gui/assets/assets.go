@@ -1407,7 +1407,26 @@ function deskErrText(e){
   const dr=dropFromErr(s);if(dr)return dr;
   return s;
 }
-function deskBytesToBlob(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type:'image/jpeg'})}
+function deskB64ToBytes(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u}
+// deskJpegSize 从 JPEG 的 SOF 段读出真实像素尺寸，读不出返回 null。解码前就检查，
+// 防止对端在 width/height 里报小尺寸、实际塞一张巨图让 createImageBitmap 吃光内存。
+function deskJpegSize(u){
+  if(!u||u.length<4||u[0]!==0xFF||u[1]!==0xD8)return null;
+  let i=2;
+  while(i+8<u.length){
+    if(u[i]!==0xFF)return null;
+    const m=u[i+1];
+    if(m===0xFF){i++;continue}
+    if(m===0x01||(m>=0xD0&&m<=0xD7)){i+=2;continue}
+    const len=(u[i+2]<<8)|u[i+3];
+    if(len<2)return null;
+    if(m>=0xC0&&m<=0xCF&&m!==0xC4&&m!==0xC8&&m!==0xCC)return{h:(u[i+5]<<8)|u[i+6],w:(u[i+7]<<8)|u[i+8]};
+    i+=2+len;
+  }
+  return null;
+}
+// deskFrameOK 帧的真实尺寸是否可以安全解码。
+function deskFrameOK(sz){return !!sz&&sz.w>0&&sz.h>0&&sz.w<=DESK_MAX_DIM&&sz.h<=DESK_MAX_DIM&&sz.w*sz.h<=DESK_MAX_PIXELS}
 function deskSyncDisplays(n){
   n=deskInt(n,1,DESK_MAX_DISPLAYS,1);
   $('#deskDisp').classList.toggle('dk-hide',n<=1);
@@ -1419,7 +1438,9 @@ function deskSyncDisplays(n){
 // 被控端返回的数据不可信（被控端可能被篡改或本身恶意）：所有来自 screen_capture 的字段在使用前
 // 一律强制转成有界整数，之后统计栏、布局、画布、显示器列表都只用净化后的值，
 // 避免 innerHTML/CSS 注入脚本，以及用极大的 displays/宽高卡死页面。
-const DESK_MAX_DIM=16384,DESK_MAX_DISPLAYS=16;
+// 单边上限挡不住面积：16384x16384 的画布要约 1GB 内存。面积按 8K（7680x4320）封顶，
+// base64 数据按 16MiB 封顶（正常 1920 宽的帧远小于 1MiB）。
+const DESK_MAX_DIM=16384,DESK_MAX_DISPLAYS=16,DESK_MAX_PIXELS=7680*4320,DESK_MAX_B64=16*1024*1024;
 function deskInt(v,min,max,dflt){const n=typeof v==='number'?v:(typeof v==='string'&&/^[0-9]{1,9}$/.test(v)?+v:NaN);return Number.isFinite(n)?Math.min(max,Math.max(min,Math.floor(n))):dflt}
 function deskSanitize(d){
   if(!d||typeof d!=='object')return d;
@@ -1431,6 +1452,8 @@ function deskSanitize(d){
   o.proc_ms=(d.proc_ms==null)?null:deskInt(d.proc_ms,0,3600000,-1);
   o.unchanged=d.unchanged===true;
   o.data=typeof d.data==='string'?d.data:'';
+  if(o.width*o.height>DESK_MAX_PIXELS){o.width=0;o.height=0;o.data='';o.bad='对端返回的画面尺寸异常，已拒绝显示'}
+  if(o.data.length>DESK_MAX_B64){o.data='';o.bad='对端返回的画面数据过大，已拒绝显示'}
   return o;
 }
 // 取一帧：返回 {r,t0,t1,key}，由调用方按顺序 await，保证画面按序绘制。
@@ -1491,6 +1514,7 @@ async function deskStart(forceLoading){
     const rtt=Math.round(t1-t0);
     if(!r.ok){fail=deskErrText(r.error);break}
     let d;try{d=deskSanitize(parseMCP(r.result))}catch(e){fail='解析帧失败';break}
+    if(d&&d.bad){fail=d.bad;break}
     const unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
     if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
     const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
@@ -1505,7 +1529,9 @@ async function deskStart(forceLoading){
     else{
       still=0;
       try{
-        const bm=await createImageBitmap(deskBytesToBlob(d.data));
+        const u=deskB64ToBytes(d.data);
+        if(!deskFrameOK(deskJpegSize(u))){fail='对端返回的画面尺寸异常，已拒绝显示';break}
+        const bm=await createImageBitmap(new Blob([u],{type:'image/jpeg'}));
         if(d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}
         // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
         if(d.screen_width>0&&d.screen_height>0&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
