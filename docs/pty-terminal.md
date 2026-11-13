@@ -35,11 +35,11 @@ xterm.js 5.5.0 与 addon-fit 0.10.0 离线内嵌（`internal/gui/assets/xterm/`�
 | 场景 | 被控端返回 | 界面提示 |
 |------|-----------|---------|
 | 对端是不含 pty 工具的旧版 | `unknown_tool` | 对端版本过旧，请升级被控端到最新版后重新连接 |
-| 被控端未加 `--allow-pty`（默认关闭） | `exec_denied` | 被控端未启用真终端；如需真终端请被控端加 `--allow-pty` |
+| 被控端设了 `--allow-exec`/`--root`（自动关闭） | `exec_denied` | 被控端未开放真终端；去掉这些参数后重启 |
 | Windows 版本过低，无 ConPTY | `pty_unsupported` | 被控端系统不支持 ConPTY（需 Windows 10 1809+） |
 | 找不到 / 启动不了 shell | 对应错误 | 被控端无法启动 shell（附原始错误） |
 
-- **真终端默认关闭**，与远程桌面需要 `--enable-desktop` 一致：PTY 是交互式 shell，能执行任意命令，会绕过 `--allow-exec` 白名单、`--deny-exec` 黑名单和 `--root`。被控端用户需显式加 `--allow-pty` 才开放；开放后这些护栏不再约束协助端，请只在信任协助端时开启。
+- **真终端默认开启**，与远程桌面一致，`remote share` 无任何功能参数，协助端在控制端按需选用命令行 / 终端 / 桌面。PTY 里的 shell 能绕过 `--allow-exec`、`--deny-exec`、`--root`，所以设了 `--allow-exec` 或 `--root` 时会自动关闭真终端。
 - 回退到命令行模式后，重新连接会重新探测。
 
 ## 限制

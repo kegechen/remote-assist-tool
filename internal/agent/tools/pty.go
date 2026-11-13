@@ -84,7 +84,7 @@ var ptyIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // 错误码前缀会被 agent.classifyError 或调用方按字符串识别。
 var (
-	errPTYDisabled = errors.New("exec_denied: 被控端未启用真终端（默认关闭），如需开放请在被控端加 --allow-pty")
+	errPTYDisabled = errors.New("exec_denied: 被控端未开放真终端（share 设了 --allow-exec 或 --root 时自动关闭，因为 shell 会绕过这些限制）；去掉这些参数后重启 share 即可")
 	errPTYNotFound = errors.New("pty_not_found: 终端会话不存在或已结束")
 )
 
@@ -186,14 +186,13 @@ type ptySpec struct {
 	Rows  uint16
 }
 
-// PTYDisabled 判定真终端是否应被禁用：默认禁用，只有被控端显式加了 --allow-pty 才开放。
-// 原因：PTY 是交互式 shell，能执行任意命令，绕过 exec 的 --allow-exec 白名单、--deny-exec 黑名单
-// 和 --root；默认开启会让这些护栏形同虚设。与远程桌面需要 --enable-desktop 显式开启保持一致。
+// PTYDisabled 判定真终端是否应被禁用：allowPTY 由 share 决定——默认开启，
+// 仅当设了 --allow-exec 或 --root 时关闭（PTY 里的 shell 能绕过 exec 白/黑名单和 --root）。
 func PTYDisabled(allowPTY bool) bool {
 	return !allowPTY
 }
 
-// NewPTYManager disabled=true 时所有 pty 工具返回 exec_denied（被控端未加 --allow-pty）。
+// NewPTYManager disabled=true 时所有 pty 工具返回 exec_denied（share 设了 --allow-exec/--root 时自动关闭）。
 func NewPTYManager(disabled bool) *PTYManager {
 	return &PTYManager{
 		disabled: disabled, sessions: map[string]*ptySession{}, start: startPTY,

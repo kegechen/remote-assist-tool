@@ -129,7 +129,6 @@ func runShare(args []string) {
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
 	rootDir := fs.String("root", "", "Optional: limit file tools to this subtree (empty = no limit). Guards against slips, NOT a security boundary — exec is not confined by it.")
 	allowExec := fs.String("allow-exec", "", "Comma-separated exec basename allowlist (empty = no restriction beyond deny)")
-	allowPTY := fs.Bool("allow-pty", false, "Enable the real terminal (PTY) for the helper. Off by default, like --enable-desktop: a shell inside a PTY can run any command, so it bypasses --allow-exec, --deny-exec and --root. Add --allow-pty only when you accept that those guards no longer constrain the helper.")
 	denyExec := fs.String("deny-exec", "rm,shutdown,reboot,mkfs,dd", "Comma-separated exec basename denylist")
 	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup via ShellExecuteW runas")
 	unsafeExec := fs.Bool("unsafe-exec", false, "DANGER: drop the exec deny/allow lists, letting any command run")
@@ -138,7 +137,6 @@ func runShare(args []string) {
 	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
 	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
 	codeFileMirror := fs.String("code-file-mirror", "", "Internal (make-before-break upgrade): additionally mirror the assist code JSON here, so a prior --code-file path keeps refreshing after an in-channel upgrade")
-	enableDesktop := fs.Bool("enable-desktop", false, "Allow the helper to view this machine's screen and inject mouse/keyboard input (screen_capture + input tools). Off by default. Windows only for now; must run in a logged-in interactive session (not a service); the lock screen and elevated/UAC windows are not controllable.")
 	minProto := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 
 	fs.Usage = func() {
@@ -362,8 +360,10 @@ func runShare(args []string) {
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
-	share.SetEnableDesktop(*enableDesktop)
-	share.SetAllowPTY(*allowPTY)
+	share.SetEnableDesktop(true) // 远程桌面始终开启，无开关
+	// 真终端始终开启，无开关；但设了 --allow-exec/--root 时 shell 会绕过这些护栏，自动关闭
+	guarded := *allowExec != "" || *rootDir != ""
+	share.SetAllowPTY(!guarded)
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)

@@ -52,7 +52,7 @@ type ShareMode struct {
 	stickyHinted   bool      // 「中转服务不支持固定码」的提示已打印过；重连不重复刷屏
 	sbCfg          agent.SandboxConfig
 	minProto       string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
-	allowPTY       bool   // 是否开放真终端（PTY），默认 false=关闭，需被控端显式 --allow-pty
+	allowPTY       bool   // 是否开放真终端（PTY），由 main 决定：默认开，设 --allow-exec/--root 时关
 	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭
 	daemon         *agent.Daemon
 	daemonOnce     sync.Once
@@ -1302,7 +1302,7 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		// 远程桌面工具始终注册，未启用时调用会返回 desktop_disabled 并提示开关，便于排查。
 		reg.Register(tools.NewScreenCapture(s.enableDesktop))
 		reg.Register(tools.NewInput(s.enableDesktop))
-		// 真终端（PTY）：设了 --allow-exec 白名单时默认整体禁用，避免经 shell 绕过白名单；--allow-pty 可显式开放。
+		// 真终端（PTY）：设了 --allow-exec/--root 时由 main 关闭，避免经 shell 绕过。
 		for _, t := range tools.NewPTYTools(tools.PTYDisabled(s.allowPTY)) {
 			reg.Register(t)
 		}

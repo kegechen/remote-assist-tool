@@ -251,20 +251,19 @@ func TestPTYDisabledByDefault(t *testing.T) {
 	}
 }
 
-// 真终端默认关闭，与 --enable-desktop 保持一致：只有被控端显式加 --allow-pty 才开放。
-// 与是否设置 --allow-exec / --deny-exec 无关——PTY 里的 shell 能绕过 exec 的白/黑名单与 --root。
+// 真终端由 share 决定是否开放（默认开，设 --allow-exec/--root 时关）；此处只验证策略函数语义。
 func TestPTYDisabledPolicy(t *testing.T) {
 	if !PTYDisabled(false) {
-		t.Error("默认（未加 --allow-pty）必须禁用真终端")
+		t.Error("allowPTY=false 必须禁用真终端")
 	}
 	if PTYDisabled(true) {
-		t.Error("显式 --allow-pty 后应开放真终端")
+		t.Error("allowPTY=true 应开放真终端")
 	}
 }
 
 func TestPTYDisabledMessageMentionsAllowPTY(t *testing.T) {
-	if !strings.Contains(errPTYDisabled.Error(), "--allow-pty") || !strings.Contains(errPTYDisabled.Error(), "exec_denied") {
-		t.Errorf("禁用提示应包含 exec_denied 与 --allow-pty: %v", errPTYDisabled)
+	if !strings.Contains(errPTYDisabled.Error(), "--allow-exec") || !strings.Contains(errPTYDisabled.Error(), "exec_denied") {
+		t.Errorf("禁用提示应包含 exec_denied 与 --allow-exec: %v", errPTYDisabled)
 	}
 }
 
