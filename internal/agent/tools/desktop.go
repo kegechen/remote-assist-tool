@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"strings"
+	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
 )
@@ -53,6 +54,9 @@ type ScreenCaptureArgs struct {
 	Display  int `json:"display,omitempty"`
 	MaxWidth int `json:"max_width,omitempty"`
 	Quality  int `json:"quality,omitempty"`
+	// Since 上一帧返回的 seq（可选）。画面与编码参数都没变时只回 {unchanged:true,seq}，不编码不传 JPEG。
+	// 旧版调用方不传，行为不变。
+	Since uint64 `json:"since,omitempty"`
 }
 
 type ScreenCaptureResult struct {
@@ -62,17 +66,22 @@ type ScreenCaptureResult struct {
 	ScreenWidth  int    `json:"screen_width"`  // 真实屏幕宽（物理像素）
 	ScreenHeight int    `json:"screen_height"` // 真实屏幕高
 	Displays     int    `json:"displays"`
-	Data         []byte `json:"data"` // JPEG，JSON 中为 base64
+	Data         []byte `json:"data,omitempty"` // JPEG，JSON 中为 base64；unchanged 时省略
+	// 以下为可选新增字段，旧前端忽略即可：
+	Seq       uint64 `json:"seq,omitempty"`       // 画面内容版本号，下次请求可作为 since 带回
+	Unchanged bool   `json:"unchanged,omitempty"` // true 表示与 since 对应的帧完全一致，无 data
+	ProcMS    int    `json:"proc_ms"`             // 被控端处理耗时（抓屏+缩放+编码），前端据此把它从网络时延里剔除
 }
 
 type ScreenCaptureTool struct {
 	enabled bool
 	ops     *DesktopOps
+	frames  *frameCache
 }
 
 func NewScreenCapture(enabled bool) *ScreenCaptureTool {
 	// 不在构造时创建后端：未启用时零开销，启用后也等到首次调用再初始化。
-	return &ScreenCaptureTool{enabled: enabled}
+	return &ScreenCaptureTool{enabled: enabled, frames: newFrameCache()}
 }
 
 func (t *ScreenCaptureTool) Name() string { return "screen_capture" }
@@ -114,6 +123,7 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 		return nil, err
 	}
 	tm := newDesktopTrace()
+	began := time.Now()
 	img, rect, err := ops.Capture(a.Display)
 	if err != nil {
 		return nil, fmt.Errorf("capture failed: %w", err)
@@ -126,6 +136,20 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 		}
 	}
 	tm.mark("displays")
+	// 画面无变化检测：哈希整幅捕获图（含鼠标指针，指针移动会改变画面），未变化时跳过缩放与编码。
+	if t.frames == nil { // 兼容直接构造 ScreenCaptureTool{} 的用法（测试）
+		t.frames = newFrameCache()
+	}
+	seq, same := t.frames.check(frameKey{a.Display, a.MaxWidth, a.Quality}, frameHash(img), a.Since)
+	tm.mark("hash")
+	if same {
+		res, err := json.Marshal(ScreenCaptureResult{
+			Format: "jpeg", ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(), Displays: n,
+			Seq: seq, Unchanged: true, ProcMS: int(time.Since(began).Milliseconds()),
+		})
+		tm.flush(len(res))
+		return res, err
+	}
 	out := scaleToWidth(img, a.MaxWidth)
 	tm.mark("scale")
 	data, err := encodeJPEGCapped(out, a.Quality, desktopMaxJPEGBytes)
@@ -136,6 +160,7 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	res, err := json.Marshal(ScreenCaptureResult{
 		Format: "jpeg", Width: out.Bounds().Dx(), Height: out.Bounds().Dy(),
 		ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(), Displays: n, Data: data,
+		Seq: seq, ProcMS: int(time.Since(began).Milliseconds()),
 	})
 	tm.mark("json")
 	tm.flush(len(res))

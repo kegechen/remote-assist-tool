@@ -1367,7 +1367,7 @@ function parseMCP(res){if(!res)return{};let d=typeof res==='string'?JSON.parse(r
 // ========== 远程桌面 ==========
 // 画面：循环调用 screen_capture（请求-应答，串行，不堆积）；操控：鼠标/键盘事件排队，
 // 合并连续 move 后串行调用 input，保证事件顺序。坐标一律按 0..1 归一化回传，由对端映射到真实像素。
-const desk={running:false,loopId:0,queue:[],sending:false,pressed:new Set(),frames:0,t0:0,bytes:0,disp:1,toastTimer:0};
+const desk={running:false,loopId:0,queue:[],sending:false,pressed:new Set(),frames:0,drawn:0,lastInput:0,t0:0,bytes:0,disp:1,toastTimer:0};
 function openDesk(){openTab('desk','远程桌面','desk-box',()=>{deskStart()},false)}
 $('#btnDesk').onclick=()=>openDesk();
 // 刷新/重连：先切到“加载中”态（旧画面变暗并显示覆盖层），首帧到达后回到 live
@@ -1405,73 +1405,105 @@ function deskSyncDisplays(n){
   for(let i=0;i<n;i++){const o=document.createElement('option');o.value=i;o.textContent='显示器 '+(i+1)+(i===0?'（主）':'');sel.appendChild(o)}
   if(cur&&+cur<n)sel.value=cur;
 }
-// 取一帧：返回 {r,t0,t1}，由调用方按顺序 await，保证画面按序绘制。
-function deskFetch(args,sig){const t0=performance.now();return api('/api/call',{tool:'screen_capture',args},sig).then(r=>({r,t0,t1:performance.now()}))}
+// 取一帧：返回 {r,t0,t1,key}，由调用方按顺序 await，保证画面按序绘制。
+// key 标识这次请求的显示器/宽度/画质，用于判断「上一帧能否作为 since 复用」。
+function deskFetch(args,sig){const t0=performance.now();const key=args.display+'/'+args.max_width+'/'+args.quality;return api('/api/call',{tool:'screen_capture',args},sig).then(r=>({r,t0,t1:performance.now(),key}))}
 // 自适应策略（帧率选“自动”时）：
-//  - 上限 30 fps；请求是「请求-应答」，帧率受往返时延限制，所以同时保持 2 个请求在途（流水线），
-//    用网络空闲时间换帧率；
-//  - 用帧时延的指数滑动平均(ema)判断链路好坏：>400ms 降画质到“低”，>900ms 再把宽度压到 800 并收成单请求；
-//    恢复到 <150ms 后再升回用户选择的档位（留迟滞，避免来回抖动）。
+//  - 上限 30 fps；请求是「请求-应答」，帧率受往返时延限制，所以按需保持 1~3 个请求在途（流水线）：
+//    在途数 = 往返时延 / 被控端单帧处理耗时（取整，上限 3），刚好让被控端一直有活干又不堆积；旧被控端没有处理耗时字段时用 2；
+//  - 用「网络时延」(往返 - 被控端处理耗时 proc_ms) 的指数滑动平均(ema)判断链路好坏：>400ms 降画质到“低”，
+//    >900ms 再把宽度压到 800 并收成单请求；恢复到 <150ms 后再升回用户选择的档位（留迟滞，避免来回抖动）。
+//    被控端处理慢（抓屏/编码耗时）不是网络问题，降画质帮不上，所以不计入；旧被控端没有 proc_ms 时按整段往返计；
+//  - 画面无变化不重复传：请求带上一帧的 seq 作 since，被控端发现画面和参数都没变就只回 {unchanged:true}，
+//    前端跳过解码与绘制；静止一阵后降低请求频率（有鼠标键盘操作立即恢复），每 30 秒强制取一次完整帧兜底。
+const DESK_KEYFRAME_MS=30000;
 async function deskStart(forceLoading){
   if(desk.running)return;
   if(!connected){deskState('idle','尚未连接对端：请先在顶部输入协助码并点击「连接」');return}
-  desk.running=true;const my=++desk.loopId;desk.frames=0;desk.bytes=0;desk.t0=performance.now();
+  desk.running=true;const my=++desk.loopId;desk.frames=0;desk.drawn=0;desk.bytes=0;desk.t0=performance.now();
   if(forceLoading||$('#desk-view').dataset.s!=='live')deskState('loading','正在获取画面…');
   const cv=$('#deskCv'),ctx=cv.getContext('2d');
   const ac=new AbortController();desk.ac=ac;
-  let ema=0,level=0,lastStart=0,inflight=[],fail=null;
+  // ema：网络时延；pema：被控端处理耗时（-1 表示对端没有回传）；have：最近一次绘制的完整帧；still：连续“未变化”次数
+  let ema=0,pema=-1,level=0,lastStart=0,inflight=[],fail=null,lastStat=0,still=0;
+  const have={seq:0,key:'',at:0};
   const params=()=>{
     const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
     let w=wSel,q=qSel;
     // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35），很慢时再把宽度压到 800
     if(!qSel){q=[70,50,35][level];if(level>=2)w=Math.min(w,800)}
-    return{display:+$('#deskDisp').value||0,max_width:w,quality:q};
+    const a={display:+$('#deskDisp').value||0,max_width:w,quality:q};
+    const key=a.display+'/'+a.max_width+'/'+a.quality;
+    if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS)a.since=have.seq;
+    return a;
   };
   const issue=()=>{lastStart=performance.now();inflight.push(deskFetch(params(),ac.signal))};
+  const sleep=ms=>new Promise(res=>setTimeout(res,ms));
   while(my===desk.loopId&&connected&&activeTab==='desk'){
     const fpsSel=+$('#deskFps').value,auto=!fpsSel,anyAuto=auto||!+$('#deskQ').value;
-    const interval=1000/(auto?30:fpsSel);
-    const depth=auto&&level<2?2:1; // 仅帧率“自动”时才用流水线
-    // 补足在途请求；相邻两次请求至少间隔 interval/depth，避免一次性打出两个相同的帧
-    while(inflight.length<depth){
+    let interval=1000/(auto?30:fpsSel);
+    // 静止且近期没有操作：放慢轮询，省被控端 CPU（每次轮询仍要抓屏+哈希）；一有操作或画面变化立即恢复
+    const quiet=still>=8&&performance.now()-(desk.lastInput||0)>1500;
+    if(quiet)interval=Math.max(interval,still>=40?200:100);
+    let depth=1;
+    if(auto&&!quiet&&level<2){depth=2;if(level===0&&pema>0)depth=Math.max(1,Math.min(3,Math.ceil((ema+pema)/pema)))}
+    // 补足在途请求；相邻两次请求至少间隔 interval/depth，避免一次性打出两个相同的帧。
+    // 已有在途请求时，等待间隔与“最早的请求返回”二者先到者处理，保证第 2、3 路真的能发出去。
+    if(inflight.length<depth){
       const gap=interval/depth-(performance.now()-lastStart);
-      if(gap>0&&inflight.length>0)break;
-      if(gap>0)await new Promise(res=>setTimeout(res,gap));
+      if(gap<=0){issue();continue}
+      if(!inflight.length){await sleep(gap);if(my!==desk.loopId)break;continue}
+      const first=await Promise.race([inflight[0],sleep(gap).then(()=>null)]);
       if(my!==desk.loopId)break;
-      issue();
+      if(first===null)continue;
     }
     if(!inflight.length)break;
-    const {r,t0,t1}=await inflight.shift();
+    const {r,t0,t1,key}=await inflight.shift();
     if(my!==desk.loopId)break;
     const rtt=Math.round(t1-t0);
     if(!r.ok){fail=deskErrText(r.error);break}
     let d;try{d=parseMCP(r.result)}catch(e){fail='解析帧失败';break}
-    if(!d||!d.data){fail=deskErrText(JSON.stringify(d||{}));break}
+    const unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
+    if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
+    const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
+    const net=proc>=0?Math.max(0,rtt-proc):rtt;
+    if(proc>=0)pema=pema<0?proc:pema*0.8+proc*0.2;
     if(anyAuto){
-      ema=ema?ema*0.8+rtt*0.2:rtt;
+      ema=ema?ema*0.8+net*0.2:net;
       if(ema>900)level=2;else if(ema>400)level=Math.max(level,1);else if(ema<150)level=0;
       else if(ema<300&&level===2)level=1;
-    }else{ema=rtt;level=0}
-    try{
-      const bm=await createImageBitmap(deskBytesToBlob(d.data));
-      if(cv.width!==d.width||cv.height!==d.height){cv.width=d.width;cv.height=d.height}
-      // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
-      if(d.screen_width&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
-      ctx.drawImage(bm,0,0);if(bm.close)bm.close();
-    }catch(e){fail='绘制帧失败: '+e;break}
+    }else{ema=net;level=0}
+    if(unchanged){still++}
+    else{
+      still=0;
+      try{
+        const bm=await createImageBitmap(deskBytesToBlob(d.data));
+        if(cv.width!==d.width||cv.height!==d.height){cv.width=d.width;cv.height=d.height}
+        // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
+        if(d.screen_width&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
+        ctx.drawImage(bm,0,0);if(bm.close)bm.close();
+      }catch(e){fail='绘制帧失败: '+e;break}
+      // 旧被控端不回 seq：have.seq 保持 0，永远不会带 since，行为与改造前一致
+      if(d.seq){have.seq=d.seq;have.key=key;have.at=performance.now()}
+      desk.drawn++;
+    }
     if($('#desk-view').dataset.s!=='live')deskState('live','');
     $('#deskPillTxt').innerHTML='已连接 · <span class="dk-num" style="min-width:3ch">'+Math.round(rtt)+'</span> ms';
     deskSyncDisplays(d.displays||1);
-    desk.frames++;desk.bytes+=d.data.length*0.75;
-    const sec=(performance.now()-desk.t0)/1000;
-    if(desk.frames%5===0&&sec>0){
-      const fpsT=(desk.frames/sec).toFixed(1),bps=desk.bytes/sec; // bps：每秒字节数，即画面数据的网速
+    desk.frames++;desk.bytes+=(d.data?d.data.length*0.75:0);
+    const now=performance.now(),sec=(now-desk.t0)/1000;
+    // 统计口径：fps = 画面实际更新的帧率（静止时为 0，并标注“静止”）；悬停提示里另给请求率。KB/s 为画面数据的网速。
+    if(now-lastStat>=500&&sec>0){
+      lastStat=now;
+      const fpsT=(desk.drawn/sec).toFixed(1),reqT=(desk.frames/sec).toFixed(1),bps=desk.bytes/sec;
       const spT=bps>=1048576?(bps/1048576).toFixed(1):(bps/1024).toFixed(0),spU=bps>=1048576?'MB/s':'KB/s';
-      const lowT=anyAuto&&level?' · 已降质':'';
-      const st=fpsT+' fps · '+spT+' '+spU+' · '+d.screen_width+'x'+d.screen_height+lowT;
+      const lowT=anyAuto&&level?' · 已降质':'',stillT=still>=5?' · 静止':'';
+      const sw=d.screen_width||desk.sw||0,sh=d.screen_height||desk.sh||0;
+      const st=fpsT+' fps · '+spT+' '+spU+' · '+sw+'x'+sh+stillT+lowT;
       // 数值放进定宽等宽数字容器，位数变化时整条文字不抖动（e2e 读 textContent 仍含 fps）
-      $('#deskStat').innerHTML='<span class="dk-num" style="min-width:4ch">'+fpsT+'</span>fps · <span class="dk-num" style="min-width:4ch">'+spT+'</span>'+spU+' · '+d.screen_width+'x'+d.screen_height+lowT;$('#deskPill').title=st;
-      if(desk.frames>=60){desk.frames=0;desk.bytes=0;desk.t0=performance.now()} // 滚动窗口，反映最近的帧率
+      $('#deskStat').innerHTML='<span class="dk-num" style="min-width:4ch">'+fpsT+'</span>fps · <span class="dk-num" style="min-width:4ch">'+spT+'</span>'+spU+' · '+sw+'x'+sh+stillT+lowT;
+      $('#deskPill').title=st+'\n画面更新 '+fpsT+' 帧/秒，请求 '+reqT+' 次/秒；往返 '+rtt+' ms'+(proc>=0?'（被控端处理 '+proc+' ms，网络 '+net+' ms）':'');
+      if(sec>=5){desk.frames=0;desk.drawn=0;desk.bytes=0;desk.t0=now} // 滚动窗口，反映最近的帧率
     }
   }
   ac.abort();
@@ -1501,6 +1533,7 @@ function deskPos(e){const cv=$('#deskCv'),r=cv.getBoundingClientRect();return{x:
 function deskBtn(e){return e.button===2?'right':(e.button===1?'middle':'left')}
 function deskPush(ev){
   if(!connected||!$('#deskCtl').checked)return;
+  desk.lastInput=performance.now(); // 有操作：帧循环退出“静止降频”
   const q=desk.queue;
   if(ev.type==='move'&&q.length&&q[q.length-1].type==='move')q[q.length-1]=ev;else q.push(ev);
   deskFlush();

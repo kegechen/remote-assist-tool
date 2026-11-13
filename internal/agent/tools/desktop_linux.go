@@ -196,10 +196,7 @@ func (b *x11Backend) capture(display int) (*image.RGBA, image.Rectangle, error) 
 		return nil, r, fmt.Errorf("GetImage 返回数据不足: %d < %d", len(reply.Data), w*h*4)
 	}
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	src, dst := reply.Data, img.Pix
-	for i := 0; i+3 < w*h*4; i += 4 { // BGRX → RGBA，强制不透明
-		dst[i], dst[i+1], dst[i+2], dst[i+3] = src[i+2], src[i+1], src[i], 255
-	}
+	swizzleToRGBA(img, reply.Data, w*4, 2, 1, 0) // BGRX → RGBA，强制不透明，行块并行
 	return img, r, nil
 }
 

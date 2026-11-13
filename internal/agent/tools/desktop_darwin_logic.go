@@ -95,13 +95,7 @@ func macConvertPixels(src []byte, w, h, stride, bpp int, bitmapInfo uint32) (*im
 		ri, gi, bi = 0, 1, 2
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		s := src[y*stride : y*stride+w*4]
-		d := dst.Pix[y*dst.Stride : y*dst.Stride+w*4]
-		for x := 0; x < w*4; x += 4 {
-			d[x], d[x+1], d[x+2], d[x+3] = s[x+ri], s[x+gi], s[x+bi], 255
-		}
-	}
+	swizzleToRGBA(dst, src, stride, ri, gi, bi) // 行块并行
 	return dst, nil
 }
 
