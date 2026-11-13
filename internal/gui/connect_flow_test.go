@@ -77,11 +77,20 @@ func TestFallbackPublicRelayNeedsConfirm(t *testing.T) {
 	}
 }
 
-func TestFallbackNoDowngradeOption(t *testing.T) {
+// 旧调用方仍可能带 no_downgrade（已移除的「禁止降级」开关）：必须被忽略，且不改变自动降级策略。
+func TestConnectRequestIgnoresLegacyNoDowngrade(t *testing.T) {
+	var req connectRequest
+	if err := json.Unmarshal([]byte(`{"code":"AAAA-BBBB-CCCC","server":"127.0.0.1:1","no_downgrade":true}`), &req); err != nil {
+		t.Fatalf("旧字段不应导致解码失败: %v", err)
+	}
+	if req.Code != "AAAA-BBBB-CCCC" || req.AllowLegacy || req.MinProto != "" {
+		t.Fatalf("解码结果异常: %+v", req)
+	}
+	// 策略只由 LAN/AllowLegacy/MinProto 决定：私网中继照样自动降级
 	f := &fakeCaller{errs: []error{errLegacy}}
-	res, err := connectWithFallback(context.Background(), f.call, fallbackPolicy{LAN: true, NoDowngrade: true}, nil)
-	if err == nil || res.NeedsAsk || len(f.calls) != 1 {
-		t.Fatalf("禁止降级时不得重试: %+v calls=%v", res, f.calls)
+	res, err := connectWithFallback(context.Background(), f.call, fallbackPolicy{LAN: true}, nil)
+	if err != nil || !res.FellBack || len(f.calls) != 2 {
+		t.Fatalf("私网中继应自动降级: %+v calls=%v", res, f.calls)
 	}
 }
 

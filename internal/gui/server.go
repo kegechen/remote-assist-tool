@@ -626,16 +626,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
-		Code   string `json:"code"`
-		Server string `json:"server"`
-		NoAuth bool   `json:"no_auth"`
-		// MinProto 显式指定 connect 的 min_proto（旧接口，单次直连不自动重试）；取值由 help 校验。
-		MinProto string `json:"min_proto"`
-		// AllowLegacy 用户已确认以兼容模式（v1）连接；NoDowngrade 为「禁止自动降级」高级选项。
-		AllowLegacy bool `json:"allow_legacy"`
-		NoDowngrade bool `json:"no_downgrade"`
-	}
+	var req connectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -702,7 +693,6 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	policy := fallbackPolicy{
 		MinProto:    req.MinProto,
 		AllowLegacy: req.AllowLegacy,
-		NoDowngrade: req.NoDowngrade,
 		LAN:         isLANRelay(req.Server, s.defaultServer),
 	}
 	call := func(c context.Context, minProto string) (json.RawMessage, error) {

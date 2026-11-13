@@ -54,14 +54,27 @@ func classifyConnectError(err error) (code, reason string) {
 	return reasonOther, "连接失败"
 }
 
+// connectRequest /api/connect 的请求体。
+//
+// 历史上还有 no_downgrade（「禁止降级」开关）字段：该开关已从界面移除，自动降级策略恒为开启
+// （loopback/私网中继自动降级，公网中继需用户确认）。这里不再声明该字段，旧调用方若仍带上它，
+// 解码时被忽略（不报错、不改变策略）。
+type connectRequest struct {
+	Code   string `json:"code"`
+	Server string `json:"server"`
+	NoAuth bool   `json:"no_auth"`
+	// MinProto 显式指定 connect 的 min_proto（旧接口，单次直连不自动重试）；取值由 help 校验。
+	MinProto string `json:"min_proto"`
+	// AllowLegacy 用户已确认以兼容模式（v1）连接。
+	AllowLegacy bool `json:"allow_legacy"`
+}
+
 // fallbackPolicy 自动降级的策略输入。
 type fallbackPolicy struct {
 	// MinProto 非空表示调用方显式指定了下限（旧接口/强制兼容）：只连一次，不做任何自动重试。
 	MinProto string
 	// AllowLegacy 用户已在界面确认「以兼容模式继续」：直接按 v1 下限连一次。
 	AllowLegacy bool
-	// NoDowngrade 「禁止自动降级」高级选项：遇到旧版对端只报错，不重试。
-	NoDowngrade bool
 	// LAN 中继是 loopback/私网/链路本地。公网中继上的降级必须由用户确认。
 	LAN bool
 }
@@ -86,7 +99,6 @@ type connectCaller func(ctx context.Context, minProto string) (json.RawMessage, 
 //   - 只认握手结果里的固定标记，网络错误/超时/协助码错误一律不降级；
 //   - 公网（非 loopback/私网）中继上，不自动降级，交给用户确认（NeedsAsk）：中继是
 //     不可信第三方，可伪造「旧版」应答把双方打回无认证的 v1；
-//   - NoDowngrade 时永不自动降级；
 //   - 上下文已取消（用户取消）绝不重试。
 func connectWithFallback(ctx context.Context, call connectCaller, p fallbackPolicy, onRetry func()) (connectResult, error) {
 	direct := p.MinProto
@@ -101,9 +113,6 @@ func connectWithFallback(ctx context.Context, call connectCaller, p fallbackPoli
 	raw, err := call(ctx, "")
 	res := connectResult{Raw: raw, Attempts: 1}
 	if err == nil || ctx.Err() != nil || !client.IsLegacyPeerError(err.Error()) {
-		return res, err
-	}
-	if p.NoDowngrade {
 		return res, err
 	}
 	if !p.LAN {
