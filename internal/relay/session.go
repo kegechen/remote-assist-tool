@@ -63,6 +63,7 @@ type ClientConn struct {
 	// 协助码固定相关：register 首帧写入（同 supportsUpdateNotice 的并发约束）。
 	supportsStickyCode bool
 	requestCode        string
+	reuseToken         string // register 首帧写入：share 回传的复用令牌（持有证明），见 reuse.go
 	Conn               Conn
 	Send               chan []byte
 	writeMu            sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
@@ -210,11 +211,16 @@ func (sm *SessionManager) createSession(code string, share *ClientConn, ttl time
 
 // createPendingSessionExact 用调用方指定的码建会话（share 请求复用上次的码）：码已被其他有效会话
 // 占用时返回 ErrCodeTaken，不覆盖；占着该码的是已过期且无 share 的残留会话时先回收再建。
-func (sm *SessionManager) createPendingSessionExact(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int) (*TunnelSession, error) {
-	return sm.createSessionOpt(code, share, ttl, clientID, shareIP, maxPerIP, maxTotal, false, true)
+// createdAt 非零时作为会话的原始签发时间（持有证明还原，复用不得重置 max-age 计时）；零值取当前时间。
+func (sm *SessionManager) createPendingSessionExact(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int, createdAt time.Time) (*TunnelSession, error) {
+	return sm.createSessionOptAt(code, share, ttl, clientID, shareIP, maxPerIP, maxTotal, false, true, createdAt)
 }
 
 func (sm *SessionManager) createSessionOpt(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int, shareReady, exact bool) (*TunnelSession, error) {
+	return sm.createSessionOptAt(code, share, ttl, clientID, shareIP, maxPerIP, maxTotal, shareReady, exact, time.Time{})
+}
+
+func (sm *SessionManager) createSessionOptAt(code string, share *ClientConn, ttl time.Duration, clientID, shareIP string, maxPerIP, maxTotal int, shareReady, exact bool, createdAt time.Time) (*TunnelSession, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -257,11 +263,15 @@ func (sm *SessionManager) createSessionOpt(code string, share *ClientConn, ttl t
 		log.Printf("Session code %s already registered (session %s), overwriting with %s",
 			code, prev.ID, sessionID)
 	}
+	created := now
+	if !createdAt.IsZero() {
+		created = createdAt
+	}
 	session := &TunnelSession{
 		ID:          sessionID,
 		Code:        code,
 		Share:       share,
-		CreatedAt:   now,
+		CreatedAt:   created,
 		ExpiresAt:   now.Add(ttl),
 		ClientID:    clientID,
 		CreatorIP:   shareIP,
@@ -326,6 +336,8 @@ type ReuseSessionResult struct {
 	SessionID string
 	Code      string
 	ExpiresAt time.Time
+	// CreatedAt 会话原始签发时间（复用不重置），用于重新签发复用令牌。
+	CreatedAt time.Time
 	// ReportedExpiry 应告知 share 的到期时刻（见 stickyExpiryLocked，零值=无固定到期）。
 	ReportedExpiry time.Time
 	OldShare       *ClientConn
@@ -386,6 +398,7 @@ func (sm *SessionManager) reuseSessionByClientID(clientID string, newShare *Clie
 		SessionID: session.ID,
 		Code:      session.Code,
 		ExpiresAt: session.ExpiresAt,
+		CreatedAt: session.CreatedAt,
 		OldShare:  session.Share,
 		OldHelp:   session.Help,
 	}

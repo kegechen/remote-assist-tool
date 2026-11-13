@@ -286,6 +286,7 @@ func runShare(args []string) {
 			TLSCertFile:    certFile,
 			TLSKeyFile:     keyFile,
 			CodeTTL:        30 * time.Minute,
+			CodeMaxAge:     24 * time.Hour, // 与独立 relay 默认一致：码绝对寿命上限，限制泄露窗口
 			CodeLength:     12,
 			AuditLogFile:   "",
 			STUNListenAddr: "", // 不启 STUN，LAN 下 P2P 没必要

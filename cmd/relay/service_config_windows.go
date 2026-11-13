@@ -39,8 +39,12 @@ type windowsServiceConfig struct {
 	KeyFile        string `json:"key,omitempty"`
 	CodeTTL        string `json:"ttl"`
 	CodeLength     int    `json:"length"`
-	// CodeMaxAge 码的绝对寿命上限（即使 share 一直在线也到期）；空串=不限。
+	// CodeMaxAge 码的绝对寿命上限（即使 share 一直在线也到期，复用不重置计时）。默认 "24h"；
+	// 空串=不传该旗标，沿用 relay 默认值（24h）；"0" 显式关闭上限（泄露的码将一直有效，不推荐）。
 	CodeMaxAge string `json:"code_max_age,omitempty"`
+	// StateDir 复用令牌签名密钥的落盘目录（--state-dir）。默认放服务数据目录下，使 relay 服务重启（升级/重启机器）
+	// 后原 share 仍能取回原协助码；置空则密钥只在内存，重启后所有 share 换新码。
+	StateDir string `json:"state_dir,omitempty"`
 	// LegacyCodeExpiry 恢复旧的硬 TTL 过期行为（不支持跨重连固定协助码）。
 	LegacyCodeExpiry bool `json:"legacy_code_expiry,omitempty"`
 	AuditLog       string `json:"audit"`
@@ -91,11 +95,24 @@ func defaultWindowsServiceConfig(paths windowsServicePaths) windowsServiceConfig
 		ListenAddr:     ":8443",
 		CodeTTL:        "30m",
 		CodeLength:     12,
+		CodeMaxAge:     "24h",
+		StateDir:       stateDirFor(paths),
 		AuditLog:       paths.auditFile,
 		CertsDir:       paths.certsDir,
 		TrustSourceIP:  true,
 		UpdateInfoFile: updateInfoFile,
 	}
+}
+
+// stateDirFor 服务默认的状态目录（复用令牌密钥落盘处）：数据目录下的 state 子目录。
+func stateDirFor(paths windowsServicePaths) string {
+	switch {
+	case paths.dataDir != "":
+		return filepath.Join(paths.dataDir, "state")
+	case paths.configFile != "":
+		return filepath.Join(filepath.Dir(paths.configFile), "state")
+	}
+	return ""
 }
 
 func loadWindowsServiceConfig(path string, defaults windowsServiceConfig) (windowsServiceConfig, error) {
@@ -166,6 +183,7 @@ func (cfg windowsServiceConfig) validate() error {
 		"audit":            cfg.AuditLog,
 		"certs_dir":        cfg.CertsDir,
 		"limits_file":      cfg.LimitsFile,
+			"state_dir":        cfg.StateDir,
 		"update_info_file": cfg.UpdateInfoFile,
 	}
 	for name, path := range paths {
@@ -190,6 +208,9 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 	}
 	if cfg.CodeMaxAge != "" {
 		args = append(args, "--code-max-age", cfg.CodeMaxAge)
+	}
+	if cfg.StateDir != "" {
+		args = append(args, "--state-dir", cfg.StateDir)
 	}
 	if cfg.LegacyCodeExpiry {
 		args = append(args, "--legacy-code-expiry")
