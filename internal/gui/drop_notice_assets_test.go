@@ -62,3 +62,17 @@ func TestPtyIdleNoticeWiring(t *testing.T) {
 		}
 	}
 }
+
+// Ctrl+C 等控制字符必须立即单独发送，不能并入 6ms 批次排在大块写入后面。
+func TestPtyUrgentInputWiring(t *testing.T) {
+	b, err := assets.StaticFS.ReadFile("pty/pty_term.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	for _, want := range []string{"function isUrgentInput(bytes)", "if (sessionId && isUrgentInput(bytes))"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("pty_term.js 缺少 %q", want)
+		}
+	}
+}

@@ -40,9 +40,45 @@ const (
 	defaultPTYIdleTimeout = 2 * time.Hour
 	// ptyIdleEnv 空闲时限的环境变量名。
 	ptyIdleEnv = "REMOTE_ASSIST_PTY_IDLE"
+	// ptyWriteChunk 大段输入（粘贴）分块写入的块大小，块间释放输入锁，让 Ctrl+C 等紧急输入插队。
+	ptyWriteChunk = 4096
 	// ptyDrainTimeout 进程退出后等待残余输出读完的最长时间。
 	ptyDrainTimeout = 2 * time.Second
 )
+
+// 输入写入的各类等待时限（变量，便于测试缩短）。
+var (
+	// ptyWriteLockWait 普通输入等输入锁的最长时间；超过说明前面的写入被卡住（对端缓冲满）。
+	ptyWriteLockWait = 10 * time.Second
+	// ptyWriteTimeout 单块 proc.Write 的最长阻塞；超时只放弃等待，被卡的写入仍占着锁直到完成或会话结束。
+	ptyWriteTimeout = 10 * time.Second
+	// ptyUrgentLockWait 紧急输入（Ctrl+C 等）等锁/写入的最长时间，超过就走 Interrupt 旁路。
+	ptyUrgentLockWait = 300 * time.Millisecond
+)
+
+// errPTYWriteBlocked 输入写入被卡住。
+var errPTYWriteBlocked = errors.New("pty_write_blocked: 终端输入被阻塞（对端未读取输入），请稍后重试或按 Ctrl+C")
+
+// ptyInterrupter 是 ptyProc 的可选扩展：绕过被卡住的输入管道，直接向前台进程组递送控制信号。
+// 目前只有 unix 后端实现（TIOCGPGRP + kill）；Windows ConPTY 没有等价物。
+type ptyInterrupter interface {
+	// Interrupt 递送由控制字符 b（0x03/0x1a/0x1c）对应的信号，成功返回 true。
+	Interrupt(b byte) bool
+}
+
+// isUrgentInput 判断输入是否应走优先通道：短且含 Ctrl+C(0x03)/Ctrl+Z(0x1a)/Ctrl+\(0x1c)。
+// 长度上限把“恰好含 0x03 字节的大段粘贴”排除在外，它仍按普通输入分块写。
+func isUrgentInput(b []byte) bool {
+	if len(b) == 0 || len(b) > 64 {
+		return false
+	}
+	for _, c := range b {
+		if c == 0x03 || c == 0x1a || c == 0x1c {
+			return true
+		}
+	}
+	return false
+}
 
 var ptyIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
@@ -74,7 +110,9 @@ type ptyProc interface {
 type ptySession struct {
 	id      string
 	proc    ptyProc
-	writeMu sync.Mutex // 输入串行保序
+	// writeSem 输入串行保序（容量 1 的信号量，以便带超时地等待）。按小块逐块持有，块间让位给紧急输入。
+	writeSem chan struct{}
+	urgent   atomic.Int32 // 正在等锁的紧急输入数；大块写入看到它非 0 会在块间让位
 	done    chan struct{}
 	ready   chan struct{} // proc 就绪后关闭；启动期间到达的 write/resize 在此等待
 	once    sync.Once
@@ -272,7 +310,7 @@ func (t *ptyOpenTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 		m.mu.Unlock()
 		return nil, fmt.Errorf("server_busy: 终端会话数已达上限 %d", ptyMaxSessions)
 	}
-	sess := &ptySession{id: a.Session, done: make(chan struct{}), ready: make(chan struct{})}
+	sess := &ptySession{id: a.Session, done: make(chan struct{}), ready: make(chan struct{}), writeSem: make(chan struct{}, 1)}
 	m.sessions[a.Session] = sess
 	m.mu.Unlock()
 	remove := func() {
@@ -440,16 +478,95 @@ func (t *ptyWriteTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Str
 	if err != nil {
 		return nil, err
 	}
-	// 同一会话的输入串行保序（调用方也应串行发送，这里是兜底）。
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	t.m.touch(s)
-	n, err := s.proc.Write(a.Data)
+	n, err := s.writeInput(a.Data)
 	if err != nil {
+		if errors.Is(err, errPTYWriteBlocked) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("pty_not_found: 写入失败（会话已结束）: %w", err)
 	}
 	out, _ := json.Marshal(map[string]int{"written": n})
 	return out, nil
+}
+
+// writeChunk 在持有输入锁的前提下写一小块。等锁超过 lockWait 或写入阻塞超过 writeWait 返回 errPTYWriteBlocked；
+// 写入协程自己负责释放锁，所以被卡住的写入完成前，后续输入仍保持顺序、不会交错。
+func (s *ptySession) writeChunk(b []byte, lockWait, writeWait time.Duration) (int, error) {
+	lt := time.NewTimer(lockWait)
+	defer lt.Stop()
+	select {
+	case s.writeSem <- struct{}{}:
+	case <-lt.C:
+		return 0, errPTYWriteBlocked
+	case <-s.done:
+		return 0, errPTYNotFound
+	}
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := s.proc.Write(b)
+		<-s.writeSem
+		ch <- result{n, err}
+	}()
+	wt := time.NewTimer(writeWait)
+	defer wt.Stop()
+	select {
+	case r := <-ch:
+		return r.n, r.err
+	case <-wt.C:
+		return 0, errPTYWriteBlocked
+	}
+}
+
+// writeInput 写入终端输入。
+//   - 紧急输入（Ctrl+C 等）：短等锁；若输入被卡住且后端支持，直接向前台进程组递送信号。
+//   - 普通输入：按 ptyWriteChunk 分块逐块拿锁，块间让位给等待中的紧急输入。
+func (s *ptySession) writeInput(data []byte) (int, error) {
+	if isUrgentInput(data) {
+		return s.writeUrgent(data)
+	}
+	total := 0
+	for total < len(data) {
+		for i := 0; i < 50 && s.urgent.Load() > 0; i++ {
+			time.Sleep(time.Millisecond) // 让紧急输入先过
+		}
+		end := total + ptyWriteChunk
+		if end > len(data) {
+			end = len(data)
+		}
+		n, err := s.writeChunk(data[total:end], ptyWriteLockWait, ptyWriteTimeout)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func (s *ptySession) writeUrgent(data []byte) (int, error) {
+	s.urgent.Add(1)
+	defer s.urgent.Add(-1)
+	n, err := s.writeChunk(data, ptyUrgentLockWait, ptyUrgentLockWait)
+	if !errors.Is(err, errPTYWriteBlocked) {
+		return n, err
+	}
+	// 输入管道被卡住：绕过它，直接给前台进程组发信号。
+	if in, ok := s.proc.(ptyInterrupter); ok {
+		sent := false
+		for _, c := range data {
+			if (c == 0x03 || c == 0x1a || c == 0x1c) && in.Interrupt(c) {
+				sent = true
+			}
+		}
+		if sent {
+			return len(data), nil
+		}
+	}
+	return 0, err
 }
 
 // ---------- pty_resize ----------

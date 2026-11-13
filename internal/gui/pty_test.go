@@ -151,7 +151,7 @@ func TestPTYWriteResizeCloseRoutes(t *testing.T) {
 	// 手工登记一个会话（避免依赖 open 流）
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ptySessions.Store("sess-test", &ptyEntry{client: s.client, cancel: cancel})
+	ptySessions.Store("sess-test", newPTYEntry(s.client, cancel))
 	defer ptySessions.Delete("sess-test")
 
 	do := func(path, body string) (*http.Response, error) {
