@@ -49,7 +49,11 @@ func (p *slowPTY) Interrupt(b byte) bool {
 	return true
 }
 
-func (p *slowPTY) got() []byte { p.mu.Lock(); defer p.mu.Unlock(); return append([]byte(nil), p.written.Bytes()...) }
+func (p *slowPTY) got() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]byte(nil), p.written.Bytes()...)
+}
 
 func startSlowSession(t *testing.T, canIntr bool) (*ptyWriteTool, *slowPTY, func()) {
 	t.Helper()
@@ -181,5 +185,30 @@ func TestIsUrgentInput(t *testing.T) {
 		if isUrgentInput(b) {
 			t.Errorf("%q 不应是紧急输入", b)
 		}
+	}
+}
+
+// 一次输入里有多个 Ctrl+C（连按 / 粘贴）时，每种控制信号只递送一次：
+// Windows 上每次递送都要拉起一个辅助进程，逐字节递送会串行拉起一串进程拖住调用。
+func TestPTYInterruptOncePerSignalKind(t *testing.T) {
+	oldWait := ptyUrgentLockWait
+	ptyUrgentLockWait = 100 * time.Millisecond
+	defer func() { ptyUrgentLockWait = oldWait }()
+	write, sp, stop := startSlowSession(t, true)
+	defer stop()
+	sp.mu.Lock()
+	sp.block = make(chan struct{})
+	sp.mu.Unlock()
+
+	go write.Run(context.Background(), writeArgs(bytes.Repeat([]byte("x"), 8192)), nil) // 卡在 proc.Write
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := write.Run(context.Background(), writeArgs([]byte{0x03, 0x03, 0x03, 0x1a, 0x03}), nil); err != nil {
+		t.Fatalf("紧急写入失败: %v", err)
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if string(sp.interrupts) != string([]byte{0x03, 0x1a}) {
+		t.Fatalf("每种控制信号应只递送一次，实际 %v", sp.interrupts)
 	}
 }

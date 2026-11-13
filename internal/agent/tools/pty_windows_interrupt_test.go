@@ -77,3 +77,38 @@ func TestWinPTYInterruptStopsForegroundPing(t *testing.T) {
 		t.Fatal("Interrupt(0x1a) 应返回 false")
 	}
 }
+
+// shell 退出后不得再发 Ctrl+C：它的 PID 可能已被复用，AttachConsole 会把 Ctrl+C 发进无关控制台。
+func TestWinPTYInterruptRefusesAfterShellExit(t *testing.T) {
+	p, err := startPTY(ptySpec{Shell: "cmd.exe", Cols: 80, Rows: 25})
+	if err != nil {
+		t.Skipf("无法启动 ConPTY: %v", err)
+	}
+	defer p.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := p.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	if _, err := p.Write([]byte("exit")); err != nil {
+		t.Fatal(err)
+	}
+	wp := p.(*winPTY)
+	select {
+	case <-wp.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shell 未退出")
+	}
+	// 不能只看返回值：对已退出的 PID，AttachConsole 本来就会失败；真正的风险是 PID 已被复用，
+	// 所以断言根本不去拉起辅助进程。
+	old := runCtrlCHelper
+	defer func() { runCtrlCHelper = old }()
+	spawned := false
+	runCtrlCHelper = func(int) bool { spawned = true; return true }
+	if wp.Interrupt(0x03) || spawned {
+		t.Fatalf("shell 已退出，不应再递送 Ctrl+C（spawned=%v）", spawned)
+	}
+}

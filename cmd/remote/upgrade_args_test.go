@@ -107,3 +107,21 @@ func TestUpgradedShareArgsPreservesMinProto(t *testing.T) {
 		}
 	}
 }
+
+// 升级后的 share 没有可见控制台，远程桌面的知情提示被协助方看不到，所以不能把
+// --enable-desktop 带过去：升级后远程桌面一律关闭。
+func TestUpgradedShareArgsDropsEnableDesktop(t *testing.T) {
+	for _, flag := range []string{"--enable-desktop", "-enable-desktop", "--enable-desktop=true", "-enable-desktop=1", "--enable-desktop=false"} {
+		got, err := upgradedShareArgs([]string{"/opt/remote", "share", flag, "--root=/srv/app"}, "new:8443", "/tmp/new.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"share", "--root=/srv/app", "--server", "new:8443", "--code-file", "/tmp/new.json", upgradeSuccessorFlag}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: got %#v, want %#v", flag, got, want)
+		}
+	}
+	if isEnableDesktopFlag("--enable-desktop-x") || isEnableDesktopFlag("enable-desktop") {
+		t.Fatal("不应误伤相似参数或位置参数")
+	}
+}

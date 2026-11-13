@@ -247,7 +247,10 @@ func TestEncodeJPEGCapped(t *testing.T) {
 func TestScaleToWidthAverages(t *testing.T) {
 	// 2x2 黑白棋盘缩成 1x1，面积平均应为中灰
 	src := image.NewRGBA(image.Rect(0, 0, 2, 2))
-	set := func(x, y int, v uint8) { o := y*src.Stride + x*4; src.Pix[o], src.Pix[o+1], src.Pix[o+2], src.Pix[o+3] = v, v, v, 255 }
+	set := func(x, y int, v uint8) {
+		o := y*src.Stride + x*4
+		src.Pix[o], src.Pix[o+1], src.Pix[o+2], src.Pix[o+3] = v, v, v, 255
+	}
 	set(0, 0, 0)
 	set(1, 0, 255)
 	set(0, 1, 255)
@@ -318,5 +321,51 @@ func TestInputConcurrentBatchesNotInterleaved(t *testing.T) {
 		if seq[b*per+1] != "tB"+id || seq[b*per+2] != "kB"+id || seq[b*per+3] != "mmove" || seq[b*per+4] != "mdown" || seq[b*per+5] != "mup" {
 			t.Fatalf("批 %d 被交错: %v", b, seq[b*per:b*per+per])
 		}
+	}
+}
+
+// 组合键发到一半失败（或被取消）时，必须把本批已按下的键、鼠标键抬起，否则被协助方机器上
+// 修饰键一直按着；成功的批次不动（按住跨批次是正常用法）。
+func TestInputReleasesHeldOnFailure(t *testing.T) {
+	f := &fakeOps{rect: image.Rect(0, 0, 100, 100), fail: "wheel"}
+	_, err := runInput(t, newInputTool(f, true), `{"events":[{"type":"down","button":"left","x":0.5,"y":0.5},{"type":"key_down","key":"Control"},{"type":"key_down","key":"Alt"},{"type":"key_up","key":"Alt"},{"type":"key_down","key":"Tab"},{"type":"wheel","x":0.5,"y":0.5,"dy":120}]}`)
+	if err == nil {
+		t.Fatal("wheel 失败应报错")
+	}
+	got := strings.Join(f.calls, " ")
+	want := "mouse:up:50,50:left:0 key:Tab:true key:Control:true"
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("失败后应依次抬起鼠标左键、Tab、Control，实际调用: %s", got)
+	}
+
+	f2 := &fakeOps{rect: image.Rect(0, 0, 100, 100)}
+	if _, err := runInput(t, newInputTool(f2, true), `{"events":[{"type":"key_down","key":"Shift"}]}`); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f2.calls, " "); got != "key:Shift:false" {
+		t.Fatalf("成功的批次不应自动抬键，实际: %s", got)
+	}
+}
+
+func TestInputReleasesHeldOnCancel(t *testing.T) {
+	f := &fakeOps{rect: image.Rect(0, 0, 100, 100)}
+	tool := newInputTool(f, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	// 第二个按键注入时取消：之后的事件不再执行，已按下的 Meta 要抬起。
+	inner := tool.ops.Key
+	n := 0
+	tool.ops.Key = func(k string, up bool) error {
+		n++
+		if n == 1 {
+			cancel()
+		}
+		return inner(k, up)
+	}
+	_, err := tool.Run(ctx, json.RawMessage(`{"events":[{"type":"key_down","key":"Meta"},{"type":"key_down","key":"d"},{"type":"key_up","key":"d"},{"type":"key_up","key":"Meta"}]}`), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("应返回取消错误，得到 %v", err)
+	}
+	if got := strings.Join(f.calls, " "); got != "key:Meta:false key:Meta:true" {
+		t.Fatalf("取消后应抬起 Meta，实际: %s", got)
 	}
 }

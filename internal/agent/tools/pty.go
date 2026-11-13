@@ -108,16 +108,16 @@ type ptyProc interface {
 }
 
 type ptySession struct {
-	id      string
-	proc    ptyProc
+	id   string
+	proc ptyProc
 	// writeSem 输入串行保序（容量 1 的信号量，以便带超时地等待）。按小块逐块持有，块间让位给紧急输入。
 	writeSem chan struct{}
 	urgent   atomic.Int32 // 正在等锁的紧急输入数；大块写入看到它非 0 会在块间让位
-	done    chan struct{}
-	ready   chan struct{} // proc 就绪后关闭；启动期间到达的 write/resize 在此等待
-	once    sync.Once
-	reason  string
-	mu      sync.Mutex
+	done     chan struct{}
+	ready    chan struct{} // proc 就绪后关闭；启动期间到达的 write/resize 在此等待
+	once     sync.Once
+	reason   string
+	mu       sync.Mutex
 	// lastActive 最近一次“活动”（输入、resize、输出）的 UnixNano，由 PTYManager.now 提供时间。
 	lastActive atomic.Int64
 }
@@ -556,10 +556,16 @@ func (s *ptySession) writeUrgent(data []byte) (int, error) {
 	}
 	// 输入管道被卡住：绕过它，直接给前台进程组发信号。
 	if in, ok := s.proc.(ptyInterrupter); ok {
+		// 同一种控制字符一次调用只递送一次：连按或粘贴多个 Ctrl+C 时，不必为每个字节各发一次信号
+		// （Windows 上每次都要拉起一个辅助进程）。
 		sent := false
+		var tried [0x20]bool
 		for _, c := range data {
-			if (c == 0x03 || c == 0x1a || c == 0x1c) && in.Interrupt(c) {
-				sent = true
+			if (c == 0x03 || c == 0x1a || c == 0x1c) && !tried[c] {
+				tried[c] = true
+				if in.Interrupt(c) {
+					sent = true
+				}
 			}
 		}
 		if sent {

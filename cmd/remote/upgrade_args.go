@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/remote-assist/tool/internal/upgradeflags"
 )
@@ -46,6 +47,13 @@ func upgradedShareArgs(oldArgv []string, server, codeFile string) ([]string, err
 		if a == "--unsafe-full-system=false" {
 			continue
 		}
+		if isEnableDesktopFlag(a) {
+			// 升级后的 share 由升级器以隐藏、脱离控制台的方式启动，输出只进日志文件：远程桌面的
+			// 「协助端正在查看/控制你的屏幕」提示被协助方看不到，提示里的「关闭本窗口」也无从执行。
+			// 远程桌面必须让被协助方知情，所以升级后一律关闭；需要时由被协助方在可见窗口里
+			// 带 --enable-desktop 重新启动 share。
+			continue
+		}
 		// 由 upgrade 接管的托管旗标：剥掉旧值，末尾统一重写。--standalone=false /
 		// --no-auth=0 等显式 false 不属于托管旗标，落到最后原样保留。
 		switch a {
@@ -73,4 +81,16 @@ func upgradedShareArgs(oldArgv []string, server, codeFile string) ([]string, err
 	// new share 在 make-before-break 阶段先上线，并排队接管 old 持有的标准实例锁。
 	out = append(out, upgradeSuccessorFlag)
 	return out, nil
+}
+
+// isEnableDesktopFlag 识别 --enable-desktop 的各种写法（-/-- 前缀、=true/=false）。
+func isEnableDesktopFlag(a string) bool {
+	if !strings.HasPrefix(a, "-") {
+		return false
+	}
+	name := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+	if i := strings.IndexByte(name, '='); i >= 0 {
+		name = name[:i]
+	}
+	return name == "enable-desktop"
 }

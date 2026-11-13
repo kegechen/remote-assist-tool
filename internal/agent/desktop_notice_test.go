@@ -106,3 +106,22 @@ func TestDaemonDesktopUseNoticeSkipsFailedCalls(t *testing.T) {
 		t.Fatalf("failed call (desktop disabled) must not claim the screen is being viewed, got %v", got)
 	}
 }
+
+// 旧会话的在途请求在换 key 之后才完成：不得占掉新会话的「已提示」位。
+func TestDaemonDesktopUseStaleSessionDoesNotConsumeNotice(t *testing.T) {
+	r := NewRegistry()
+	oldSess := proto.Session{Key: [32]byte{1}}
+	d := NewDaemon(r, &fakeConn{in: make(chan *proto.Message, 1), out: make(chan *proto.Message, 1)}, oldSess)
+	rec := &deskRecorder{}
+	d.OnDesktopUse = rec.add
+	newSess := proto.Session{Key: [32]byte{2}}
+	d.RotateSession(newSess)
+	d.noteDesktopUse(oldSess, "input") // 旧协助端的请求晚到
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("旧会话的请求不应计入新会话，got %v", got)
+	}
+	d.noteDesktopUse(newSess, "input") // 新协助端第一次操控
+	if got := rec.snapshot(); len(got) != 1 || got[0] != "input" {
+		t.Fatalf("新会话首次操控必须提示且只提示一次，got %v", got)
+	}
+}

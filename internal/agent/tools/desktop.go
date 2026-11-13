@@ -289,16 +289,76 @@ func (t *InputTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stream
 		}
 	}
 	applied := 0
+	var held heldInputs
 	for i, ev := range a.Events {
 		if err := ctx.Err(); err != nil {
+			held.release(ops)
 			return nil, err
 		}
 		if err := t.apply(ops, rect, ev); err != nil {
+			held.release(ops)
 			return nil, fmt.Errorf("events[%d] (%s) failed after %d applied: %w", i, ev.Type, applied, err)
 		}
+		held.note(rect, ev)
 		applied++
 	}
 	return json.Marshal(InputResult{Applied: applied})
+}
+
+// heldInputs 记录本批里按下、尚未抬起的键和鼠标键。批次中途失败或被取消时逐个抬起，
+// 否则像 Alt+Tab 这样的组合键发到一半就停下，被协助方机器上的 Alt / Ctrl / Win 会一直按着。
+// 批次成功时不动：协助端按住某键跨多个批次（先 key_down、稍后另一批 key_up）是正常用法。
+type heldInputs struct {
+	keys    []string
+	buttons []heldButton
+}
+
+type heldButton struct {
+	button string
+	x, y   int
+}
+
+func (h *heldInputs) note(rect image.Rectangle, ev InputEvent) {
+	switch ev.Type {
+	case "key_down":
+		for _, k := range h.keys {
+			if k == ev.Key {
+				return
+			}
+		}
+		h.keys = append(h.keys, ev.Key)
+	case "key_up":
+		for i, k := range h.keys {
+			if k == ev.Key {
+				h.keys = append(h.keys[:i], h.keys[i+1:]...)
+				return
+			}
+		}
+	case "down":
+		b, _ := normButton(ev.Button)
+		x, y := toPixel(rect, ev.X, ev.Y)
+		h.buttons = append(h.buttons, heldButton{b, x, y})
+	case "up":
+		b, _ := normButton(ev.Button)
+		for i, hb := range h.buttons {
+			if hb.button == b {
+				h.buttons = append(h.buttons[:i], h.buttons[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// release 尽力抬起（忽略错误）：后按下的先抬起。
+func (h *heldInputs) release(o *DesktopOps) {
+	for i := len(h.buttons) - 1; i >= 0; i-- {
+		b := h.buttons[i]
+		o.Mouse("up", b.x, b.y, b.button, 0)
+	}
+	for i := len(h.keys) - 1; i >= 0; i-- {
+		o.Key(h.keys[i], true)
+	}
+	h.keys, h.buttons = nil, nil
 }
 
 func validateEvent(ev InputEvent) error {

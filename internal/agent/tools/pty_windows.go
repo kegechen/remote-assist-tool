@@ -62,6 +62,7 @@ type winPTY struct {
 	readClosed bool
 	exited     chan struct{}
 	code       int
+	pid        uint32 // 创建时记下；process 句柄会在 Close 后被关掉，之后不能再从句柄取 PID
 }
 
 var enableCtrlCOnce sync.Once
@@ -188,7 +189,7 @@ func startPTY(spec ptySpec) (ptyProc, error) {
 	}
 	windows.CloseHandle(pi.Thread)
 
-	p := &winPTY{hpc: hpc, inW: inW, outR: outR, process: pi.Process, job: job,
+	p := &winPTY{hpc: hpc, inW: inW, outR: outR, process: pi.Process, job: job, pid: pi.ProcessId,
 		readEnded: make(chan struct{}), exited: make(chan struct{})}
 	go func() {
 		windows.WaitForSingleObject(pi.Process, windows.INFINITE)

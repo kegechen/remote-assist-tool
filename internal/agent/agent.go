@@ -339,7 +339,7 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 		status = "err:" + resp.ErrorCode
 	}
 	if resp.OK && (req.Tool == "screen_capture" || req.Tool == "input") {
-		d.noteDesktopUse(req.Tool)
+		d.noteDesktopUse(sess, req.Tool)
 	}
 	dur := time.Since(start).Milliseconds()
 	// 文件传输分块交给 OnTransfer 聚合成进度，不再逐块各打一行活动和一行日志——
@@ -384,9 +384,14 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 // v1 会话下保持 0.0.x 的旧行为：空 result 不封。那时的接收侧正是按 len(result) > 0
 // 决定要不要解密的，这里若强行封一个 "{}"，对端会把它当成真实结果解出来。
 // noteDesktopUse 本会话首次成功使用某个远程桌面工具时触发 OnDesktopUse（每个工具每会话一次）。
-// 钩子在锁外调用，避免打印阻塞其他请求。
-func (d *Daemon) noteDesktopUse(tool string) {
+// sess 是该请求所属的会话：旧会话的在途请求在换 key 之后才完成时不计入，否则会把新会话的
+// 「已提示」位提前占掉，新协助端第一次看屏/操控时就不再提示。钩子在锁外调用，避免打印阻塞其他请求。
+func (d *Daemon) noteDesktopUse(sess proto.Session, tool string) {
 	d.deskMu.Lock()
+	if sess != d.currentSession() {
+		d.deskMu.Unlock()
+		return
+	}
 	first := !d.deskSeen[tool]
 	if first {
 		if d.deskSeen == nil {

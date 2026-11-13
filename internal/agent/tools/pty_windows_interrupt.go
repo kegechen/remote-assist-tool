@@ -65,10 +65,22 @@ func (p *winPTY) Interrupt(b byte) bool {
 	if b != 0x03 {
 		return false
 	}
-	pid := p.Pid()
+	// shell 已退出就不发：它的 PID 可能已被别的进程复用，AttachConsole 会把 Ctrl+C 发进无关的控制台。
+	// 用创建时缓存的 PID，不从可能已被 Close 关掉的进程句柄里取。
+	select {
+	case <-p.exited:
+		return false
+	default:
+	}
+	pid := int(p.pid)
 	if pid <= 0 {
 		return false
 	}
+	return runCtrlCHelper(pid)
+}
+
+// runCtrlCHelper 拉起隐藏的辅助子进程向 pid 所在控制台发 Ctrl+C；成功返回 true。测试可替换。
+var runCtrlCHelper = func(pid int) bool {
 	exe, err := os.Executable()
 	if err != nil {
 		return false
