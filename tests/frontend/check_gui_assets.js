@@ -65,7 +65,9 @@ function mkEl(id) {
     // 记下 listener 以便测试里手动触发（拖拽这类交互只能这么测）
     addEventListener(type, fn) { (this._h[type] || (this._h[type] = [])).push(fn); },
     _fire(type, ev) { (this._h[type] || []).forEach((f) => f(ev)); },
-    setPointerCapture() {}, releasePointerCapture() {}, setAttribute() {}, removeAttribute() {}, getAttribute() { return null; }, querySelectorAll() { return []; },
+    setPointerCapture() {}, releasePointerCapture() {}, setAttribute() {},
+    insertAdjacentHTML(pos, h) { this._html += String(h); },
+    querySelector() { return mkEl('anon'); }, removeAttribute() {}, getAttribute() { return null; }, querySelectorAll() { return []; },
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 260, height: 600 }),
     scrollTop: 0, scrollHeight: 0, value: '', disabled: false,
   };
@@ -186,9 +188,11 @@ for (const [label, bytes, want] of [
 const cssMatch = html.match(/<style>([\s\S]*?)<\/style>/);
 const css = cssMatch ? cssMatch[1] : '';
 for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-output', '#term-box', '#file-box', '#search-box', '#proc-box']) {
-  const rule = css.match(new RegExp(sel.replace(/[#]/g, '\\$&') + '\\{([^}]*)\\}'));
-  check(`${sel} 可滚动(min-height:0)`, !!rule && /min-height:0/.test(rule[1]),
-    rule ? `规则里没有 min-height:0: ${rule[1]}` : '找不到该 CSS 规则');
+  const bodies = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter((m) => m[1].split(',').map((x) => x.trim()).includes(sel))
+    .map((m) => m[2]);
+  check(`${sel} 可滚动(min-height:0)`, bodies.some((b) => /min-height:0/.test(b)),
+    bodies.length ? `规则里没有 min-height:0: ${bodies.join(' | ')}` : '找不到该 CSS 规则');
 }
 
 // ---------- 7. 目录树宽度拖拽 ----------
@@ -267,7 +271,7 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   ctx.setUpgradeInfo({ peer_version: '0.0.6', help_version: '0.0.6' });
   check('同版本隐藏升级条', els.get('upgrade-notice').style.display === 'none');
 
-  const term = els.get('term-output');term.innerHTML='';
+  const term = els.get('term-log');term.innerHTML='';
   ctx.execEvent({type:'result',result:{stdout:'old stdout',stderr:'old stderr',exit_code:0}},{});
   check('0.0.5 最终响应 stdout 可见', term.children.some((n)=>n.textContent==='old stdout'));
   check('0.0.5 最终响应 stderr 可见', term.children.some((n)=>n.textContent==='old stderr'));
@@ -292,7 +296,7 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   els.get('status').onclick({stopPropagation(){}});
   check('点击状态显示详情面板', els.get('conn-info').style.display === 'block');
   check('状态面板请求即时延迟', /\/api\/status/.test(js) && /latency_ms/.test(js));
-  check('状态面板显示 P2P 或 Relay', /P2P 直连/.test(js) && /Relay 中转/.test(js));
+  check('状态面板区分 P2P 直连 / UDP 中继 / 中继转发', /P2P 直连/.test(js) && /UDP 中继/.test(js) && /中继转发/.test(js));
   els.get('conn-info').style.display='none';
 }
 
@@ -366,9 +370,10 @@ const keysChecks = (async () => {
   check('Ctrl+C 成功时不提示', (await PT._sendUrgent(new Uint8Array([3]))) === true && ptyEls.get('ptyKeyMsg').textContent === '');
 })();
 
-// ---------- 14. 兼容旧版复选框 ----------
-// 复选框要真的把 min_proto 送到后端，失败时要把写给 AI 的 min_proto 指引翻译成
-// GUI 上能操作的话，降级成功要把警告亮出来——三处任何一处断了，用户都无从得知。
+// ---------- 14. 旧版对端降级 ----------
+// PR #4 去掉了「兼容旧版」复选框，改由后端按策略降级：内网/本机中继自动降级，公网中继
+// 返回 needs_confirm，必须由用户确认后带 allow_legacy=true 重连（中继可伪造「旧版」诱导降级）。
+// 降级成功要把警告亮出来；未确认前前端不得自行重试。
 (async () => {
   await keysChecks;
   const calls = [];
@@ -378,60 +383,35 @@ const keysChecks = (async () => {
     calls.push({ path: p, body });
     return { json: async () => (p === '/api/connect' ? connectReply : { ok: true, result: {} }) };
   };
-  const term = els.get('term-output');
-  const lastConnect = () => calls.filter((c) => c.path === '/api/connect').pop();
+  const term = els.get('term-log');
+  const connects = () => calls.filter((c) => c.path === '/api/connect');
+  const lastConnect = () => connects().pop();
   const mcpText = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });
 
-  els.get('legacy').checked = false;
   connectReply = { ok: true, result: mcpText({ connected: true, proto_version: '2' }) };
   term.innerHTML = '';
   await ctx.doConnect();
-  check('未勾选兼容旧版时 min_proto 为空', !!lastConnect() && lastConnect().body.min_proto === '');
+  check('默认连接不允许降级(allow_legacy=false)', !!lastConnect() && lastConnect().body.allow_legacy === false);
   check('谈成 v2 不显示警告', !/\[警告\]/.test(term.innerHTML));
 
-  els.get('legacy').checked = true;
-  connectReply = { ok: true, result: mcpText({ connected: true, proto_version: '1', warning: '已降级到 v1 兼容模式' }) };
+  connectReply = { ok: false, code: 'peer_legacy', needs_confirm: true, reason: '对端是旧版', error: 'connect failed: peer is legacy' };
   term.innerHTML = '';
+  const n0 = connects().length;
   await ctx.doConnect();
-  check('勾选兼容旧版时送出 min_proto=1', !!lastConnect() && lastConnect().body.min_proto === '1');
-  check('降级成功时终端显示警告', /\[警告\].*已降级到 v1 兼容模式/.test(term.innerHTML));
+  check('公网中继遇旧版对端：不自动降级重试', connects().length === n0 + 1);
+  check('公网中继遇旧版对端：弹出确认提示', els.get('connToast').dataset.state === undefined
+    ? els.get('connToast').className === 'confirm' : els.get('connToast').dataset.state === 'confirm');
 
-  els.get('legacy').checked = false;
-  connectReply = { ok: false, error: 'connect failed: handshake failed: 对端只支持 v1……再调用 connect 并带上 min_proto="1"' };
+  connectReply = { ok: true, fallback: true, result: mcpText({ connected: true, proto_version: '1' }) };
   term.innerHTML = '';
-  await ctx.doConnect();
-  check('旧版对端被拒时提示勾选兼容旧版', /勾选「兼容旧版」/.test(term.innerHTML));
-
-  els.get('legacy').checked = true;
-  term.innerHTML = '';
-  await ctx.doConnect();
-  check('已勾选时不重复提示勾选', !/勾选「兼容旧版」/.test(term.innerHTML));
-
-  // 判据要窄：参数校验错误里也出现 min_proto 这个词（"connect accepts only: ..., min_proto"），
-  // 那不是对端太旧，不该把用户引向降级。
-  els.get('legacy').checked = false;
-  connectReply = { ok: false, error: 'connect failed: bad args: json: unknown field "x" (connect accepts only: code, server, no_auth, min_proto; ...)' };
-  term.innerHTML = '';
-  await ctx.doConnect();
-  check('参数错误不误报为旧版对端', !/勾选「兼容旧版」/.test(term.innerHTML));
-
-  // 通道内升级成功后取消勾选：对端已是当前版本。
-  els.get('legacy').checked = true;
-  ctx.confirm = () => true;
-  const realFetch = ctx.fetch;
-  ctx.fetch = async (p, opts) => p === '/api/upgrade'
-    ? { json: async () => ({ ok: true, peer_version: '1.0.1' }) }
-    : realFetch(p, opts);
-  ctx.FormData = function () { this.append = () => {}; };
-  els.get('upgrade-file').files = [{ name: 'remote.exe' }];
-  await els.get('upgrade-file').onchange();
-  check('升级成功后取消勾选兼容旧版', els.get('legacy').checked === false);
-  ctx.fetch = realFetch;
+  await ctx.doConnect(true);
+  check('用户确认后带 allow_legacy=true', !!lastConnect() && lastConnect().body.allow_legacy === true);
+  check('降级成功时终端显示警告', /\[警告\].*兼容模式/.test(term.innerHTML));
 
   console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
   process.exit(failed ? 1 : 0);
 })().catch((e) => {
-  check('兼容旧版复选框', false, `${e.name}: ${e.message}`);
+  check('旧版对端降级', false, `${e.name}: ${e.message}`);
   console.log(`\n${failed} 项失败`);
   process.exit(1);
 });
