@@ -32,9 +32,8 @@ type x11Backend struct {
 	maxKC   xproto.Keycode
 	hasTest bool
 	hasRR   bool
-	// 临时借用来输入任意 Unicode 的键码；dirtySpare 为真表示映射还没还原。
-	spareKC    xproto.Keycode
-	dirtySpare bool
+	// 临时借用来输入任意 Unicode 的键码（可有多个）；非空表示映射还没还原。
+	spareKCs []xproto.Keycode
 }
 
 var x11 = &x11Backend{}
@@ -331,9 +330,9 @@ func (b *x11Backend) key(name string, up bool) error {
 	if err != nil {
 		return err
 	}
-	kc, _, found := findKeycode(ks, per, b.minKC, sym, b.spareKC)
+	kc, _, found := findKeycode(ks, per, b.minKC, sym, 0)
 	if !found && sym >= 'A' && sym <= 'Z' { // 大写字母按键码（Shift 由调用方单独发）
-		kc, _, found = findKeycode(ks, per, b.minKC, sym+('a'-'A'), b.spareKC)
+		kc, _, found = findKeycode(ks, per, b.minKC, sym+('a'-'A'), 0)
 	}
 	if !found {
 		return fmt.Errorf("当前键盘布局没有键 %q", name)
@@ -357,25 +356,54 @@ func (b *x11Backend) text(s string) (err error) {
 			err = e
 		}
 	}()
-	for _, r := range s {
-		if err = b.typeRune(r); err != nil {
+	runes := []rune(s)
+	ks, per, e := b.keymap()
+	if e != nil {
+		return e
+	}
+	// 先规划：映射里没有的字符各分配一个不同的空闲键码，一次性绑定、只等一次，
+	// 比“每个字符改绑同一个键码再等”稳得多（后者在负载高时应用来不及刷新映射会丢字）。
+	plan, e := planSpare(ks, per, b.minKC, runes, 0)
+	if e != nil {
+		return e
+	}
+	spareOf := map[rune]xproto.Keycode{}
+	if len(plan) > 0 {
+		if err = b.bindSpare(plan); err != nil {
 			return err
 		}
+		for _, a := range plan {
+			spareOf[a.r] = a.kc
+		}
+		time.Sleep(x11MappingSettle) // 等应用处理完 MappingNotify 后再开始按键
+	}
+	for _, r := range runes {
+		if kc, ok := spareOf[r]; ok {
+			if err = b.fake(xKeyPress, byte(kc), 0, 0); err != nil {
+				return err
+			}
+			if err = b.fake(xKeyRelease, byte(kc), 0, 0); err != nil {
+				return err
+			}
+			continue
+		}
+		if err = b.typeRune(r, ks, per); err != nil {
+			return err
+		}
+	}
+	if len(plan) > 0 {
+		time.Sleep(x11MappingSettle) // 让应用先处理完按键，再换回映射
 	}
 	return nil
 }
 
-// typeRune 输入单个字符：键盘映射里有就直接按（需要时带 Shift），否则借用空闲键码临时映射。
-func (b *x11Backend) typeRune(r rune) error {
+// typeRune 输入映射内的单个字符（需要时带 Shift）。映射外的字符由 text 批量借键码处理。
+func (b *x11Backend) typeRune(r rune, ks []xproto.Keysym, per int) error {
 	sym := keysymForRune(r)
-	ks, per, err := b.keymap()
-	if err != nil {
-		return err
-	}
-	if kc, col, ok := findKeycode(ks, per, b.minKC, sym, b.spareKC); ok {
+	if kc, col, ok := findKeycode(ks, per, b.minKC, sym, 0); ok {
 		return b.tap(kc, col == 1, ks, per)
 	}
-	return b.typeViaSpare(sym)
+	return fmt.Errorf("无法输入字符 %q：键盘映射里没有它且未分配借用键码", r)
 }
 
 // tap 按下并抬起一个键，shift 为真时包一层 Shift。
@@ -403,47 +431,22 @@ func (b *x11Backend) tap(kc xproto.Keycode, shift bool, ks []xproto.Keysym, per 
 }
 
 // x11MappingSettle 改键盘映射/按键后等应用刷新映射的时间。太短时负载高的机器上（如虚拟机）
-// Qt/GTK 应用还没处理完 MappingNotify，下一个字就按下，会丢字；实测 15ms 偶发丢字。
-const x11MappingSettle = 40 * time.Millisecond
+// Qt/GTK 应用还没处理完 MappingNotify，下一个字就按下，会丢字。
+const x11MappingSettle = 80 * time.Millisecond
 
-// typeViaSpare 把 sym 临时绑定到一个空闲键码上再按它（xdotool 的做法），用于映射里没有的字符（中文等）。
-func (b *x11Backend) typeViaSpare(sym xproto.Keysym) error {
-	if b.spareKC == 0 {
-		kc, err := b.pickSpare()
-		if err != nil {
-			return err
-		}
-		b.spareKC = kc
-	}
-	// 写两列（无修饰/Shift 同一 keysym）：单列时 Xlib 会按大小写对解释，Á 之类会被输成小写
-	if err := xproto.ChangeKeyboardMappingChecked(b.conn, 1, b.spareKC, 2, []xproto.Keysym{sym, sym}).Check(); err != nil {
-		b.drop()
-		return fmt.Errorf("ChangeKeyboardMapping: %w", err)
-	}
-	b.dirtySpare = true
-	// 等服务器把 MappingNotify 发给各客户端，应用重新读取映射后再按键
-	if _, err := xproto.GetInputFocus(b.conn).Reply(); err != nil {
-		return err
-	}
-	time.Sleep(x11MappingSettle)
-	if err := b.fake(xKeyPress, byte(b.spareKC), 0, 0); err != nil {
-		return err
-	}
-	if err := b.fake(xKeyRelease, byte(b.spareKC), 0, 0); err != nil {
-		return err
-	}
-	time.Sleep(x11MappingSettle) // 让应用先处理按键，再换回映射
-	return nil
+// spareAssign 一个需要借用键码输入的字符及分配给它的键码。
+type spareAssign struct {
+	r  rune
+	kc xproto.Keycode
 }
 
-// pickSpare 选一个没有任何键盘符号的键码；找不到就报错（不能借用真实按键，还原时会把它清空）。
-func (b *x11Backend) pickSpare() (xproto.Keycode, error) {
-	ks, per, err := b.keymap()
-	if err != nil {
-		return 0, err
-	}
+// planSpare 为 runes 里键盘映射没有的字符各分配一个不同的空闲键码（重复字符复用同一个）。
+// 映射里已有的字符不借；找不到足够的空闲键码就报错（不能借用真实按键，还原时会把它清空）。
+// skip 是要跳过的键码（0 表示不跳过）。纯函数，便于单测。
+func planSpare(ks []xproto.Keysym, per int, min xproto.Keycode, runes []rune, skip xproto.Keycode) ([]spareAssign, error) {
+	var free []xproto.Keycode
 	if per > 0 {
-		for i := len(ks) - per; i >= 0; i -= per {
+		for i := len(ks) - per; i >= 0; i -= per { // 从高键码往低找，避开常用键
 			empty := true
 			for c := 0; c < per; c++ {
 				if ks[i+c] != 0 {
@@ -451,24 +454,63 @@ func (b *x11Backend) pickSpare() (xproto.Keycode, error) {
 					break
 				}
 			}
-			if empty {
-				return xproto.Keycode(i/per) + b.minKC, nil
+			if kc := xproto.Keycode(i/per) + min; empty && kc != skip {
+				free = append(free, kc)
 			}
 		}
 	}
-	return 0, errors.New("键盘映射里没有空闲键码，无法输入映射外的字符（如中文）")
+	var plan []spareAssign
+	have := map[rune]bool{}
+	for _, r := range runes {
+		if have[r] {
+			continue
+		}
+		if _, _, ok := findKeycode(ks, per, min, keysymForRune(r), 0); ok {
+			continue // 映射里已有，直接按
+		}
+		if len(free) == 0 {
+			return nil, errors.New("键盘映射里没有足够的空闲键码，无法输入映射外的字符（如中文）")
+		}
+		plan = append(plan, spareAssign{r: r, kc: free[0]})
+		free = free[1:]
+		have[r] = true
+	}
+	return plan, nil
 }
 
-func (b *x11Backend) restoreSpare() error {
-	if !b.dirtySpare || b.conn == nil {
-		return nil
+// bindSpare 把计划里的字符一次性绑定到各自的空闲键码上，并等服务器确认。
+// 写两列（无修饰/Shift 同一 keysym）：单列时 Xlib 会按大小写对解释，Á 之类会被输成小写。
+func (b *x11Backend) bindSpare(plan []spareAssign) error {
+	for _, a := range plan {
+		syms := []xproto.Keysym{keysymForRune(a.r), keysymForRune(a.r)}
+		if err := xproto.ChangeKeyboardMappingChecked(b.conn, 1, a.kc, 2, syms).Check(); err != nil {
+			b.drop()
+			return fmt.Errorf("ChangeKeyboardMapping: %w", err)
+		}
+		b.spareKCs = append(b.spareKCs, a.kc)
 	}
-	b.dirtySpare = false
-	if err := xproto.ChangeKeyboardMappingChecked(b.conn, 1, b.spareKC, 2, []xproto.Keysym{0, 0}).Check(); err != nil {
-		b.drop()
-		return fmt.Errorf("还原键盘映射失败: %w", err)
+	// 同步一次，确保服务器已处理完全部改绑并把 MappingNotify 发出
+	if _, err := xproto.GetInputFocus(b.conn).Reply(); err != nil {
+		return err
 	}
 	return nil
+}
+
+// restoreSpare 把所有借用过的键码还原为空。连接已断开时保留记录由重连后处理（空闲回收会再调一次）。
+func (b *x11Backend) restoreSpare() error {
+	if len(b.spareKCs) == 0 || b.conn == nil {
+		return nil
+	}
+	kcs := b.spareKCs
+	b.spareKCs = nil
+	var first error
+	for _, kc := range kcs {
+		if err := xproto.ChangeKeyboardMappingChecked(b.conn, 1, kc, 2, []xproto.Keysym{0, 0}).Check(); err != nil {
+			b.drop()
+			return fmt.Errorf("还原键盘映射失败: %w", err)
+		}
+	}
+	return first
 }
 
 // keysymForRune 字符 → X keysym：Latin-1 范围与码点相同，其余用 0x01000000+码点。
