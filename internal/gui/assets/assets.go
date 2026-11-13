@@ -399,12 +399,38 @@ const es=new EventSource(withToken('/api/events')); // EventSource 设不了自�
 // 后端广播的全是具名事件（event: xxx，不带 data 字段），而 onmessage 只对带 data 的帧
 // 触发——所以原先那条 onmessage→底部日志框的线永远不会有内容，日志框一直是空的。
 // 日志框已移除：状态归右上角状态灯，值得留痕的（重连/丢失）直接说给终端。
-es.addEventListener('connected',()=>{setStatus(true,'已连接');loadDrives();termOnConnected();refreshProto()});
+// 断线原因：后端在 reconnecting/reconnect-fail/lost 事件的 data 里带 JSON {reason,text,hint,retry,max}，
+// 区分被控端断开 / 被控端重启 / 中继隧道断开 / 网络不可达 等，给出不同文案与建议动作。
+let dropInfo=null;
+function parseDrop(e){try{const d=JSON.parse(e&&e.data);if(d&&d.reason)return d}catch(_){}return null}
+// 工具调用错误文本（含 peer_gone / tunnel_lost / not_connected）转成同一套中文文案
+function dropFromErr(s){
+  s=String(s||'');
+  if(/peer_gone/.test(s))return /连接已更新/.test(s)?'被控端已重启或热升级，正在重新连接':'被控端已断开，请确认对方程序仍在运行';
+  if(/tunnel_lost/.test(s))return '中继或隧道已断开，请检查网络与中继服务';
+  if(/not_connected/.test(s))return dropInfo?dropInfo.text+'：'+dropInfo.hint:'连接已断开，请重新连接';
+  return '';
+}
+es.addEventListener('connected',()=>{dropInfo=null;setStatus(true,'已连接');loadDrives();termOnConnected();refreshProto()});
 // 自动重连后协议版本可能变化（对端升级后会重新协商为 v2），以后端状态为准刷新兼容模式标识。
 async function refreshProto(){const r=await api('/api/status',{});if(!connected||!r||!r.connected||!r.proto_version)return;protoLegacy=String(r.proto_version)==='1';setCompat(protoLegacy)}
 es.addEventListener('disconnected',()=>{setStatus(false,'已断开');termOnDisconnected()});
-es.addEventListener('reconnecting',()=>{setStatus(false,'重连中...');termLog('<span class="meta">连接断开，正在自动重连...</span>')});
-es.addEventListener('lost',()=>{setStatus(false,'丢失');termLog('<span class="err">自动重连失败，请重新点击连接</span>')});
+es.addEventListener('reconnecting',e=>{
+  const d=parseDrop(e);dropInfo=d;
+  setStatus(false,d?'重连中（'+d.text+'）':'重连中...');
+  termLog('<span class="meta">连接断开'+(d?'：'+esc(d.text)+'。'+esc(d.hint):'')+'；正在自动重连...</span>');
+});
+es.addEventListener('reconnect-fail',e=>{
+  const d=parseDrop(e);if(!d)return;
+  const changed=!dropInfo||dropInfo.reason!==d.reason;dropInfo=d;
+  setStatus(false,'重连中（'+d.text+'，第 '+d.retry+'/'+d.max+' 次失败）');
+  if(changed)termLog('<span class="meta">重连失败：'+esc(d.text)+'。'+esc(d.hint)+'</span>');
+});
+es.addEventListener('lost',e=>{
+  const d=parseDrop(e);if(d)dropInfo=d;
+  setStatus(false,d?'丢失（'+d.text+'）':'丢失');
+  termLog('<span class="err">自动重连失败'+(d?'：'+esc(d.text)+'。'+esc(d.hint):'')+'；请处理后重新点击连接</span>');
+});
 es.addEventListener('upgrade-progress',e=>{const n=$('#upgrade-notice');n.style.display='flex';n.className='';$('#upgrade-msg').textContent=e.data});
 es.onerror=()=>{};
 
@@ -529,6 +555,8 @@ async function doConnect(allowLegacy){
   const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked;
   const label=connectLabel(server,code);
   const ctrl=new AbortController();connecting={ctrl};
+  // 发起新连接时后端会先关掉旧连接：同样先停终端会话，避免取消/失败后残留红色中断字样
+  if(connected&&window.PtyTerm)PtyTerm.disconnected();
   resetRemoteState(); // 可能换了一台远端，旧缓存一律作废
   setStatus(false,'连接中...');
   connToastShow('connecting','正在连接 '+label+'…','按 Esc 或点「取消连接」可中止');
@@ -573,8 +601,9 @@ async function doConnect(allowLegacy){
   connToastShow('error',msg,sub,6000);
 }
 async function doDisconnect(){
-  await api('/api/disconnect',{});
+  // 先停终端会话再断：否则后端关掉子进程时，PTY 流先收到“mcp process exited”会残留一行红字
   window.PtyTerm&&PtyTerm.disconnected();
+  await api('/api/disconnect',{});
   setStatus(false,'未连接');
   resetRemoteState();
   $('#tree').innerHTML='';closeAllTabs();openTerm(); // 终端是常驻页，断开后仍留着
@@ -1236,7 +1265,7 @@ async function loadDrives(){
   let startPath='',lastError='';
   for(const candidate of candidates){const result=await fetchDirResult(candidate);if(result.ok){startPath=candidate;break}lastError=result.error||lastError}
   if(generation!==driveLoadGeneration)return;tree.innerHTML='';
-  if(!startPath){tree.innerHTML='<div class="tloading">默认目录不可访问'+(lastError?'：'+esc(lastError):'')+'</div>';return}
+  if(!startPath){tree.innerHTML='<div class="tloading">默认目录不可访问'+(lastError?'：'+esc(dropFromErr(lastError)||lastError):'')+'</div>';return}
   $('#treePath').value=startPath;addDirNode(tree,startPath,true,true);
 }
 function addDirNode(parent,path,isRoot,isExpanded){
@@ -1365,6 +1394,7 @@ function deskErrText(e){
   if(s.indexOf('desktop_disabled')>=0)return '对端未启用远程桌面：请让对端用 share --enable-desktop 重新启动';
   if(s.indexOf('desktop_unsupported')>=0)return '对端系统暂不支持远程桌面';
   if(s.indexOf('unknown_tool')>=0)return '对端版本过旧，没有远程桌面功能';
+  const dr=dropFromErr(s);if(dr)return dr;
   return s;
 }
 function deskBytesToBlob(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type:'image/jpeg'})}
@@ -1446,7 +1476,7 @@ async function deskStart(forceLoading){
   }
   ac.abort();
   if(desk.ac===ac)desk.ac=null;
-  if(my===desk.loopId){desk.running=false;if(fail)deskState('error',fail);else if(!connected)deskState('idle','连接已断开，请重新连接对端')}
+  if(my===desk.loopId){desk.running=false;if(fail)deskState('error',fail);else if(!connected)deskState('idle',dropInfo?'连接已断开：'+dropInfo.text+'。'+dropInfo.hint:'连接已断开，请重新连接对端')}
 }
 function deskAbort(){
   if(desk.ac){

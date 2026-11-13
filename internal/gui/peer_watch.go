@@ -36,6 +36,7 @@ func isPeerDeadError(err error) bool {
 type peerWatch struct {
 	threshold int
 	count     int
+	reason    dropInfo // 连续失败期间见到的最具体的断线原因
 }
 
 func newPeerWatch(threshold int) *peerWatch { return &peerWatch{threshold: threshold} }
@@ -44,9 +45,14 @@ func newPeerWatch(threshold int) *peerWatch { return &peerWatch{threshold: thres
 func (w *peerWatch) observe(err error) bool {
 	if !isPeerDeadError(err) {
 		w.count = 0
+		w.reason = dropInfo{}
 		return false
 	}
 	w.count++
+	// 具体原因不被后到的通用 not_connected 覆盖
+	if info := classifyDropError(err); w.reason.Code == "" || info.Code != dropGeneric {
+		w.reason = info
+	}
 	return w.count >= w.threshold
 }
 
@@ -75,6 +81,7 @@ func (s *Server) watchPeer(ctx context.Context, client *MCPClient) {
 		_, err := client.CallTool(pctx, "stat", map[string]any{"path": "."})
 		cancel()
 		if w.observe(err) {
+			s.setDropReason(client, w.reason)
 			// Close 会让 Done() 触发，guardLoop 随即发 reconnecting 并按退避重连
 			client.Close()
 			return

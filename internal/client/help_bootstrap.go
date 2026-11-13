@@ -84,6 +84,20 @@ type HelpMCPBootstrap struct {
 	lastServer   string
 	lastNoAuth   bool
 	lastMinProto string
+	// lastDrop 最近一次会话被拆除的原因（teardown 的 err 文本，如 peer_gone: ...）。
+	// 拆除后 bridge 置空，后续调用只剩 not_connected；带上它，GUI 才能区分对端断开/隧道断开。
+	lastDrop string
+}
+
+// notConnectedErr 返回 not_connected 错误；若此前有过会话被拆除，附带断开原因（lastDrop）。
+func (b *HelpMCPBootstrap) notConnectedErr() error {
+	b.mu.Lock()
+	drop := b.lastDrop
+	b.mu.Unlock()
+	if drop != "" {
+		return fmt.Errorf("not_connected: call 'connect' with the assist code first (last_drop: %s)", drop)
+	}
+	return fmt.Errorf("not_connected: call 'connect' with the assist code first")
 }
 
 func NewHelpMCPBootstrap(cfg *Config) *HelpMCPBootstrap {
@@ -110,7 +124,7 @@ func (b *HelpMCPBootstrap) CallTool(ctx context.Context, name string, args json.
 	br := b.bridge
 	b.mu.Unlock()
 	if br == nil {
-		return nil, fmt.Errorf("not_connected: call 'connect' with the assist code first")
+		return nil, b.notConnectedErr()
 	}
 	switch name {
 	case "upload_file", "download_file":
@@ -131,7 +145,7 @@ func (b *HelpMCPBootstrap) CallToolStream(ctx context.Context, name string, args
 	br := b.bridge
 	b.mu.Unlock()
 	if br == nil {
-		return nil, fmt.Errorf("not_connected: call 'connect' with the assist code first")
+		return nil, b.notConnectedErr()
 	}
 	return br.CallToolStream(ctx, name, args, onChunk)
 }
@@ -183,7 +197,7 @@ func (b *HelpMCPBootstrap) transferWithReconnect(ctx context.Context, name strin
 		br := b.bridge
 		b.mu.Unlock()
 		if br == nil {
-			return nil, fmt.Errorf("not_connected: call 'connect' with the assist code first")
+			return nil, b.notConnectedErr()
 		}
 		if name == "upload_file" {
 			return b.doUploadFile(ctx, br, a)
@@ -485,6 +499,9 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 			}
 			b.mu.Lock()
 			if b.bridge == bridge {
+				if err != nil {
+					b.lastDrop = err.Error()
+				}
 				b.help = nil
 				b.bridge = nil
 				b.activeTarget = connectTarget{}
@@ -527,6 +544,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	b.lastServer = a.Server
 	b.lastNoAuth = a.NoAuth
 	b.lastMinProto = a.MinProto
+	b.lastDrop = ""
 	b.mu.Unlock()
 
 	// --- P2P：后台协商并热升级，不阻塞 connect 返回 ---
