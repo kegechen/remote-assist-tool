@@ -53,7 +53,7 @@ type ShareMode struct {
 	sbCfg          agent.SandboxConfig
 	minProto       string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
 	allowPTY       bool   // 是否开放真终端（PTY），由 main 决定：默认开，设 --allow-exec/--root 时关
-	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭
+	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭，需被控端显式 --enable-desktop
 	daemon         *agent.Daemon
 	daemonOnce     sync.Once
 
@@ -1277,10 +1277,20 @@ func (s *ShareMode) handleRelayToolHello(msg *proto.Message) error {
 	return nil
 }
 
+// desktopUseNotice 远程桌面首次被使用时打印在 share 控制台的醒目提示。
+func desktopUseNotice(tool string) string {
+	what := "正在查看你的屏幕"
+	if tool == "input" {
+		what = "正在控制你的鼠标和键盘"
+	}
+	return fmt.Sprintf("\n[!] ======== 远程桌面：协助端%s ========\n"+
+		"    如果这不是你同意的操作，请立即关闭本窗口（或按 Ctrl+C）结束协助。\n\n", what)
+}
+
 // SetEnableDesktop 开关远程桌面工具；必须在 Run 之前调用。
 func (s *ShareMode) SetEnableDesktop(on bool) { s.enableDesktop = on }
 
-// SetAllowPTY 显式开放真终端（默认关闭）；必须在 Run 之前调用。
+// SetAllowPTY 开关真终端（main 决定：默认开，设 --allow-exec/--root 时关）；必须在 Run 之前调用。
 func (s *ShareMode) SetAllowPTY(on bool) { s.allowPTY = on }
 
 // ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅轮换会话。
@@ -1306,8 +1316,9 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		for _, t := range tools.NewPTYTools(tools.PTYDisabled(s.allowPTY)) {
 			reg.Register(t)
 		}
-		d :=agent.NewDaemon(reg, s.client, sess)
+		d := agent.NewDaemon(reg, s.client, sess)
 		d.OnActivity = func(line string) { s.println(line) }
+		d.OnDesktopUse = func(tool string) { s.printf("%s", desktopUseNotice(tool)) }
 		if s.console != nil {
 			d.OnTransfer = s.console.Event
 		}

@@ -26,8 +26,8 @@ const (
 	desktopMaxTextLen   = 4096
 )
 
-// ErrDesktopDisabled 对端不支持/未启用远程桌面时返回。
-var ErrDesktopDisabled = errors.New("desktop_disabled: share 端未启用远程桌面（当前平台不支持或无可用显示）")
+// ErrDesktopDisabled 对端未用 --enable-desktop 启动时返回。
+var ErrDesktopDisabled = errors.New("desktop_disabled: share 端未启用远程桌面，需被控端带 --enable-desktop 重新启动 share")
 
 // ErrDesktopUnsupported 当前平台没有捕获/注入实现。
 var ErrDesktopUnsupported = errors.New("desktop_unsupported: 当前平台暂不支持远程桌面")

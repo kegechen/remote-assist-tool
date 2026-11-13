@@ -316,6 +316,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--code-file` | - | After registration, atomically write the assist code + expiry as JSON to this file (for a host program to read) |
 | `--root` | - | Optional: confine the file tools to this subtree (unset = unrestricted). Protection against slips, not a security boundary |
 | `--allow-exec` | - | exec command allow list (comma-separated; empty = bound only by the deny list) |
+| `--enable-desktop` | `false` | Allow the helper to view this screen and control mouse/keyboard (remote desktop). Off by default; when on, the console warns the first time each helper session views / controls the screen |
 | `--deny-exec` | `rm,shutdown,reboot,mkfs,dd` | exec command deny list |
 | `--elevate` | `false` | Windows: request administrator privileges via UAC at startup |
 | `--unsafe-exec` | `false` | **Dangerous**: disables the exec deny/allow lists so any command can run (startup shows a 5-second red confirmation countdown). Does not affect `--root` |

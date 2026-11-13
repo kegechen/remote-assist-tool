@@ -137,6 +137,7 @@ func runShare(args []string) {
 	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
 	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
 	codeFileMirror := fs.String("code-file-mirror", "", "Internal (make-before-break upgrade): additionally mirror the assist code JSON here, so a prior --code-file path keeps refreshing after an in-channel upgrade")
+	enableDesktop := fs.Bool("enable-desktop", false, "Allow the helper to view this machine's screen and inject mouse/keyboard input (screen_capture + input tools). Off by default: without it the helper cannot see or control the screen. When on, the console prints a warning the first time each helper session views the screen and the first time it controls the mouse/keyboard. Windows / Linux (X11) / macOS; must run in a logged-in interactive graphical session (not a service); the lock screen and elevated/UAC windows are not controllable.")
 	minProto := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 
 	fs.Usage = func() {
@@ -360,7 +361,8 @@ func runShare(args []string) {
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
-	share.SetEnableDesktop(true) // 远程桌面始终开启，无开关
+	// 远程桌面（看屏 + 键鼠注入）必须由被控端显式 --enable-desktop 开启：默认开启会让被协助方在不知情时被看屏、被操控。
+	share.SetEnableDesktop(*enableDesktop)
 	// 真终端始终开启，无开关；但设了 --allow-exec/--root 时 shell 会绕过这些护栏，自动关闭
 	guarded := *allowExec != "" || *rootDir != ""
 	share.SetAllowPTY(!guarded)

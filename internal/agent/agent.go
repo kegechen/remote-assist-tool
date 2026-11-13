@@ -118,6 +118,12 @@ type Daemon struct {
 	// OnTransfer 可选钩子：成功的文件传输分块改由它接收（见 parseTransfer），
 	// 不再触发 OnActivity。未设置时传输分块照旧逐条走 OnActivity。
 	OnTransfer func(TransferEvent)
+	// OnDesktopUse 可选钩子：每个协助会话内，首次成功查看屏幕（screen_capture）、首次成功注入键鼠（input）
+	// 时各触发一次，供 share 打印醒目提示。远程桌面的成功调用在日志/控制台里是静默的（高频），
+	// 没有这个钩子被协助方就完全不知道屏幕正被查看或操控。会话换 key（新的协助端握手）后重新提示。
+	OnDesktopUse func(tool string)
+	deskMu       sync.Mutex
+	deskSeen     map[string]bool
 }
 
 func NewDaemon(reg *Registry, conn MsgConn, sess proto.Session) *Daemon {
@@ -137,6 +143,10 @@ func (d *Daemon) RotateSession(sess proto.Session) {
 	// 换 key ⟹ 新会话，抗重放窗口必须跟着重置：新会话的调用 ID 与旧会话无关，
 	// 留着旧位会把合法请求误判成重放。
 	d.replay.reset()
+	// 新会话的协助端可能是另一个人，远程桌面的醒目提示要重新出现。
+	d.deskMu.Lock()
+	d.deskSeen = nil
+	d.deskMu.Unlock()
 	d.cancels.Range(func(k, v any) bool {
 		if cancel, ok := v.(context.CancelFunc); ok {
 			cancel()
@@ -328,6 +338,9 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 	if !resp.OK {
 		status = "err:" + resp.ErrorCode
 	}
+	if resp.OK && (req.Tool == "screen_capture" || req.Tool == "input") {
+		d.noteDesktopUse(req.Tool)
+	}
 	dur := time.Since(start).Milliseconds()
 	// 文件传输分块交给 OnTransfer 聚合成进度，不再逐块各打一行活动和一行日志——
 	// 一个几十 MB 的文件就是上百块，刷屏且淹没其他调用。失败的分块仍走常规路径，
@@ -370,6 +383,23 @@ func (d *Daemon) handleReq(parent context.Context, msg *proto.Message) {
 //
 // v1 会话下保持 0.0.x 的旧行为：空 result 不封。那时的接收侧正是按 len(result) > 0
 // 决定要不要解密的，这里若强行封一个 "{}"，对端会把它当成真实结果解出来。
+// noteDesktopUse 本会话首次成功使用某个远程桌面工具时触发 OnDesktopUse（每个工具每会话一次）。
+// 钩子在锁外调用，避免打印阻塞其他请求。
+func (d *Daemon) noteDesktopUse(tool string) {
+	d.deskMu.Lock()
+	first := !d.deskSeen[tool]
+	if first {
+		if d.deskSeen == nil {
+			d.deskSeen = map[string]bool{}
+		}
+		d.deskSeen[tool] = true
+	}
+	d.deskMu.Unlock()
+	if first && d.OnDesktopUse != nil {
+		d.OnDesktopUse(tool)
+	}
+}
+
 func (d *Daemon) sendResp(sess proto.Session, resp proto.ToolResp) error {
 	if sess.Active() {
 		plain := resp.ResultJSON

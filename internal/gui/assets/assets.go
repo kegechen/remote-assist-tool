@@ -344,7 +344,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
     <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code"></div>
     <div class="hgrp"><span class="lbl">中转地址</span><input class="server" id="server" placeholder="host:port" title="中转服务地址，如 127.0.0.1:28443。留空使用默认中转；填过的地址连接成功后会被记住"></div>
     <label class="chk"><input type="checkbox" id="noauth" aria-describedby="tipNoauth"><span>NoAuth</span></label><button type="button" class="qm" id="qmNoauth" data-tip="tipNoauth" aria-label="NoAuth 说明" aria-describedby="tipNoauth" aria-expanded="false">?</button>
-    <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需在已登录的图形会话中运行 share）">远程桌面</button></div>
+    <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop，且在已登录的图形会话中运行）">远程桌面</button></div>
     <span id="compat" hidden><span class="cm-txt">当前为兼容模式连接</span><button type="button" class="qm" id="qmCompat" data-tip="tipCompat" aria-label="兼容模式说明" aria-describedby="tipCompat" aria-expanded="false">?</button></span>
     <button id="status" title="连接详情" disabled>未连接</button>
     <button class="sm" id="themeBtn" title="主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg></button>
@@ -1399,7 +1399,7 @@ function deskToast(s){
 }
 function deskErrText(e){
   const s=String(e||'');
-  if(s.indexOf('desktop_disabled')>=0)return '对端未启用远程桌面（平台不支持或无可用显示）';
+  if(s.indexOf('desktop_disabled')>=0)return '对端未启用远程桌面：请让对端用 share --enable-desktop 重新启动';
   if(s.indexOf('desktop_unsupported')>=0)return '对端系统暂不支持远程桌面';
   if(s.indexOf('unknown_tool')>=0)return '对端版本过旧，没有远程桌面功能';
   const dr=dropFromErr(s);if(dr)return dr;

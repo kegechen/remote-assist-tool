@@ -39,7 +39,7 @@ xterm.js 5.5.0 与 addon-fit 0.10.0 离线内嵌（`internal/gui/assets/xterm/`�
 | Windows 版本过低，无 ConPTY | `pty_unsupported` | 被控端系统不支持 ConPTY（需 Windows 10 1809+） |
 | 找不到 / 启动不了 shell | 对应错误 | 被控端无法启动 shell（附原始错误） |
 
-- **真终端默认开启**，与远程桌面一致，`remote share` 无任何功能参数，协助端在控制端按需选用命令行 / 终端 / 桌面。PTY 里的 shell 能绕过 `--allow-exec`、`--deny-exec`、`--root`，所以设了 `--allow-exec` 或 `--root` 时会自动关闭真终端。
+- **真终端默认开启**（远程桌面则需被控端显式 `--enable-desktop`），协助端在控制端按需选用命令行 / 终端。PTY 里的 shell 能绕过 `--allow-exec`、`--deny-exec`、`--root`，所以设了 `--allow-exec` 或 `--root` 时会自动关闭真终端。
 - 回退到命令行模式后，重新连接会重新探测。
 
 ## 限制
