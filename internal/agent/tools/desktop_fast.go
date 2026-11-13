@@ -89,6 +89,29 @@ func scaleToWidth(src *image.RGBA, maxW int) *image.RGBA {
 	return dst
 }
 
+// swizzleToRGBA 把 32bpp 的原始像素按行块并行转成不透明 RGBA：dst 的 R/G/B 取自 src 每 4 字节中
+// 下标 ri/gi/bi 处（alpha 一律置 255）。src 每行 srcStride 字节，dst 须为 w*h 的 RGBA。
+// Linux X11 GetImage（BGRX：2,1,0）与 macOS CGImage（各种字节序）共用。
+func swizzleToRGBA(dst *image.RGBA, src []byte, srcStride, ri, gi, bi int) {
+	b := dst.Bounds()
+	w, h := b.Dx(), b.Dy()
+	parallelRows(h, 32, func(lo, hi int) {
+		for y := lo; y < hi; y++ {
+			s := src[y*srcStride : y*srcStride+w*4]
+			d := dst.Pix[y*dst.Stride : y*dst.Stride+w*4]
+			if ri == 2 && gi == 1 && bi == 0 { // BGRX 常见路径，固定下标便于编译器消除边界检查
+				for x := 0; x+3 < len(s); x += 4 {
+					d[x], d[x+1], d[x+2], d[x+3] = s[x+2], s[x+1], s[x], 255
+				}
+				continue
+			}
+			for x := 0; x+3 < len(s); x += 4 {
+				d[x], d[x+1], d[x+2], d[x+3] = s[x+ri], s[x+gi], s[x+bi], 255
+			}
+		}
+	})
+}
+
 // 条带并行 JPEG：每条带高度为 16 的倍数（4:2:0 的 MCU 高度），各自独立编码；
 // 每个条带的熵编码数据以 DC 预测值清零开始、字节对齐结束，恰好等价于一个重启区间，
 // 因此把条带数据用 RSTn 标记串起来，再在头部加 DRI，就是一个合法的单张基线 JPEG。
