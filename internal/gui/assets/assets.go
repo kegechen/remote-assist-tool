@@ -237,6 +237,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
 #desk-bar .dk-seg button[aria-pressed=true]{background:var(--accent-soft);color:var(--accent);font-weight:600;box-shadow:inset 0 0 0 1px var(--accent-line)}
 #desk-bar .dk-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;background:var(--fill);color:var(--text);border:1px solid var(--line);border-radius:var(--r-md);font-size:12px;font-weight:500}
 #desk-bar .dk-btn:hover{background:var(--fill-hover);border-color:var(--line-hi);filter:none}
+#desk-bar .dk-btn:disabled{opacity:.45;cursor:default;background:var(--fill);border-color:var(--line)}
 #desk-bar .dk-btn[aria-pressed=true]{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
 #desk-bar .dk-btn svg,.dk-ov button svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 #desk-bar select{appearance:none;-webkit-appearance:none;background:var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a9099' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center;color:var(--text);border:1px solid var(--line);border-radius:var(--r-md);height:30px;padding:0 28px 0 11px;font-size:12px;cursor:pointer;transition:border-color .15s}
@@ -359,10 +360,10 @@ main{flex:1;display:flex;min-height:0;min-width:0}
     <div id="right">
       <div class="tabs" id="tabbar"></div>
       <div class="tabcontent">
-        <div id="term-box"><div id="term-output"><div id="term-log"></div><div class="input-row"><span class="prompt" id="termPrompt">$</span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="命令输入"></div></div><div id="term-status"><span id="term-state" class="meta">未连接</span><button id="termStop" class="sec" type="button">中断 (Ctrl+C)</button><span class="spacer"></span><span class="meta" id="termNote"></span></div></div>
+        <div id="term-box"><div id="pty-keys" role="toolbar" aria-label="终端快捷键"><button type="button" id="ptyK-ctrl-c" data-b="3" title="发送 Ctrl+C（中断）">Ctrl+C</button><button type="button" id="ptyK-ctrl-d" data-b="4" title="发送 Ctrl+D（EOF）">Ctrl+D</button><button type="button" id="ptyK-ctrl-z" data-b="26" title="发送 Ctrl+Z（挂起）">Ctrl+Z</button><button type="button" id="ptyK-esc" data-b="27" title="发送 Esc">Esc</button><button type="button" id="ptyK-tab" data-b="9" title="发送 Tab">Tab</button><span class="pk-msg" id="ptyKeyMsg" role="status" aria-live="polite"></span></div><div id="term-output"><div id="term-log"></div><div class="input-row"><span class="prompt" id="termPrompt">$</span><input id="termInput" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="命令输入"></div></div><div id="term-status"><span id="term-state" class="meta">未连接</span><button id="termStop" class="sec" type="button">中断 (Ctrl+C)</button><span class="spacer"></span><span class="meta" id="termNote"></span></div></div>
         <div id="search-box"><div class="sp"><label>正则:</label><input id="grepPattern" placeholder="TODO"><label>目录:</label><input id="grepRoot" placeholder="C:\\"><button class="sm" id="grepRun">搜索</button></div><div id="search-output"></div></div>
         <div id="proc-box"><div id="proc-output"></div></div>
-        <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-stat" id="deskStat" aria-live="off"></span><select id="deskW" class="dk-hide" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="0" selected>自动</option><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="30">30</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="0" selected>自动</option><option value="40">低</option><option value="60">中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
+        <div id="desk-box"><div id="desk-bar"><div class="dk-grp"><span class="dk-pill" id="deskPill" data-s="idle"><i class="dk-dot"></i><span id="deskPillTxt">未连接</span></span></div><div class="dk-grp dk-ctrls"><span class="dk-lbl">画质</span><div class="dk-seg" data-for="deskQ" role="group" aria-label="画质"></div><span class="dk-lbl">帧率</span><div class="dk-seg" data-for="deskFps" role="group" aria-label="帧率"></div><span class="dk-stat" id="deskStat" aria-live="off"></span><select id="deskW" class="dk-hide" aria-label="画面宽度"><option value="800">800</option><option value="1024">1024</option><option value="1280" selected>1280</option><option value="1600">1600</option><option value="1920">1920</option></select><select id="deskDisp" aria-label="显示器"><option value="0">显示器 1（主）</option></select></div><div class="dk-grp dk-acts"><button class="dk-btn" id="deskGo" title="刷新 / 重新连接"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>刷新</button><button class="dk-btn" id="deskFit" aria-pressed="false" title="切换适应窗口 / 原始大小"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5.5 8h5"/></svg><span id="deskFitTxt">适应窗口</span></button><button class="dk-btn" id="deskFull" title="全屏"><svg viewBox="0 0 16 16"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>全屏</button><span class="dk-sep"></span><label class="dk-sw" title="关闭后只看画面，不向对端发送鼠标键盘"><input type="checkbox" id="deskCtl" checked><span>允许操控</span></label></div><div class="dk-grp dk-keys" id="deskKeys" role="group" aria-label="发送快捷键"><span class="dk-lbl">快捷键</span><button class="dk-btn" id="deskK-ctrl-c" title="发送 Ctrl+C（macOS 对端为 Cmd+C）">Ctrl+C</button><button class="dk-btn" id="deskK-ctrl-v" title="发送 Ctrl+V（macOS 对端为 Cmd+V）">Ctrl+V</button><button class="dk-btn" id="deskK-alt-tab" title="发送 Alt+Tab（macOS 对端为 Cmd+Tab）">Alt+Tab</button><button class="dk-btn" id="deskK-win" title="发送 Win 键（macOS 对端为 Cmd）">Win</button><button class="dk-btn" id="deskK-esc" title="发送 Esc">Esc</button></div><select id="deskFps" class="dk-hide" aria-label="帧率"><option value="0" selected>自动</option><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="30">30</option></select><select id="deskQ" class="dk-hide" aria-label="画质"><option value="0" selected>自动</option><option value="40">低</option><option value="60">中</option><option value="80">高</option></select></div><div id="desk-view" data-s="idle"><canvas id="deskCv" width="640" height="360"></canvas><textarea id="deskKb" aria-label="remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><div class="dk-chip" id="deskHint"><span class="h-off"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2l8 6-3.5.8L7 12.5z"/></svg>点击画面开始操控</span><span class="h-on"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 9.5h7"/></svg>键盘已捕获</span><span class="h-ro"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></svg>只看不控</span></div><div id="deskToast"></div><div class="dk-ov" id="deskOv"><div class="dk-ic"><svg class="ic-n" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg><svg class="ic-e" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.4H1.4z"/><path d="M8 6.5v3M8 11.3v.2"/></svg><svg class="sp" viewBox="0 0 16 16"><path d="M8 1.8a6.2 6.2 0 1 1-6.2 6.2"/></svg></div><div id="deskMsg"></div><button id="deskRetry"><svg viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.7-4"/><path d="M13 2v3h-3"/></svg>重试</button></div></div></div>
         <div id="file-box"><div id="file-hdr"><span class="path" id="fpath"></span><span class="info" id="finfo"></span><button class="sm image-tool" id="fZoomOut" title="缩小" aria-label="缩小">−</button><button class="sm image-tool" id="fZoomFit" title="适合窗口">适配</button><button class="sm image-tool" id="fZoomIn" title="放大" aria-label="放大">+</button><button class="sm image-tool" id="fDownload" title="另存为" aria-label="另存为">⇩</button><button class="sm" id="fEdit" style="display:none">编辑</button><button class="sm" id="fSave" style="display:none">保存</button><button class="sm" id="fCancel" style="display:none">取消</button></div><div id="file-content"></div><div id="file-editor"><textarea id="fEditor"></textarea></div></div>
       </div>
     </div>
@@ -1390,6 +1391,7 @@ function deskState(st,msg){
   const p=$('#deskPill');p.dataset.s=st;p.title=msg||'';
   $('#deskPillTxt').textContent=DESK_PILL[st]||st;
   if(st!=='live')$('#deskStat').textContent='';
+  deskKeysSync();
   deskMsg(st==='live'?'':msg,st==='error');
 }
 // 有画面时的非致命错误（如输入下发失败）：用顶部短暂提示，不遮挡画面
@@ -1564,6 +1566,38 @@ function deskPush(ev){
   if(ev.type==='move'&&q.length&&q[q.length-1].type==='move')q[q.length-1]=ev;else q.push(ev);
   deskFlush();
 }
+// 快捷键按钮：浏览器抓不到的组合键（Ctrl+W、Alt+Tab、Win 等）直接下发，不经键盘捕获。
+// 整套 按下…抬起 放在同一次 input 调用里发出，修饰键不会因中途失败/断线而卡住。
+// 键名取 Windows/Linux/macOS 三端都认的 Control/Alt/Meta/Tab/Escape；macOS 对端把 Control/Alt 换成 Meta（Cmd）。
+function peerHostIsDarwin(h){
+  const f=String(h||'').trim().split(/\s+/);if(f.length<2)return false;
+  const sys=f.slice(0,-1),d=x=>String(x||'').toLowerCase()==='darwin';
+  return d(sys[sys.length-1])||(sys.length>=2&&d(sys[sys.length-2]));
+}
+const DESK_COMBOS={'ctrl-c':['Control','c'],'ctrl-v':['Control','v'],'alt-tab':['Alt','Tab'],'win':['Meta'],'esc':['Escape']};
+function deskComboEvents(id,darwin){
+  const keys=(DESK_COMBOS[id]||[]).slice();
+  if(darwin&&keys.length>1&&(keys[0]==='Control'||keys[0]==='Alt'))keys[0]='Meta';
+  const ev=[];
+  keys.forEach(k=>ev.push({type:'key_down',key:k}));
+  keys.slice().reverse().forEach(k=>ev.push({type:'key_up',key:k}));
+  return ev;
+}
+async function deskCombo(id){
+  if(!connected||!$('#deskCtl').checked){deskToast('未连接或已关闭“允许操控”，无法发送快捷键');return false}
+  const evs=deskComboEvents(id,peerHostIsDarwin(peerHost));
+  if(!evs.length)return false;
+  desk.lastInput=performance.now();
+  try{
+    const r=await api('/api/call',{tool:'input',args:{display:+$('#deskDisp').value||0,events:evs}});
+    if(!r.ok){deskToast('快捷键发送失败：'+deskErrText(r.error));return false}
+    return true;
+  }catch(e){deskToast('快捷键发送失败：'+e);return false}
+}
+function deskKeysSync(){
+  const on=connected&&$('#deskCtl').checked;
+  Object.keys(DESK_COMBOS).forEach(id=>{$('#deskK-'+id).disabled=!on});
+}
 async function deskFlush(){
   if(desk.sending)return;desk.sending=true;
   try{
@@ -1630,8 +1664,9 @@ async function deskFlush(){
   full.onclick=()=>{if(document.fullscreenElement)document.exitFullscreen();else view.requestFullscreen().catch(e=>deskToast('无法进入全屏: '+e))};
   document.addEventListener('fullscreenchange',()=>{full.lastChild.textContent=document.fullscreenElement===view?'退出全屏':'全屏'});
   const ctl=$('#deskCtl');
-  const syncCtl=()=>view.classList.toggle('ro',!ctl.checked);
+  const syncCtl=()=>{view.classList.toggle('ro',!ctl.checked);deskKeysSync()};
   ctl.addEventListener('change',syncCtl);syncCtl();
+  Object.keys(DESK_COMBOS).forEach(id=>{$('#deskK-'+id).onclick=()=>{deskCombo(id).then(()=>{const k=$('#deskKb');if(k&&k.focus)k.focus()})}});
 })();
 
 // ========== 工具函数 ==========

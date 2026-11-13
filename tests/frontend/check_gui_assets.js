@@ -20,12 +20,12 @@ if (!htmlMatch) {
   process.exit(1);
 }
 const html = htmlMatch[1];
-const jsMatch = html.match(/<script>([\s\S]*?)<\/script>/);
+const jsBlocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]; const jsMatch = jsBlocks.length ? jsBlocks : null; // 主题脚本块 + 业务脚本块，按页面顺序合并执行
 if (!jsMatch) {
   console.error('FAIL: IndexHTML 里没有 <script> 块');
   process.exit(1);
 }
-const js = jsMatch[1];
+const js = jsMatch.map((m) => m[1]).join('\n');
 
 let failed = 0;
 const check = (name, ok, detail) => {
@@ -53,7 +53,7 @@ function mkEl(id) {
   const cls = new Set();
   return {
     id, style: {}, dataset: {}, children: [], _text: '', _html: '', _h: {},
-    classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c) },
+    classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c), toggle: (c, on) => { if (on === undefined ? !cls.has(c) : on) cls.add(c); else cls.delete(c); } },
     set textContent(v) { this._text = String(v); },
     get textContent() { return this._text; },
     // 真实 DOM 里 innerHTML='' 会连子节点一起清掉，stub 也照做，否则 renderTabs 重绘后
@@ -65,7 +65,7 @@ function mkEl(id) {
     // 记下 listener 以便测试里手动触发（拖拽这类交互只能这么测）
     addEventListener(type, fn) { (this._h[type] || (this._h[type] = [])).push(fn); },
     _fire(type, ev) { (this._h[type] || []).forEach((f) => f(ev)); },
-    setPointerCapture() {}, releasePointerCapture() {},
+    setPointerCapture() {}, releasePointerCapture() {}, setAttribute() {}, removeAttribute() {}, getAttribute() { return null; }, querySelectorAll() { return []; },
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 260, height: 600 }),
     scrollTop: 0, scrollHeight: 0, value: '', disabled: false,
   };
@@ -82,20 +82,20 @@ const document = {
     }
     return els.get(ident) || null;
   },
-  createElement: () => mkEl('created'),
+  querySelectorAll: () => [], createElement: () => mkEl('created'),
   createTextNode: (value) => { const el = mkEl('text'); el.textContent = value; return el; },
   addEventListener() {},
-  body: mkEl('body'),
+  documentElement: mkEl('html'), body: mkEl('body'),
 };
 const ctx = {
   document, console,
   EventSource: function () { return { addEventListener() {}, onmessage: null, onerror: null }; },
   fetch: async () => ({ json: async () => ({ ok: true, result: {} }) }),
-  setTimeout, clearTimeout, AbortController, TextEncoder, TextDecoder, btoa, atob, URLSearchParams,
+  setTimeout, clearTimeout, performance, AbortController, TextEncoder, TextDecoder, btoa, atob, URLSearchParams,
   location: { search: '?token=test-token-123', href: 'http://127.0.0.1:8731/?token=test-token-123' },
   URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
   Blob: function () {},
-  window: { innerWidth: 1280, innerHeight: 800 },
+  window: { innerWidth: 1280, innerHeight: 800, addEventListener() {} },
 };
 ctx.globalThis = ctx;
 vm.createContext(ctx);
@@ -311,10 +311,66 @@ for (const sel of ['#term-output', '#file-content', '#search-output', '#proc-out
   check('终端页关不掉', !!still);
 }
 
+// ---------- 15. 快捷键按钮 ----------
+// 桌面页：每个组合键必须在「一次 input 调用」里发完整的 按下…抬起，修饰键才不会卡住；
+// 允许操控关闭时不得发送；发送失败要有可见提示。终端页：紧急输入失败（pty_write_blocked）不得被吞掉。
+const keysChecks = (async () => {
+  const ev = (id, darwin) => JSON.stringify(ctx.deskComboEvents(id, darwin));
+  const seq = (...a) => JSON.stringify(a.map(([t, k]) => ({ type: t, key: k })));
+  check('Ctrl+C 序列', ev('ctrl-c', false) === seq(['key_down', 'Control'], ['key_down', 'c'], ['key_up', 'c'], ['key_up', 'Control']), ev('ctrl-c', false));
+  check('Alt+Tab 序列', ev('alt-tab', false) === seq(['key_down', 'Alt'], ['key_down', 'Tab'], ['key_up', 'Tab'], ['key_up', 'Alt']), ev('alt-tab', false));
+  check('Win 键序列', ev('win', false) === seq(['key_down', 'Meta'], ['key_up', 'Meta']), ev('win', false));
+  check('Esc 序列', ev('esc', false) === seq(['key_down', 'Escape'], ['key_up', 'Escape']), ev('esc', false));
+  check('macOS 对端 Ctrl+V 换成 Cmd(Meta)+V', ev('ctrl-v', true) === seq(['key_down', 'Meta'], ['key_down', 'v'], ['key_up', 'v'], ['key_up', 'Meta']), ev('ctrl-v', true));
+  check('macOS 对端 Esc 不变', ev('esc', true) === ev('esc', false));
+  check('识别 darwin 对端', ctx.peerHostIsDarwin('alice@mac darwin arm64') === true && ctx.peerHostIsDarwin('darwin-box linux amd64') === false);
+
+  const realApi = ctx.api;
+  const apiCalls = [];
+  let apiReply = { ok: true, result: {} };
+  ctx.api = async (path, body) => { apiCalls.push({ path, body }); return apiReply; };
+  vm.runInContext('connected=true', ctx);
+  const ctl = els.get('deskCtl'), toast = els.get('deskToast');
+  ctl.checked = true; toast.textContent = '';
+  const ok = await ctx.deskCombo('ctrl-c');
+  check('Ctrl+C 只发一次 input 调用且含 4 个事件', ok === true && apiCalls.length === 1 && apiCalls[0].body.tool === 'input' && apiCalls[0].body.args.events.length === 4, JSON.stringify(apiCalls));
+  apiCalls.length = 0; ctl.checked = false;
+  const off = await ctx.deskCombo('ctrl-c');
+  check('关闭「允许操控」时不发送并提示', off === false && apiCalls.length === 0 && /允许操控/.test(toast.textContent), toast.textContent);
+  ctx.deskKeysSync();
+  check('关闭「允许操控」时按钮禁用', els.get('deskK-ctrl-c').disabled === true && els.get('deskK-win').disabled === true);
+  ctl.checked = true; ctx.deskKeysSync();
+  check('开启「允许操控」时按钮可用', els.get('deskK-ctrl-c').disabled === false);
+  apiReply = { ok: false, error: 'desktop_disabled' }; toast.textContent = '';
+  const bad = await ctx.deskCombo('alt-tab');
+  check('发送失败时 deskToast 可见提示', bad === false && /快捷键发送失败/.test(toast.textContent), toast.textContent);
+  ctx.api = realApi;
+
+  // 终端页：单独加载 pty_term.js
+  const ptyEls = new Map(['ptyKeyMsg'].map((id) => [id, mkEl(id)]));
+  let reply = { ok: false, error: 'pty_write_blocked: 终端输入被阻塞' };
+  const pctx = {
+    document: { querySelector: (sel) => ptyEls.get(sel.slice(1)) || null, createElement: () => mkEl('c'), head: mkEl('head'), body: mkEl('body') },
+    window: { addEventListener() {} },
+    location: { search: '?token=t' }, URLSearchParams, TextEncoder, TextDecoder, btoa, atob, setTimeout, clearTimeout,
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    fetch: async () => ({ ok: reply.ok, status: reply.ok ? 200 : 502, json: async () => reply }),
+  };
+  vm.createContext(pctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', '..', 'internal', 'gui', 'assets', 'pty', 'pty_term.js'), 'utf8'), pctx, { filename: 'pty_term.js' });
+  const PT = pctx.window.PtyTerm;
+  const res = await PT._sendUrgent(new Uint8Array([3]));
+  const msg = ptyEls.get('ptyKeyMsg').textContent;
+  check('Ctrl+C 被阻塞时终端页给出可见提示', res === false && /阻塞/.test(msg), msg);
+  reply = { ok: true }; ptyEls.get('ptyKeyMsg').textContent = '';
+  check('Ctrl+C 成功时不提示', (await PT._sendUrgent(new Uint8Array([3]))) === true && ptyEls.get('ptyKeyMsg').textContent === '');
+})();
+
 // ---------- 14. 兼容旧版复选框 ----------
 // 复选框要真的把 min_proto 送到后端，失败时要把写给 AI 的 min_proto 指引翻译成
 // GUI 上能操作的话，降级成功要把警告亮出来——三处任何一处断了，用户都无从得知。
 (async () => {
+  await keysChecks;
   const calls = [];
   let connectReply = { ok: true, result: {} };
   ctx.fetch = async (p, opts) => {

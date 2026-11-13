@@ -166,11 +166,63 @@
     if (state !== 'live' && state !== 'opening') return;
     // Ctrl+C / Ctrl+Z / Ctrl+\ 不并入 6ms 批次、不排在进行中的大块写入后面：立即单独发送（后端同样走优先通道）。
     if (sessionId && isUrgentInput(bytes)) {
-      post('/api/pty/write', { id: sessionId, data: bytesToB64(bytes) }).catch(function () {});
+      sendUrgent(bytes);
       return;
     }
     sendQ.push(bytes);
     if (!flushing && !flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
+  }
+  // 立即单独发送一小段输入，失败（含 pty_write_blocked：输入管道被卡住且对端无法旁路中断）时在工具栏提示，不再静默吞掉。
+  function sendUrgent(bytes) {
+    var id = sessionId;
+    return post('/api/pty/write', { id: id, data: bytesToB64(bytes) }).then(function (r) {
+      return r.json().catch(function () { return { ok: r.ok, error: 'HTTP ' + r.status }; });
+    }).then(function (d) {
+      if (d && d.ok === false) { keyMsg(writeErrText(d.error)); return false; }
+      return true;
+    }, function (e) {
+      keyMsg('发送失败：' + String((e && e.message) || e));
+      return false;
+    });
+  }
+  function writeErrText(err) {
+    err = String(err || '');
+    if (/pty_write_blocked/.test(err)) return '终端输入被阻塞，Ctrl+C 未能送达（被控端未读取输入，且无法旁路中断）';
+    if (/pty_not_found/.test(err)) return '终端会话已结束';
+    return '发送失败：' + (err || '未知错误');
+  }
+  var keyMsgTimer = 0;
+  function keyMsg(s) {
+    var el = $('#ptyKeyMsg');
+    if (!el) return;
+    el.textContent = s || '';
+    clearTimeout(keyMsgTimer);
+    if (s) keyMsgTimer = setTimeout(function () { el.textContent = ''; }, 5000);
+  }
+  // 快捷键按钮只在会话 live 时可用
+  function syncKeys() {
+    var bar = $('#pty-keys');
+    if (!bar) return;
+    var bs = bar.querySelectorAll('button');
+    for (var i = 0; i < bs.length; i++) bs[i].disabled = state !== 'live';
+  }
+  function bindKeys() {
+    var bar = $('#pty-keys');
+    if (!bar) return;
+    var bs = bar.querySelectorAll('button[data-b]');
+    for (var i = 0; i < bs.length; i++) (function (b) {
+      // mousedown 阻止默认：点按钮不抢走 xterm 的焦点
+      b.addEventListener('mousedown', function (e) { e.preventDefault(); });
+      b.addEventListener('click', function () {
+        if (state !== 'live' || !sessionId) { keyMsg('终端未就绪'); return; }
+        var bytes = new Uint8Array([parseInt(b.getAttribute('data-b'), 10)]);
+        // Ctrl+C/Ctrl+Z 走与键盘一致的紧急通道；其余并入普通输入队列保序
+        if (isUrgentInput(bytes)) sendUrgent(bytes);
+        else onInput(bytes);
+        if (term) term.focus();
+      });
+    })(bs[i]);
+    syncKeys();
   }
   function isUrgentInput(bytes) {
     if (!bytes.length || bytes.length > 64) return false;
@@ -217,7 +269,7 @@
   }
   function useExecMode(reason) {
     mode = 'exec';
-    state = 'idle';
+    state = 'idle'; syncKeys();
     var b = termBox();
     if (b) b.classList.remove('pty-on');
     var note = $('#termNote');
@@ -241,7 +293,7 @@
     if (mode === 'exec' || state === 'opening' || state === 'live') return;
     if (!isConnected) return;
     var myGen = ++gen;
-    state = 'opening'; gotOutput = false; sessionId = ''; lastSize = '';
+    state = 'opening'; syncKeys(); gotOutput = false; sessionId = ''; lastSize = '';
     sendQ = [];
     try { await ensureTerm(); } catch (e) { useExecMode('终端组件加载失败，已回退到命令行模式: ' + e.message); return; }
     if (myGen !== gen) return;
@@ -271,7 +323,7 @@
           var m; try { m = JSON.parse(line); } catch (e) { continue; }
           if (myGen !== gen) return;
           if (m.type === 'session') {
-            sessionId = m.id; state = 'live'; mode = 'pty';
+            sessionId = m.id; state = 'live'; mode = 'pty'; syncKeys();
             sessionWaiters.splice(0).forEach(function (f) { f(true); });
             if (sendQ.length && !flushing && !flushTimer) flushTimer = setTimeout(flush, FLUSH_MS);
           } else if (m.type === 'chunk') {
@@ -296,7 +348,7 @@
       useExecMode(fallbackReason(errText));
       return;
     }
-    state = 'ended';
+    state = 'ended'; syncKeys();
     if (errText && isConnDropError(errText)) {
       // 连接级中断（被控端/中继/本地子进程）：主动断开、取消、改连时 gen 已变，走不到这里；
       // 到这里就是意外断开。稍等一下让 SSE 带来的分类原因先到，文案与状态栏一致。
@@ -322,7 +374,7 @@
     if (id) post('/api/pty/close', { id: id }).catch(function () {});
     sessionId = ''; sendQ = [];
     sessionWaiters.splice(0).forEach(function (f) { f(false); });
-    state = 'idle';
+    state = 'idle'; syncKeys();
     if (why && term) notice(why, '2');
   }
 
@@ -347,6 +399,8 @@
       return mode !== 'exec';
     },
     _isConnDropError: isConnDropError,
+    _writeErrText: writeErrText,
+    _sendUrgent: sendUrgent, // 供测试：紧急输入失败必须可见
     _fallbackReason: fallbackReason, // 供测试核对各回退原因文案
     _state: function () { return { mode: mode, state: state, id: sessionId, cols: term ? term.cols : 0, rows: term ? term.rows : 0 }; }
   };
@@ -364,6 +418,7 @@
     });
   }
   try { hookEvents(); } catch (e) { /* 主页面变量不可见时忽略 */ }
+  bindKeys();
 
   // 页面关闭：流中断即触发服务端取消并清理远端进程树，这里再尽力发一次 close
   window.addEventListener('pagehide', function () {
