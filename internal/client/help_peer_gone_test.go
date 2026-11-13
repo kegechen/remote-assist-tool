@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,5 +193,24 @@ func TestPeerGoneErrorClassification(t *testing.T) {
 		if got := peerGoneError(msg) != nil; got != c.gone {
 			t.Errorf("code=%q gone=%v，期望 %v", c.code, got, c.gone)
 		}
+	}
+}
+
+// 会话被拆除后，后续调用的 not_connected 要携带断开原因（last_drop），GUI 才能区分
+// 对端断开 / 对端重启 / 隧道断开；重新 connect 成功后原因清空。
+func TestNotConnectedCarriesLastDrop(t *testing.T) {
+	r := newFakeRelay(t)
+	b := connectToFakeRelay(t, r)
+	conn := r.handshakenConn(t)
+	r.pushError(t, conn, proto.ErrCodePeerDisconnected, "被协助端已断开连接")
+	if !waitSessionTornDown(t, b, 5*time.Second) {
+		t.Fatal("会话未拆除")
+	}
+	_, err := b.CallTool(context.Background(), "stat", json.RawMessage(`{"path":"."}`))
+	if err == nil || !strings.Contains(err.Error(), "not_connected") || !strings.Contains(err.Error(), "last_drop: peer_gone") {
+		t.Fatalf("期望 not_connected 携带 last_drop: peer_gone，得到 %v", err)
+	}
+	if fresh := NewHelpMCPBootstrap(&Config{}); fresh.notConnectedErr().Error() != "not_connected: call 'connect' with the assist code first" {
+		t.Errorf("从未连接过不应带原因: %v", fresh.notConnectedErr())
 	}
 }

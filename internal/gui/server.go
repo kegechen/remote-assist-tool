@@ -49,6 +49,10 @@ type Server struct {
 	lastServer   string
 	lastNoAuth   bool
 	connectCancel context.CancelFunc // 正在建立中的 /api/connect，被新连接/取消顶替时调用
+	dropClient      *MCPClient // 与 dropWhy 配对：哪条 client 是因何被 watchPeer 主动关闭的
+	dropWhy         dropInfo
+	reconnectFail   dropInfo // 最近一次重连失败的可归类原因
+	reconnectFailOK bool
 	lastMinProto string // 经降级/用户确认以 v1 连上时为 "1"；自动重连必须沿用，否则断线重连会退回默认值被拒
 	protoVersion string
 	peerVersion  string
@@ -784,6 +788,11 @@ func (s *Server) guardLoop() {
 			continue
 		}
 		wasConnected := s.connected
+		why := dropByCode(dropLocalExit) // 没人标注原因就是子进程自己退出
+		if s.dropClient == client {
+			why = s.dropWhy
+		}
+		s.dropClient, s.dropWhy = nil, dropInfo{}
 		code, server, noAuth, minProto := s.lastCode, s.lastServer, s.lastNoAuth, s.lastMinProto
 		gen := s.connGen
 		s.connected = false
@@ -799,7 +808,7 @@ func (s *Server) guardLoop() {
 		}
 
 		// 自动重连，轻量退避，最多 6 次（约 1+2+3+4+5+5 = 20s）
-		s.broadcast("event: reconnecting\n")
+		s.broadcast(sseEventWithInfo("reconnecting", why, nil))
 		outcome := reconnectFailed
 		backoff := []time.Duration{1, 2, 3, 4, 5, 5}
 		for attempt, d := range backoff {
@@ -808,12 +817,16 @@ func (s *Server) guardLoop() {
 			if outcome != reconnectFailed {
 				break
 			}
-			s.broadcast(fmt.Sprintf("event: reconnect-fail\nretry %d/%d\n", attempt+1, len(backoff)))
+			// 重连时的拨号/握手错误比最初的断线原因更接近“现在为什么连不上”
+			if info, ok := s.takeReconnectFailure(); ok {
+				why = info
+			}
+			s.broadcast(sseEventWithInfo("reconnect-fail", why, map[string]any{"retry": attempt + 1, "max": len(backoff)}))
 		}
 		// reconnectSuperseded：用户在退避/连接期间自己接管了连接（主动断开或改连别的
 		// share）。别再广播 lost 盖掉用户当前看到的状态；仅在重连确实彻底失败时才报 lost。
 		if outcome == reconnectFailed {
-			s.broadcast("event: lost\n")
+			s.broadcast(sseEventWithInfo("lost", why, nil))
 		}
 	}
 }
@@ -826,6 +839,30 @@ const (
 	reconnectOK                                 // 已重连并安装为当前 client
 	reconnectSuperseded                         // 用户已接管连接意图，放弃这次过期重连
 )
+
+// setDropReason 登记 client 被主动关闭的原因，供 guardLoop 在它退出后广播。
+func (s *Server) setDropReason(c *MCPClient, why dropInfo) {
+	s.mu.Lock()
+	s.dropClient, s.dropWhy = c, why
+	s.mu.Unlock()
+}
+
+// noteReconnectFailure 记录最近一次重连失败的可归类原因；无法归类则保持为空。
+func (s *Server) noteReconnectFailure(err error) {
+	info, ok := classifyReconnectError(err)
+	s.mu.Lock()
+	s.reconnectFail, s.reconnectFailOK = info, ok
+	s.mu.Unlock()
+}
+
+// takeReconnectFailure 取走并清空 noteReconnectFailure 记录的原因。
+func (s *Server) takeReconnectFailure() (dropInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.reconnectFail, s.reconnectFailOK
+	s.reconnectFail, s.reconnectFailOK = dropInfo{}, false
+	return info, ok
+}
 
 // tryReconnect 用缓存参数重建子进程并完成 connect。gen 是守护线程发起重连时捕获的连接
 // 代次：建好连接后若 s.connGen 已变，说明用户在此期间主动断开或改连了别的 share，这条
@@ -861,6 +898,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool, minP
 	res, err := client.CallTool(ctx, "connect", connectToolArgs(code, server, noAuth, minProto))
 	if err != nil {
 		client.Close()
+		s.noteReconnectFailure(err)
 		return reconnectFailed
 	}
 	s.mu.Lock()
