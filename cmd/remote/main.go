@@ -129,6 +129,7 @@ func runShare(args []string) {
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
 	rootDir := fs.String("root", "", "Optional: limit file tools to this subtree (empty = no limit). Guards against slips, NOT a security boundary — exec is not confined by it.")
 	allowExec := fs.String("allow-exec", "", "Comma-separated exec basename allowlist (empty = no restriction beyond deny)")
+	allowPTY := fs.Bool("allow-pty", false, "With --allow-exec set, real terminal (PTY) is disabled by default because a shell inside it bypasses the allowlist. Add --allow-pty to open it anyway (you accept that the allowlist no longer constrains the helper).")
 	denyExec := fs.String("deny-exec", "rm,shutdown,reboot,mkfs,dd", "Comma-separated exec basename denylist")
 	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup via ShellExecuteW runas")
 	unsafeExec := fs.Bool("unsafe-exec", false, "DANGER: drop the exec deny/allow lists, letting any command run")
@@ -361,6 +362,7 @@ func runShare(args []string) {
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
 	share.SetEnableDesktop(*enableDesktop)
+	share.SetAllowPTY(*allowPTY)
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)

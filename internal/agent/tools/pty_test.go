@@ -251,6 +251,25 @@ func TestPTYDisabledByAllowExec(t *testing.T) {
 	}
 }
 
+func TestPTYDisabledPolicy(t *testing.T) {
+	cases := []struct {
+		n     int
+		allow bool
+		want  bool
+	}{{0, false, false}, {0, true, false}, {2, false, true}, {2, true, false}}
+	for _, c := range cases {
+		if got := PTYDisabled(c.n, c.allow); got != c.want {
+			t.Errorf("PTYDisabled(%d,%v)=%v 期望 %v", c.n, c.allow, got, c.want)
+		}
+	}
+}
+
+func TestPTYDisabledMessageMentionsAllowPTY(t *testing.T) {
+	if !strings.Contains(errPTYDisabled.Error(), "--allow-pty") || !strings.Contains(errPTYDisabled.Error(), "exec_denied") {
+		t.Errorf("禁用提示应包含 exec_denied 与 --allow-pty: %v", errPTYDisabled)
+	}
+}
+
 func TestPTYMaxSessions(t *testing.T) {
 	m, open, _, _, _, _ := newFakeTools(t, false)
 	for i := 0; i < ptyMaxSessions; i++ {

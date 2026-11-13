@@ -40,7 +40,7 @@ var ptyIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // 错误码前缀会被 agent.classifyError 或调用方按字符串识别。
 var (
-	errPTYDisabled = errors.New("exec_denied: pty 在设置了 --allow-exec 白名单时被禁用")
+	errPTYDisabled = errors.New("exec_denied: 被控端设置了 --allow-exec 命令白名单，已禁用真终端（如需开放请在被控端加 --allow-pty）")
 	errPTYNotFound = errors.New("pty_not_found: 终端会话不存在或已结束")
 )
 
@@ -106,6 +106,12 @@ type ptySpec struct {
 	Env   map[string]string
 	Cols  uint16
 	Rows  uint16
+}
+
+// PTYDisabled 判定真终端是否应被禁用：设了 --allow-exec 白名单时默认禁用（PTY 内的 shell 可绕过白名单），
+// 除非被控端显式加了 --allow-pty。
+func PTYDisabled(allowExecCount int, allowPTY bool) bool {
+	return allowExecCount > 0 && !allowPTY
 }
 
 // NewPTYManager disabled=true 时所有 pty 工具返回 exec_denied（被控端设了 --allow-exec 白名单）。

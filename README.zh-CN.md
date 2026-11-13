@@ -314,6 +314,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--code-file` | - | 注册后把协助码+有效期以 JSON 原子写到该文件（供宿主程序读取） |
 | `--root` | - | 可选：把文件工具限制在该子树（未设 = 不限制）。防手滑，非安全边界 |
 | `--allow-exec` | - | exec 命令白名单（逗号分隔，空=仅受黑名单约束） |
+| `--allow-pty` | false | 设了 `--allow-exec` 时真终端（PTY）默认禁用（shell 可绕过白名单），加此开关才开放 |
 | `--deny-exec` | `rm,shutdown,reboot,mkfs,dd` | exec 命令黑名单 |
 | `--elevate` | `false` | Windows：启动时经 UAC 请求管理员权限 |
 | `--unsafe-exec` | `false` | **危险**：关闭 exec 黑/白名单，任意命令可跑（启动有 5 秒红色确认倒计时）。不影响 `--root` |
