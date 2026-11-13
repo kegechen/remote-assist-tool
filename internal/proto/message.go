@@ -86,6 +86,11 @@ type JoinRequest struct {
 	Version              string `json:"version,omitempty"`
 	Host                 string `json:"host,omitempty"` // 同 RegisterRequest.Host
 	SupportsUpdateNotice bool   `json:"supports_update_notice,omitempty"`
+	// SupportsCanonicalCode 表示本协助端理解 JoinResponse.Code（relay 实际匹配上的
+	// 规范码）并会按它派生会话密钥。relay 仅对声明了本字段的 join 按大写不敏感匹配
+	// 并回规范码；未声明（旧 help 用自己输入的码派生密钥，relay 不能代做）保持精确
+	// 比对。旧 relay 忽略本字段。
+	SupportsCanonicalCode bool `json:"supports_canonical_code,omitempty"`
 }
 
 // JoinResponse 加入响应
@@ -97,6 +102,10 @@ type JoinResponse struct {
 	PeerHost    string `json:"peer_host,omitempty"` // share 端身份串（同 RegisterRequest.Host；旧 relay 不发）
 	UpdateInfo
 	STUNServers []string `json:"stun_servers,omitempty"` // 同 RegisterResponse.STUNServers
+	// Code 是 relay 实际匹配上的规范协助码，仅发给声明了 supports_canonical_code
+	// 的 join：help 端手打小写时需按它派生会话密钥（share 端总是用 relay 下发的
+	// 原码）。旧 relay 不发本字段，help 端保持用输入的码。
+	Code string `json:"code,omitempty"`
 }
 
 // TunnelData 隧道数据

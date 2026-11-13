@@ -314,8 +314,11 @@ func (b *HelpMCPBootstrap) lastTarget() connectTarget {
 }
 
 // sameEndpoint 报告两次 connect 是否指向同一个对端会话（忽略协议下限）。
+// 码按大小写不敏感比较：小写 connect 成功后（help 端已采纳规范码）换成 share
+// 屏幕上的原样大写码重连，是同一意图，不应拆掉健康会话重新握手。存量码集里不
+// 存在仅大小写不同的两个码，不会把不同码误判成同一意图。
 func (t connectTarget) sameEndpoint(o connectTarget) bool {
-	return t.Code == o.Code && t.Server == o.Server && t.NoAuth == o.NoAuth
+	return strings.EqualFold(t.Code, o.Code) && t.Server == o.Server && t.NoAuth == o.NoAuth
 }
 
 func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {

@@ -679,7 +679,7 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		client.Version = sanitizePeerString(req.Version)
 		client.Host = sanitizePeerString(req.Host)
 		client.supportsUpdateNotice = req.SupportsUpdateNotice
-		return s.handleJoin(client, req.Code)
+		return s.handleJoin(client, req)
 	case proto.MsgTunnelData, proto.MsgHeartbeat, proto.MsgPeerAddrAdvertise, proto.MsgP2PConnected,
 		proto.MsgToolHello, proto.MsgToolHelloAck, proto.MsgToolReq, proto.MsgToolResp,
 		proto.MsgToolStream, proto.MsgToolCancel:
@@ -886,13 +886,19 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 // handleJoin 处理加入请求。执行顺序：per-IP 限流 -> 全局限流 -> JoinSession -> 失效旧
 // UDP entry -> 激活数据面 -> 下发响应。任何失败都走统一出口 rejectJoin，对外不泄露内部原因。
 // 返回 closeConn=true 时读循环应关闭连接（第 MaxJoinFailures 次失败或畸形）。
-func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
-	code = normalizeCode(code)
-	// 本 relay 发的码只含大写字母和数字（见 charset），按大写比对，手打成小写也能加入。
-	// 不能放到客户端做：协助端不知道对端 relay 新旧，旧版 relay 发的是大小写混合码。
-	// NoAuth 的固定码是小写的 proto.NoAuthCode，保持原样。
-	if !s.config.NoAuth {
+func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeConn bool) {
+	code := normalizeCode(req.Code)
+	// 本 relay 发的码只含大写字母和数字（见 charset）。仅对声明了
+	// supports_canonical_code 的 help（新版）按大写不敏感匹配并回规范码——它需要
+	// relay 实际匹配上的码来派生会话密钥。绝不能无条件放行：未声明的 help（0.0.x
+	// 至 v1.2.3 所有现存版本）用自己输入的码派生密钥，小写 join 一旦放行，两端密钥
+	// 不一致，所有工具报认证失败且会话被占住；join 失败反而是可理解、可重试的。
+	// 未声明的保持精确比对，也兼容旧 relay 时代的大小写混合码。NoAuth 的固定码是
+	// 小写的 proto.NoAuthCode，保持原样。
+	var canonical string
+	if !s.config.NoAuth && req.SupportsCanonicalCode {
 		code = strings.ToUpper(code)
+		canonical = code
 	}
 	host := clientHost(client)
 
@@ -929,6 +935,7 @@ func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 	resp := &proto.JoinResponse{
 		Success:     true,
 		SessionID:   joinResult.SessionID,
+		Code:        canonical,
 		PeerVersion: joinResult.ShareVersion,
 		PeerHost:    s.legacyHelpUpdateHost(client, joinResult.ShareVersion, joinResult.ShareHost),
 		UpdateInfo:  s.updateInfo(),
@@ -966,6 +973,13 @@ func (s *Server) rejectJoin(client *ClientConn, code, reason string, _ bool) (cl
 	}
 
 	resp := &proto.JoinResponse{Success: false, Error: "join failed"}
+	// relay 只发全大写码（见 charset）：拒绝含小写的码时附带可操作提示，让手打小写
+	// 的旧 help（0.0.7 起会原样显示 resp.Error）知道改用大写重试。只按输入本身的
+	// 大小写判断，不泄露码是否存在；全大写的错码保持通用消息，不扩大提示面。
+	// NoAuth 例外：唯一的合法码是小写固定码，「请用大写」是不可能满足的指引。
+	if reason == "code_invalid" && !s.config.NoAuth && strings.ToUpper(code) != code {
+		resp.Error = "协助码只含大写字母和数字，请用大写重试"
+	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 

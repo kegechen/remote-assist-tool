@@ -50,7 +50,7 @@ func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
 // join 向 relay 发 JoinRequest 并等待 JoinResponse；返回 resp 或 error。
 // 不打印 stdout，让调用方决定输出。
 func (h *HelpMode) join() (*proto.JoinResponse, error) {
-	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary(), SupportsUpdateNotice: true}
+	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary(), SupportsUpdateNotice: true, SupportsCanonicalCode: true}
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return nil, err
 	}
@@ -72,8 +72,25 @@ func (h *HelpMode) join() (*proto.JoinResponse, error) {
 	if !resp.Success {
 		return nil, fmt.Errorf("join failed: %s", resp.Error)
 	}
+	h.adoptCanonicalCode(resp.Code)
 	h.client.setRelaySTUN(resp.STUNServers)
 	return &resp, nil
+}
+
+// adoptCanonicalCode 采纳 relay 返回的规范码：会话密钥由两端各自用码派生，help 端
+// 手打小写时必须改用 relay 实际匹配上的码（share 端总是用 relay 下发的原码），否则
+// 两端密钥不一致，所有工具报认证失败。仅当与输入码只差大小写时采纳（防恶意 relay
+// 偷换码）；未回该字段（旧 relay，可能发大小写混合码）时保持输入码原样。
+func (h *HelpMode) adoptCanonicalCode(returned string) {
+	if returned == "" || returned == h.code {
+		return
+	}
+	if !strings.EqualFold(returned, h.code) {
+		fmt.Fprintln(os.Stderr, "[警告] 服务端返回的规范码与输入码差异不止大小写，继续用输入码")
+		return
+	}
+	h.code = returned
+	fmt.Fprintln(os.Stderr, "（已按服务端返回的规范码建立会话：输入的码按大写匹配）")
 }
 
 // updateNotices 根据 relay 下发的最新版本，分别检查本机与被协助端是否需要升级。

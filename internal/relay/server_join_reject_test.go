@@ -59,7 +59,7 @@ func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
 	// 场景一：code 不存在 → ErrCodeInvalid
 	conn1 := &capturingConn{remoteAddr: "10.0.0.1:5000"}
 	client1 := &ClientConn{ID: "c1", Conn: conn1}
-	srv.handleJoin(client1, "NOTEXIST")
+	srv.handleJoin(client1, proto.JoinRequest{Code: "NOTEXIST"})
 	resp1 := parseLastJoinResponse(t, &conn1.buf)
 
 	// 场景二：code 已过期 → ErrCodeExpired
@@ -68,7 +68,7 @@ func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	conn2 := &capturingConn{remoteAddr: "10.0.0.2:5001"}
 	client2 := &ClientConn{ID: "c2", Conn: conn2}
-	srv.handleJoin(client2, "EXPIRED01")
+	srv.handleJoin(client2, proto.JoinRequest{Code: "EXPIRED01"})
 	resp2 := parseLastJoinResponse(t, &conn2.buf)
 
 	// 场景三：session 已有 Help → ErrSessionHasHelper
@@ -79,7 +79,7 @@ func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
 	srv.sessions.ActivateDataPlane(session2.ID, share3.ID, help3a.ID) // 激活后双端在线
 	conn3 := &capturingConn{remoteAddr: "10.0.0.3:5002"}
 	client3 := &ClientConn{ID: "c3", Conn: conn3}
-	srv.handleJoin(client3, "HASHELP01")
+	srv.handleJoin(client3, proto.JoinRequest{Code: "HASHELP01"})
 	resp3 := parseLastJoinResponse(t, &conn3.buf)
 
 	// 场景四：Share 已断开 → share==nil
@@ -88,7 +88,7 @@ func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
 	srv.sessions.DisconnectClient(share4.ID) // Share 断开
 	conn4 := &capturingConn{remoteAddr: "10.0.0.4:5001"}
 	client4 := &ClientConn{ID: "c4", Conn: conn4}
-	srv.handleJoin(client4, "DISCO0001")
+	srv.handleJoin(client4, proto.JoinRequest{Code: "DISCO0001"})
 	resp4 := parseLastJoinResponse(t, &conn4.buf)
 
 	// 断言：四种失败的公开响应序列化结果完全相同
@@ -113,7 +113,7 @@ func TestJoinFiveInternalFailuresCloseConnection(t *testing.T) {
 	client := &ClientConn{ID: "c-fail5", Conn: conn}
 
 	for i := 1; i <= 4; i++ {
-		closeConn := srv.handleJoin(client, "BADCODE0")
+		closeConn := srv.handleJoin(client, proto.JoinRequest{Code: "BADCODE0"})
 		if closeConn {
 			t.Fatalf("第 %d 次失败不应关闭连接", i)
 		}
@@ -121,7 +121,7 @@ func TestJoinFiveInternalFailuresCloseConnection(t *testing.T) {
 			t.Fatalf("第 %d 次失败后 joinFailures 应=%d，得到 %d", i, i, client.joinFailures)
 		}
 	}
-	closeConn := srv.handleJoin(client, "BADCODE0")
+	closeConn := srv.handleJoin(client, proto.JoinRequest{Code: "BADCODE0"})
 	if !closeConn {
 		t.Fatal("第 5 次失败应返回 closeConn=true")
 	}
@@ -141,12 +141,12 @@ func TestJoinFiveLimiterRejectionsCloseConnection(t *testing.T) {
 	client := &ClientConn{ID: "c-limiter5", Conn: conn}
 
 	for i := 1; i <= 4; i++ {
-		closeConn := srv.handleJoin(client, "ANYCODE0")
+		closeConn := srv.handleJoin(client, proto.JoinRequest{Code: "ANYCODE0"})
 		if closeConn {
 			t.Fatalf("限流拒绝第 %d 次不应关闭连接", i)
 		}
 	}
-	closeConn := srv.handleJoin(client, "ANYCODE0")
+	closeConn := srv.handleJoin(client, proto.JoinRequest{Code: "ANYCODE0"})
 	if !closeConn {
 		t.Fatal("限流拒绝第 5 次应返回 closeConn=true")
 	}
@@ -165,14 +165,14 @@ func TestJoinFourFailsThenValidSucceeds(t *testing.T) {
 	client := &ClientConn{ID: "c-4fail", Conn: conn}
 
 	for i := 1; i <= 4; i++ {
-		srv.handleJoin(client, "WRONG000")
+		srv.handleJoin(client, proto.JoinRequest{Code: "WRONG000"})
 	}
 	if client.joinFailures != 4 {
 		t.Fatalf("4 次失败后 joinFailures 应=4，得到 %d", client.joinFailures)
 	}
 
 	// 第 5 次用合法 code
-	closeConn := srv.handleJoin(client, "VALIDCODE")
+	closeConn := srv.handleJoin(client, proto.JoinRequest{Code: "VALIDCODE"})
 	if closeConn {
 		t.Fatal("第 5 次合法 Join 不应关闭连接")
 	}
