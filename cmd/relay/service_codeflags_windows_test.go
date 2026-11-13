@@ -32,7 +32,7 @@ func TestServiceConfigCodeFlags(t *testing.T) {
 // 默认服务配置：max-age 24h（非零）且密钥落在数据目录 state 下；"0" 才是显式关闭。
 func TestDefaultServiceConfigCodeMaxAgeAndStateDir(t *testing.T) {
 	paths := windowsServicePaths{dataDir: `C:\ProgramData\RemoteAssistRelay`, configFile: `C:\ProgramData\RemoteAssistRelay\config.json`,
-		certsDir: `C:\ProgramData\RemoteAssistRelay\certs`, auditFile: `C:\ProgramData\RemoteAssistRelay\logsudit.jsonl`}
+		certsDir: `C:\ProgramData\RemoteAssistRelay\certs`, auditFile: `C:\ProgramData\RemoteAssistRelay\logs\audit.jsonl`}
 	cfg := defaultWindowsServiceConfig(paths)
 	if cfg.CodeMaxAge != "24h" {
 		t.Fatalf("默认 code_max_age 应为 24h，得 %q", cfg.CodeMaxAge)
