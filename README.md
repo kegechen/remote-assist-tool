@@ -259,6 +259,8 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--listen` | `:8443` | Listen address |
 | `--cert` / `--key` | - | TLS certificate / private key files |
 | `--ttl` | `30m` | Assist code lifetime |
+| `--code-max-age` | `24h` | Absolute lifetime of an assist code, counted from first issue and never reset by reconnects/reuse, even while its share stays online. `0` disables the cap (a leaked code then stays valid as long as its share runs) |
+| `--state-dir` | empty | Persist the code-reuse signing key (`reuse-secret`, mode 0600). Empty = key kept in memory only: after a relay restart every share receives a new assist code and nobody can reclaim an old one (so a leaked code cannot be grabbed by a third party). Set it if shares should keep their code across relay restarts; only the original share (holding its reuse token) can reclaim it. The Windows service enables it by default |
 | `--length` | `10` | Assist code length |
 | `--audit` | `audit.log` | Audit log file |
 | `--stun` | empty | STUN/UDP relay listen address; e.g. `:3478`, empty disables it |
