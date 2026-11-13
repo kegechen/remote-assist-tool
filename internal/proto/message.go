@@ -46,6 +46,10 @@ type RegisterRequest struct {
 	// RequestCode 期望复用的协助码：share 进程内缓存的上一次所得之码。relay 在码可用时原样复用，
 	// 使码在 share 进程存活期间不变（relay 重启、share 离线超宽限后重连也能找回）。旧 relay 忽略。
 	RequestCode string `json:"request_code,omitempty"`
+	// ReuseToken 持有证明：上一次注册响应里 relay 下发的 RegisterResponse.ReuseToken。relay 只在令牌
+	// 验证通过（绑定了该码、本 ClientID、原始签发时间）时才允许复用 RequestCode，否则一律发新码——
+	// 防止他人凭泄露的协助码抢先注册占码。旧 share 不发、旧 relay 忽略。
+	ReuseToken string `json:"reuse_token,omitempty"`
 	// SupportsStickyCode 表示客户端理解 RegisterResponse.CodeSticky 且 expires_at==0 的"无到期"语义。
 	SupportsStickyCode bool `json:"supports_sticky_code,omitempty"`
 }
@@ -57,6 +61,9 @@ type RegisterResponse struct {
 	ExpiresAt int64 `json:"expires_at"`
 	// CodeSticky relay 声明码在 share 在线期间恒定有效、掉线宽限内/relay 状态在时可复用。旧 relay 不发。
 	CodeSticky bool `json:"code_sticky,omitempty"`
+	// ReuseToken relay 签发的复用令牌（只给 share，不是协助码，不得展示给协助端或写入协助信息），
+	// share 仅缓存在进程内存里，重连时随 RegisterRequest.ReuseToken 回传以证明自己是码的原持有者。旧 relay 不发。
+	ReuseToken string `json:"reuse_token,omitempty"`
 	UpdateInfo
 	// STUNServers relay 建议的 STUN 服务器（host:port，--advertise-stun）；新版客户端把它们
 	// 加入公网地址发现的竞速候选。旧 relay 不发、旧客户端忽略。

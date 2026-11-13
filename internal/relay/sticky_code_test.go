@@ -117,13 +117,15 @@ func TestStickyShareOfflineBeyondGraceReclaimed(t *testing.T) {
 	}
 }
 
-// relay 丢状态（重启）后 share 带 request_code 重新注册，应拿回同一个码。
+// relay 重启后（密钥落盘 --state-dir）share 带 request_code + 复用令牌重新注册，应拿回同一个码。
+// 无令牌 / 无落盘密钥的情形见 reuse_token_test.go（一律不复用）。
 func TestStickyRequestCodeRestoredAfterRelayRestart(t *testing.T) {
-	srv1 := newStickyServer(t, Config{})
+	dir := t.TempDir()
+	srv1 := newStickyServer(t, Config{StateDir: dir})
 	_, resp := stickyRegister(t, srv1, "s1", "cid-1", "", true)
 
-	srv2 := newStickyServer(t, Config{}) // 全新 relay，无任何状态
-	_, resp2 := stickyRegister(t, srv2, "s2", "cid-1", resp.Code, true)
+	srv2 := newStickyServer(t, Config{StateDir: dir}) // 全新 relay，无会话状态，密钥从盘上读
+	_, resp2 := stickyRegisterTok(t, srv2, "s2", "cid-1", resp.Code, resp.ReuseToken)
 	if resp2.Code != resp.Code {
 		t.Fatalf("relay 重启后应复用请求的码: %s vs %s", resp.Code, resp2.Code)
 	}
@@ -136,7 +138,7 @@ func TestStickyRequestCodeRestoredAfterRelayRestart(t *testing.T) {
 func TestStickyRequestCodeTakenGetsNewCode(t *testing.T) {
 	srv := newStickyServer(t, Config{})
 	_, a := stickyRegister(t, srv, "sA", "cid-A", "", true)
-	_, b := stickyRegister(t, srv, "sB", "cid-B", a.Code, true)
+	_, b := stickyRegisterTok(t, srv, "sB", "cid-B", a.Code, a.ReuseToken)
 	if b.Code == a.Code {
 		t.Fatal("被占用的码不得发给另一个 share")
 	}
