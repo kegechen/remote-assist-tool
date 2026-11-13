@@ -92,7 +92,7 @@ header input.server:focus,#treePath:focus,#grepPattern:focus,#grepRoot:focus{bor
 .codebox{display:inline-flex;align-items:center;gap:3px;background:var(--field);border:1px solid var(--line);border-radius:var(--r-md);padding:0 10px;height:32px;transition:border-color .15s,box-shadow .15s,opacity .15s}
 .codebox:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .codebox i{color:var(--dim);font-style:normal;user-select:none}
-header .codebox input.cseg{width:5.2ch;background:transparent;border:0;outline:0;padding:0;text-align:center;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+header .codebox input.cseg{width:5.2ch;background:transparent;border:0;outline:0;padding:0;text-align:center;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
 header .codebox input.cseg::placeholder{color:var(--dim);letter-spacing:.08em}
 .codebox.off,.codebox.off:focus-within{opacity:.4;border-color:var(--line);box-shadow:none}
 .codebox.off input.cseg{cursor:not-allowed}
@@ -477,12 +477,14 @@ $('#conn-info').onclick=e=>e.stopPropagation();
 document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
 
 // ========== 协助码分段输入 ==========
-// 三格各 4 位；隐藏的 #code 始终是数据源（12 位无分隔大写，或粘贴的 code@host:port 原串）。
+// 三格各 4 位；隐藏的 #code 始终是数据源（12 位无分隔大写 或 10 位大小写混合（旧版公网中转），或粘贴的 code@host:port 原串）。
 (function(){
   const segs=Array.from(document.querySelectorAll('#codeBox .cseg')),hid=$('#code');
-  const clean=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  // 保留大小写：旧版公网中转发 10 位大小写混合码（大小写敏感）；本版中转的 12 位码全大写，输入小写时同步转大写
+  const clean=s=>String(s||'').replace(/[^A-Za-z0-9]/g,'');
+  const norm=s=>s.length===12?s.toUpperCase():s;
   let raw=''; // 非空表示 #code 保留粘贴的原串（含 @host:port）
-  function sync(){hid.value=raw||segs.map(s=>s.value).join('')}
+  function sync(){hid.value=raw||norm(segs.map(s=>s.value).join(''))}
   // 从第 start 格开始铺满字符，返回应聚焦的格序号与光标位置
   function fill(str,start){
     let i=start,pos=0;
