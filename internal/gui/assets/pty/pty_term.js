@@ -221,6 +221,12 @@
     return /unknown_tool|pty_unsupported|exec_denied|找不到可用的 shell|启动 shell 失败/.test(msg || '');
   }
 
+  var DROP_NOTICE_DELAY_MS = 400;
+  // 连接级错误：mcp 子进程退出、对端/隧道断开等（区别于 shell 自身的错误）
+  function isConnDropError(msg) {
+    return /mcp process exited|peer_gone|tunnel_lost|not_connected|signal: killed|EOF|broken pipe|connection reset/i.test(msg || '');
+  }
+
   async function startSession() {
     if (mode === 'exec' || state === 'opening' || state === 'live') return;
     if (!isConnected) return;
@@ -280,7 +286,18 @@
       return;
     }
     state = 'ended';
-    if (errText) notice('[会话中断: ' + errText + '；按回车重新开始]', '31');
+    if (errText && isConnDropError(errText)) {
+      // 连接级中断（被控端/中继/本地子进程）：主动断开、取消、改连时 gen 已变，走不到这里；
+      // 到这里就是意外断开。稍等一下让 SSE 带来的分类原因先到，文案与状态栏一致。
+      var dropGen = myGen;
+      setTimeout(function () {
+        if (dropGen !== gen || state !== 'ended') return;
+        var d = (typeof dropInfo !== 'undefined') ? dropInfo : null;
+        var viaErr = (typeof dropFromErr === 'function') ? dropFromErr(errText) : '';
+        var why = d ? (d.text + '：' + d.hint) : (viaErr || '连接已中断，请检查被控端与网络');
+        notice('[连接中断: ' + why + '；恢复连接后自动重新开始，或按回车重试]', '31');
+      }, DROP_NOTICE_DELAY_MS);
+    } else if (errText) notice('[会话中断: ' + errText + '；按回车重新开始]', '31');
     else notice('[进程已退出，按回车重新开始]', '33');
     if (termVisible()) term.focus();
     void gotResult;
@@ -317,6 +334,7 @@
       if (term && state !== 'idle') { doFit(); term.focus(); }
       return mode !== 'exec';
     },
+    _isConnDropError: isConnDropError,
     _fallbackReason: fallbackReason, // 供测试核对各回退原因文案
     _state: function () { return { mode: mode, state: state, id: sessionId, cols: term ? term.cols : 0, rows: term ? term.rows : 0 }; }
   };
@@ -327,7 +345,11 @@
     if (!src) return;
     src.addEventListener('connected', function () { window.PtyTerm.connected(); });
     src.addEventListener('lost', function () { isConnected = false; });
-    src.addEventListener('disconnected', function () { isConnected = false; });
+    // 后端已确认断开（用户主动断开等）：静默收掉会话，不留红字
+    src.addEventListener('disconnected', function () {
+      isConnected = false;
+      if (state === 'live' || state === 'opening') stopSession();
+    });
   }
   try { hookEvents(); } catch (e) { /* 主页面变量不可见时忽略 */ }
 
