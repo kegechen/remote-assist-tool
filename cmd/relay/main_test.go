@@ -26,6 +26,28 @@ func TestParseRelayOptionsDefaults(t *testing.T) {
 	}
 }
 
+// 防冒领：码绝对寿命默认非零（24h）；--code-max-age 0 可显式关闭；--state-dir 默认空（密钥只在内存）。
+func TestParseRelayOptionsCodeMaxAgeDefaultsNonZero(t *testing.T) {
+	t.Setenv("REMOTE_RELAY_LIMITS_FILE", "")
+	opts, err := parseRelayOptions(nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.codeMaxAge != 24*time.Hour || defaultCodeMaxAge != 24*time.Hour {
+		t.Fatalf("code-max-age 默认应为 24h，得 %v", opts.codeMaxAge)
+	}
+	if opts.stateDir != "" {
+		t.Fatalf("state-dir 默认应为空，得 %q", opts.stateDir)
+	}
+	opts, err = parseRelayOptions([]string{"--code-max-age", "0", "--state-dir", "/var/lib/relay"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.codeMaxAge != 0 || opts.stateDir != "/var/lib/relay" {
+		t.Fatalf("显式值应生效: %+v", opts)
+	}
+}
+
 func TestParseRelayOptionsRejectsInvalidValues(t *testing.T) {
 	tests := [][]string{
 		{"--ttl", "0"},
