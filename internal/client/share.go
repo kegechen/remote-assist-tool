@@ -46,6 +46,7 @@ type ShareMode struct {
 	codeFile       string
 	mirrorCodeFile string
 	code           string
+	reuseToken     string    // relay 签发的复用令牌（持有证明）：只缓存在进程内存，重连时回传；不展示、不落盘、不进剪贴板
 	expiresAt      time.Time // 零值 = relay 声明码在 share 在线期间恒定有效（无固定到期）
 	codeSticky     bool      // 最近一次注册时 relay 是否声明了「固定码」能力
 	stickyHinted   bool      // 「中转服务不支持固定码」的提示已打印过；重连不重复刷屏
@@ -398,7 +399,7 @@ func (s *ShareMode) register() error {
 	// 使码在本进程存活期间不变。旧 relay 忽略这两个字段并按旧逻辑发码。
 	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{
 		ClientID: clientID, Version: version.Info(), Host: hostInfo, SupportsUpdateNotice: true,
-		RequestCode: s.code, SupportsStickyCode: true,
+		RequestCode: s.code, ReuseToken: s.reuseToken, SupportsStickyCode: true,
 	}); err != nil {
 		return err
 	}
@@ -436,6 +437,7 @@ func (s *ShareMode) register() error {
 	}
 	prevCode := s.code
 	s.code = resp.Code
+	s.reuseToken = resp.ReuseToken // 旧 relay 不发：置空，之后不带令牌（旧 relay 本就忽略 request_code）
 	s.codeSticky = resp.CodeSticky
 	if resp.ExpiresAt == 0 && resp.CodeSticky {
 		s.expiresAt = time.Time{}
@@ -1105,7 +1107,7 @@ func codeChangeNotice(prev, cur string, relaySticky bool) string {
 	if !relaySticky {
 		return fmt.Sprintf("中转服务不支持固定协助码（版本较旧），协助码已变更：%s -> %s，请把新码告知协助端", formatCode(prev), formatCode(cur))
 	}
-	return fmt.Sprintf("原协助码 %s 无法继续使用（已被占用或不可复用），协助码已变更为 %s，请把新码告知协助端", formatCode(prev), formatCode(cur))
+	return fmt.Sprintf("原协助码 %s 无法继续使用（可能是中转服务已重启且未配置 --state-dir、码已超过最长有效期，或已被占用），协助码已变更为 %s，请把新码告知协助端", formatCode(prev), formatCode(cur))
 }
 
 // clipboardCopy 复制到剪贴板；用变量便于测试替换，避免单测污染使用者的剪贴板。
