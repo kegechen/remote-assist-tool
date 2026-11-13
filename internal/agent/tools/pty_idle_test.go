@@ -22,7 +22,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 // idleHarness 起一个带假时钟的会话，返回 open 结果通道。
-func idleHarness(t *testing.T, timeout time.Duration) (*PTYManager, *ptyWriteTool, *fakeClock, *[]*fakePTY, chan ptyOpenResult) {
+func idleHarness(t *testing.T, timeout time.Duration) (*PTYManager, *ptyWriteTool, *fakeClock, *fakePTYList, chan ptyOpenResult) {
 	t.Helper()
 	m, open, write, _, _, made := newFakeTools(t, false)
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
@@ -87,7 +87,7 @@ func TestPTYIdleRenewedByInput(t *testing.T) {
 // 长时间无输入但持续有输出（tail -f / 编译）不得被误杀。
 func TestPTYIdleRenewedByOutput(t *testing.T) {
 	m, _, clk, made, done := idleHarness(t, time.Hour)
-	f := (*made)[0]
+	f := made.at(t, 0)
 	for i := 0; i < 3; i++ {
 		clk.Advance(40 * time.Minute)
 		go f.outW.Write([]byte("log line\n"))

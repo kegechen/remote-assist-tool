@@ -71,18 +71,50 @@ func (c *ptyCaptureSink) Send(stream string, data []byte) error {
 }
 func (c *ptyCaptureSink) String() string { c.mu.Lock(); defer c.mu.Unlock(); return c.buf.String() }
 
-func newFakeTools(t *testing.T, disabled bool) (*PTYManager, *ptyOpenTool, *ptyWriteTool, *ptyResizeTool, *ptyCloseTool, *[]*fakePTY) {
+// fakePTYList 记录 m.start 造出的假终端。start 跑在 pty_open 的 goroutine 里，测试 goroutine
+// 必须经锁读取；而且会话登记（m.Count()==1）早于 start 被调用，读之前要等元素真的出现。
+type fakePTYList struct {
+	mu   sync.Mutex
+	list []*fakePTY
+}
+
+func (l *fakePTYList) add(f *fakePTY) {
+	l.mu.Lock()
+	l.list = append(l.list, f)
+	l.mu.Unlock()
+}
+
+// at 等第 i 个假终端出现后返回。
+func (l *fakePTYList) at(t *testing.T, i int) *fakePTY {
+	t.Helper()
+	var f *fakePTY
+	waitFor(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if len(l.list) > i {
+			f = l.list[i]
+			return true
+		}
+		return false
+	}, "假终端创建")
+	return f
+}
+
+func (f *fakePTY) killCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.kills
+}
+
+func newFakeTools(t *testing.T, disabled bool) (*PTYManager, *ptyOpenTool, *ptyWriteTool, *ptyResizeTool, *ptyCloseTool, *fakePTYList) {
 	m := NewPTYManager(disabled)
-	var made []*fakePTY
-	var mu sync.Mutex
+	made := &fakePTYList{}
 	m.start = func(spec ptySpec) (ptyProc, error) {
 		f := newFakePTY(spec)
-		mu.Lock()
-		made = append(made, f)
-		mu.Unlock()
+		made.add(f)
 		return f, nil
 	}
-	return m, &ptyOpenTool{m}, &ptyWriteTool{m}, &ptyResizeTool{m}, &ptyCloseTool{m}, &made
+	return m, &ptyOpenTool{m}, &ptyWriteTool{m}, &ptyResizeTool{m}, &ptyCloseTool{m}, made
 }
 
 func waitFor(t *testing.T, cond func() bool, what string) {
@@ -125,7 +157,7 @@ func TestPTYSessionLifecycleAndEcho(t *testing.T) {
 	if _, err := resize.Run(context.Background(), json.RawMessage(`{"session":"s1","cols":120,"rows":40}`), nil); err != nil {
 		t.Fatal(err)
 	}
-	f := (*made)[0]
+	f := made.at(t, 0)
 	f.mu.Lock()
 	if f.cols != 120 || f.rows != 40 {
 		t.Fatalf("resize 未生效: %d x %d", f.cols, f.rows)
@@ -182,7 +214,7 @@ func TestPTYCancelClosesSession(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("取消后未返回")
 	}
-	if (*made)[0].kills != 1 || m.Count() != 0 {
+	if made.at(t, 0).killCount() != 1 || m.Count() != 0 {
 		t.Fatal("取消应杀进程并清表")
 	}
 }
@@ -195,7 +227,7 @@ func TestPTYShellExitsNaturally(t *testing.T) {
 		done <- res
 	}()
 	waitFor(t, func() bool { return m.Count() == 1 }, "会话登记")
-	(*made)[0].Kill() // 模拟 shell 自己退出
+	made.at(t, 0).Kill() // 模拟 shell 自己退出
 	select {
 	case r := <-done:
 		var out ptyOpenResult
@@ -230,6 +262,10 @@ func TestPTYResizeValidation(t *testing.T) {
 	m.mu.Lock()
 	s := m.sessions["r1"]
 	m.mu.Unlock()
+	// 生产代码里调用 closeWith 的地方都先等 ready（proc 由 pty_open 在 ready 前写入），这里照做。
+	if !s.waitReady() {
+		t.Fatal("会话未就绪")
+	}
 	s.closeWith("closed")
 }
 
