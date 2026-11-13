@@ -1405,11 +1405,29 @@ function deskErrText(e){
 }
 function deskBytesToBlob(b64){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type:'image/jpeg'})}
 function deskSyncDisplays(n){
+  n=deskInt(n,1,DESK_MAX_DISPLAYS,1);
   $('#deskDisp').classList.toggle('dk-hide',n<=1);
   if(n===desk.disp)return;desk.disp=n;
   const sel=$('#deskDisp'),cur=sel.value;sel.innerHTML='';
   for(let i=0;i<n;i++){const o=document.createElement('option');o.value=i;o.textContent='显示器 '+(i+1)+(i===0?'（主）':'');sel.appendChild(o)}
   if(cur&&+cur<n)sel.value=cur;
+}
+// 被控端返回的数据不可信（被控端可能被篡改或本身恶意）：所有来自 screen_capture 的字段在使用前
+// 一律强制转成有界整数，之后统计栏、布局、画布、显示器列表都只用净化后的值，
+// 避免 innerHTML/CSS 注入脚本，以及用极大的 displays/宽高卡死页面。
+const DESK_MAX_DIM=16384,DESK_MAX_DISPLAYS=16;
+function deskInt(v,min,max,dflt){const n=typeof v==='number'?v:(typeof v==='string'&&/^[0-9]{1,9}$/.test(v)?+v:NaN);return Number.isFinite(n)?Math.min(max,Math.max(min,Math.floor(n))):dflt}
+function deskSanitize(d){
+  if(!d||typeof d!=='object')return d;
+  const o=Object.assign({},d); // 不改原对象
+  o.width=deskInt(d.width,1,DESK_MAX_DIM,0);o.height=deskInt(d.height,1,DESK_MAX_DIM,0);
+  o.screen_width=deskInt(d.screen_width,1,DESK_MAX_DIM,0);o.screen_height=deskInt(d.screen_height,1,DESK_MAX_DIM,0);
+  o.displays=deskInt(d.displays,1,DESK_MAX_DISPLAYS,1);
+  o.seq=deskInt(d.seq,0,Number.MAX_SAFE_INTEGER,0);
+  o.proc_ms=(d.proc_ms==null)?null:deskInt(d.proc_ms,0,3600000,-1);
+  o.unchanged=d.unchanged===true;
+  o.data=typeof d.data==='string'?d.data:'';
+  return o;
 }
 // 取一帧：返回 {r,t0,t1,key}，由调用方按顺序 await，保证画面按序绘制。
 // key 标识这次请求的显示器/宽度/画质，用于判断「上一帧能否作为 since 复用」。
@@ -1468,7 +1486,7 @@ async function deskStart(forceLoading){
     if(my!==desk.loopId)break;
     const rtt=Math.round(t1-t0);
     if(!r.ok){fail=deskErrText(r.error);break}
-    let d;try{d=parseMCP(r.result)}catch(e){fail='解析帧失败';break}
+    let d;try{d=deskSanitize(parseMCP(r.result))}catch(e){fail='解析帧失败';break}
     const unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
     if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
     const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
@@ -1484,9 +1502,9 @@ async function deskStart(forceLoading){
       still=0;
       try{
         const bm=await createImageBitmap(deskBytesToBlob(d.data));
-        if(cv.width!==d.width||cv.height!==d.height){cv.width=d.width;cv.height=d.height}
+        if(d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}
         // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
-        if(d.screen_width&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
+        if(d.screen_width>0&&d.screen_height>0&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
         ctx.drawImage(bm,0,0);if(bm.close)bm.close();
       }catch(e){fail='绘制帧失败: '+e;break}
       // 旧被控端不回 seq：have.seq 保持 0，永远不会带 since，行为与改造前一致
@@ -1504,7 +1522,7 @@ async function deskStart(forceLoading){
       const fpsT=(desk.drawn/sec).toFixed(1),reqT=(desk.frames/sec).toFixed(1),bps=desk.bytes/sec;
       const spT=bps>=1048576?(bps/1048576).toFixed(1):(bps/1024).toFixed(0),spU=bps>=1048576?'MB/s':'KB/s';
       const lowT=anyAuto&&level?' · 已降质':'',stillT=still>=5?' · 静止':'';
-      const sw=d.screen_width||desk.sw||0,sh=d.screen_height||desk.sh||0;
+      const sw=deskInt(d.screen_width||desk.sw,0,DESK_MAX_DIM,0),sh=deskInt(d.screen_height||desk.sh,0,DESK_MAX_DIM,0);
       const st=fpsT+' fps · '+spT+' '+spU+' · '+sw+'x'+sh+stillT+lowT;
       // 数值放进定宽等宽数字容器，位数变化时整条文字不抖动（e2e 读 textContent 仍含 fps）
       $('#deskStat').innerHTML='<span class="dk-num" style="min-width:4ch">'+fpsT+'</span>fps · <span class="dk-num" style="min-width:4ch">'+spT+'</span>'+spU+' · '+sw+'x'+sh+stillT+lowT;
