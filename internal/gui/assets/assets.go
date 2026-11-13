@@ -564,13 +564,14 @@ async function doConnect(allowLegacy){
   resetRemoteState(); // 可能换了一台远端，旧缓存一律作废
   setStatus(false,'连接中...');
   connToastShow('connecting','正在连接 '+label+'…','按 Esc 或点「取消连接」可中止');
-  const timer=setTimeout(()=>ctrl.abort(),CONNECT_ABORT_MS);
+  let timedOut=false; // 区分“前端兜底超时 abort”与“用户取消 abort”
+  const timer=setTimeout(()=>{timedOut=true;ctrl.abort()},CONNECT_ABORT_MS);
   let r;
   try{
     const resp=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},
       body:JSON.stringify({code,server,no_auth:noauth,allow_legacy:!!allowLegacy}),signal:ctrl.signal});
     r=await resp.json();
-  }catch(e){r=ctrl.signal.aborted?{ok:false,code:'canceled'}:{ok:false,code:'other',reason:'请求失败',error:String(e)}}
+  }catch(e){r=ctrl.signal.aborted?(timedOut?{ok:false,code:'timeout',reason:'连接超时'}:{ok:false,code:'canceled'}):{ok:false,code:'other',reason:'请求失败',error:String(e)}}
   clearTimeout(timer);connecting=null;renderConnBtn();
   if(r.ok){
     saveServerMemo(server);
