@@ -342,7 +342,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
   <header>
     <div class="brand"><svg viewBox="0 0 28 28" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--brand1)"/><stop offset="1" style="stop-color:var(--brand2)"/></linearGradient></defs><rect x="1" y="1" width="26" height="26" rx="8" fill="url(#lg)" fill-opacity=".22" stroke="url(#lg)" stroke-width="1.4"/><path d="M8 10.5h12v7H8z" fill="none" stroke="url(#lg)" stroke-width="1.6" stroke-linejoin="round"/><path d="M11.5 20.5h5" stroke="url(#lg)" stroke-width="1.6" stroke-linecap="round"/></svg><span class="bname">Remote Assist</span></div>
     <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code"></div>
-    <div class="hgrp"><span class="lbl">Relay</span><input class="server" id="server" placeholder="host:port"></div>
+    <div class="hgrp"><span class="lbl">中转地址</span><input class="server" id="server" placeholder="host:port" title="中转服务地址，如 127.0.0.1:28443。留空使用默认中转；填过的地址连接成功后会被记住"></div>
     <label class="chk"><input type="checkbox" id="noauth" aria-describedby="tipNoauth"><span>NoAuth</span></label><button type="button" class="qm" id="qmNoauth" data-tip="tipNoauth" aria-label="NoAuth 说明" aria-describedby="tipNoauth" aria-expanded="false">?</button>
     <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop）">远程桌面</button></div>
     <span id="compat" hidden><span class="cm-txt">当前为兼容模式连接</span><button type="button" class="qm" id="qmCompat" data-tip="tipCompat" aria-label="兼容模式说明" aria-describedby="tipCompat" aria-expanded="false">?</button></span>
@@ -466,7 +466,7 @@ function connectionRow(label,value,cls){return'<div class="conn-row"><span class
 async function showConnectionInfo(){
   if(!connected)return;const panel=$('#conn-info');panel.style.display='block';panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="meta">测量中...</span></div>';
   const r=await api('/api/status',{});if(!r.connected){panel.innerHTML='<div class="conn-title"><span>连接状态</span></div>'+connectionRow('状态','已断开');return}
-  const mode=r.p2p?(r.p2p_path==='udp_relay'?'UDP 中继':'P2P 直连'):'Relay 中转',latency=r.latency_ms!==undefined?r.latency_ms+' ms':'不可用';
+  const mode=r.p2p?(r.p2p_path==='udp_relay'?'UDP 中继':'P2P 直连'):'中继转发',latency=r.latency_ms!==undefined?r.latency_ms+' ms':'不可用';
   panel.innerHTML='<div class="conn-title"><span>连接状态</span><span class="ok">'+esc(mode)+'</span></div>'+
     connectionRow('服务器',r.server)+connectionRow('传输',mode,r.p2p&&r.p2p_path!=='udp_relay'?'transport-p2p':'')+connectionRow('往返延迟',latency)+
     connectionRow('远端主机',r.peer_host)+connectionRow('远端版本',r.peer_version)+connectionRow('工具协议',r.proto_version?('v'+r.proto_version+(r.proto_version==='1'?'（兼容模式，安全防护已降级）':'')):'')+connectionRow('Help 版本',r.help_version)+
@@ -550,6 +550,10 @@ $('#connLegacyNo').onclick=()=>{connToastHide();setStatus(false,'未连接')};
 $('#connLegacyOk').onclick=()=>{connToastHide();doConnect(true)};
 es.addEventListener('connect-fallback',()=>{if(connecting)connToastShow('retry','对端是旧版，正在以兼容模式重试…','仅限可信网络；兼容模式安全性较低')});
 
+// 中转地址记忆：连接成功后保存，下次打开页面自动带出。失败/无存储时静默忽略。
+function loadServerMemo(){try{const v=localStorage.getItem('ra-relay');const e=document.getElementById('server');if(v&&e&&!e.value)e.value=v}catch(_){}}
+function saveServerMemo(v){try{if(v)localStorage.setItem('ra-relay',v);else localStorage.removeItem('ra-relay')}catch(_){}}
+loadServerMemo();
 async function doConnect(allowLegacy){
   if(connecting)return;
   const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked;
@@ -569,6 +573,7 @@ async function doConnect(allowLegacy){
   }catch(e){r=ctrl.signal.aborted?{ok:false,code:'canceled'}:{ok:false,code:'other',reason:'请求失败',error:String(e)}}
   clearTimeout(timer);connecting=null;renderConnBtn();
   if(r.ok){
+    saveServerMemo(server);
     const d=parseMCP(r.result);
     protoLegacy=String(d.proto_version||'')==='1';
     setStatus(true,'已连接');setUpgradeInfo(d);loadDrives();window.PtyTerm&&PtyTerm.connected();openTerm();termOnConnected();
