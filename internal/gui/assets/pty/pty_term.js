@@ -242,7 +242,7 @@
     var cols = term.cols, rows = term.rows;
     lastSize = cols + 'x' + rows;
     if (termVisible()) term.focus();
-    var errText = '', gotResult = false;
+    var errText = '', gotResult = false, endReason = '';
     try {
       var resp = await post('/api/pty/open', { cols: cols, rows: rows }, ctl.signal);
       if (!resp.ok) {
@@ -269,6 +269,7 @@
             term.write(b64ToBytes(m.data));
           } else if (m.type === 'result') {
             gotResult = true;
+            endReason = (m.result && m.result.reason) || '';
           } else if (m.type === 'error') {
             errText = m.error || '未知错误';
           }
@@ -298,6 +299,7 @@
         notice('[连接中断: ' + why + '；恢复连接后自动重新开始，或按回车重试]', '31');
       }, DROP_NOTICE_DELAY_MS);
     } else if (errText) notice('[会话中断: ' + errText + '；按回车重新开始]', '31');
+    else if (endReason === 'idle') notice('[终端因长时间空闲已关闭，按回车重新开始]', '33');
     else notice('[进程已退出，按回车重新开始]', '33');
     if (termVisible()) term.focus();
     void gotResult;

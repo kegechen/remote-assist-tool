@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
@@ -32,6 +35,11 @@ const (
 	ptyMaxWriteBytes = 256 * 1024
 	// ptySendFailLimit 连续多少次推送失败就认定对端已不在（隧道断且没有 cancel 到达），关闭会话防孤儿。
 	ptySendFailLimit = 20
+	// defaultPTYIdleTimeout 会话“无输入且无输出”多久后由被控端回收。环境变量 REMOTE_ASSIST_PTY_IDLE 可覆盖
+	// （Go duration，如 30m、6h；0 或 off 关闭空闲回收，只剩 pty_open 的 24h 绝对上限）。
+	defaultPTYIdleTimeout = 2 * time.Hour
+	// ptyIdleEnv 空闲时限的环境变量名。
+	ptyIdleEnv = "REMOTE_ASSIST_PTY_IDLE"
 	// ptyDrainTimeout 进程退出后等待残余输出读完的最长时间。
 	ptyDrainTimeout = 2 * time.Second
 )
@@ -72,6 +80,32 @@ type ptySession struct {
 	once    sync.Once
 	reason  string
 	mu      sync.Mutex
+	// lastActive 最近一次“活动”（输入、resize、输出）的 UnixNano，由 PTYManager.now 提供时间。
+	lastActive atomic.Int64
+}
+
+// touch 记录一次活动。
+func (m *PTYManager) touch(s *ptySession) { s.lastActive.Store(m.now().UnixNano()) }
+
+// idleFor 距上次活动已过去多久。
+func (m *PTYManager) idleFor(s *ptySession) time.Duration {
+	return m.now().Sub(time.Unix(0, s.lastActive.Load()))
+}
+
+// ptyIdleTimeoutFromEnv 解析空闲时限；非法值回落默认，0/off 表示关闭。
+func ptyIdleTimeoutFromEnv(getenv func(string) string) time.Duration {
+	v := strings.TrimSpace(strings.ToLower(getenv(ptyIdleEnv)))
+	switch v {
+	case "":
+		return defaultPTYIdleTimeout
+	case "0", "off":
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return defaultPTYIdleTimeout
+	}
+	return d
 }
 
 // closeWith 记录首个关闭原因并杀进程树，幂等。
@@ -97,6 +131,12 @@ type PTYManager struct {
 	sessions map[string]*ptySession
 	// start 可在测试中替换。
 	start func(spec ptySpec) (ptyProc, error)
+	// 空闲回收：策略是“输入与输出都算活动”，只有完全无输入且无输出才计空闲——
+	// 只看输入会误杀 tail -f、编译等无人值守的长任务；只看输出则会让空提示符的会话永远不回收。
+	// now / idleTick 可在测试中注入。
+	idleTimeout time.Duration
+	idleTick    time.Duration
+	now         func() time.Time
 }
 
 type ptySpec struct {
@@ -116,7 +156,10 @@ func PTYDisabled(allowExecCount int, allowPTY bool) bool {
 
 // NewPTYManager disabled=true 时所有 pty 工具返回 exec_denied（被控端设了 --allow-exec 白名单）。
 func NewPTYManager(disabled bool) *PTYManager {
-	return &PTYManager{disabled: disabled, sessions: map[string]*ptySession{}, start: startPTY}
+	return &PTYManager{
+		disabled: disabled, sessions: map[string]*ptySession{}, start: startPTY,
+		idleTimeout: ptyIdleTimeoutFromEnv(os.Getenv), now: time.Now,
+	}
 }
 
 // NewPTYTools 返回要注册的四个工具。
@@ -188,7 +231,7 @@ type ptyOpenArgs struct {
 
 type ptyOpenResult struct {
 	ExitCode int    `json:"exit_code"`
-	Reason   string `json:"reason"` // exited | closed | cancelled
+	Reason   string `json:"reason"` // exited | closed | cancelled | idle（长时间无输入无输出被回收）
 }
 
 type ptyOpenTool struct{ m *PTYManager }
@@ -247,6 +290,7 @@ func (t *ptyOpenTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 		return nil, err
 	}
 	sess.proc = proc
+	m.touch(sess)
 	close(sess.ready)
 	// 无论如何退出都清理：杀树 + 释放句柄 + 摘表。
 	defer func() {
@@ -255,6 +299,13 @@ func (t *ptyOpenTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 		remove()
 		close(sess.done)
 	}()
+
+	// 空闲回收：定期检查，超时后以 "idle" 为原因关闭（先于 defer 里的 closeWith("closed") 记录原因）。
+	if m.idleTimeout > 0 {
+		stopReap := make(chan struct{})
+		defer close(stopReap)
+		go m.reapIdle(sess, stopReap)
+	}
 
 	// 输出泵：reader 只管读，sender 把积压的块合并后推送（天然背压，不增加空闲时延迟）。
 	outCh := make(chan []byte, 64)
@@ -266,6 +317,7 @@ func (t *ptyOpenTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 		for {
 			n, err := proc.Read(buf)
 			if n > 0 {
+				m.touch(sess)
 				b := make([]byte, n)
 				copy(b, buf[:n])
 				outCh <- b
@@ -335,6 +387,36 @@ func (t *ptyOpenTool) Run(ctx context.Context, raw json.RawMessage, sink agent.S
 	return out, nil
 }
 
+// reapIdle 周期检查会话是否已空闲超时；stop 关闭或会话结束即退出。
+func (m *PTYManager) reapIdle(s *ptySession, stop <-chan struct{}) {
+	tick := m.idleTick
+	if tick <= 0 {
+		tick = m.idleTimeout / 10
+		if tick > time.Minute {
+			tick = time.Minute
+		}
+		if tick < time.Second {
+			tick = time.Second
+		}
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-s.done:
+			return
+		case <-t.C:
+			if m.idleFor(s) > m.idleTimeout {
+				log.Printf("tool | pty_open | 会话 %s 空闲超过 %v，已回收", s.id, m.idleTimeout)
+				s.closeWith("idle")
+				return
+			}
+		}
+	}
+}
+
 // ---------- pty_write ----------
 
 type ptyWriteArgs struct {
@@ -361,6 +443,7 @@ func (t *ptyWriteTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Str
 	// 同一会话的输入串行保序（调用方也应串行发送，这里是兜底）。
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	t.m.touch(s)
 	n, err := s.proc.Write(a.Data)
 	if err != nil {
 		return nil, fmt.Errorf("pty_not_found: 写入失败（会话已结束）: %w", err)
@@ -397,6 +480,7 @@ func (t *ptyResizeTool) Run(ctx context.Context, raw json.RawMessage, _ agent.St
 	if err != nil {
 		return nil, err
 	}
+	t.m.touch(s)
 	if err := s.proc.Resize(cols, rows); err != nil {
 		return nil, fmt.Errorf("internal_error: resize 失败: %w", err)
 	}

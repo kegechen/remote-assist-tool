@@ -48,3 +48,17 @@ func TestIndexDropWiring(t *testing.T) {
 		}
 	}
 }
+
+// 被控端因空闲回收会话时，result.reason=idle 要给出明确文案，而不是笼统的“进程已退出”。
+func TestPtyIdleNoticeWiring(t *testing.T) {
+	b, err := assets.StaticFS.ReadFile("pty/pty_term.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	for _, want := range []string{"endReason === 'idle'", "终端因长时间空闲已关闭"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("pty_term.js 缺少 %q", want)
+		}
+	}
+}
