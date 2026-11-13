@@ -60,7 +60,7 @@ var (
 var errPTYWriteBlocked = errors.New("pty_write_blocked: 终端输入被阻塞（对端未读取输入），请稍后重试或按 Ctrl+C")
 
 // ptyInterrupter 是 ptyProc 的可选扩展：绕过被卡住的输入管道，直接向前台进程组递送控制信号。
-// 目前只有 unix 后端实现（TIOCGPGRP + kill）；Windows ConPTY 没有等价物。
+// unix 后端用 TIOCGPGRP + kill；Windows 由隐藏助手子进程附着控制台发 CTRL_C_EVENT（仅 0x03）。
 type ptyInterrupter interface {
 	// Interrupt 递送由控制字符 b（0x03/0x1a/0x1c）对应的信号，成功返回 true。
 	Interrupt(b byte) bool
