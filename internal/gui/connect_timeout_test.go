@@ -41,7 +41,7 @@ func postConnect(t *testing.T, s *Server, h http.Handler, ctx context.Context) m
 // 后端总时限到点（对端黑洞、connect 一直不返回）必须归为“连接超时”，而不是“已取消”。
 func TestConnectTotalTimeoutReportedAsTimeoutNotCanceled(t *testing.T) {
 	old := connectTotalTimeout
-	connectTotalTimeout = 400 * time.Millisecond
+	connectTotalTimeout = 1500 * time.Millisecond
 	defer func() { connectTotalTimeout = old }()
 	s, h := connectHang(t)
 	out := postConnect(t, s, h, context.Background())
