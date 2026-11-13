@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"os"
 	"testing"
 
 	"github.com/jezek/xgb/xproto"
@@ -130,5 +131,27 @@ func TestPlanSpareNoFreeKeycode(t *testing.T) {
 	// 文本里全是映射里已有的字符：不需要借，不应报错
 	if plan, err := planSpare(ks, 4, 8, []rune("ab"), 0); err != nil || len(plan) != 0 {
 		t.Fatalf("无需借键码时应返回空计划: %v %v", plan, err)
+	}
+}
+
+func TestX11DisplayName(t *testing.T) {
+	t.Setenv("DISPLAY", "")
+	if got := x11DisplayName(); got != ":0" {
+		t.Errorf("DISPLAY 为空时应兜底 :0，得到 %q", got)
+	}
+	t.Setenv("DISPLAY", ":7")
+	if got := x11DisplayName(); got != ":7" {
+		t.Errorf("应沿用环境变量，得到 %q", got)
+	}
+}
+
+// ensureConn 不得修改进程环境，否则之后启动的子进程（pty 里的 shell、exec 命令）会继承被改写的 DISPLAY。
+func TestEnsureConnDoesNotSetenv(t *testing.T) {
+	t.Setenv("DISPLAY", "")
+	b := &x11Backend{}
+	_ = b.ensureConn() // 有无 X 服务器都行，只关心环境
+	defer b.drop()
+	if v, ok := os.LookupEnv("DISPLAY"); ok && v != "" {
+		t.Errorf("ensureConn 污染了进程环境 DISPLAY=%q", v)
 	}
 }
