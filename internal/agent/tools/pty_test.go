@@ -313,11 +313,19 @@ func TestPTYMaxSessions(t *testing.T) {
 	if _, err := open.Run(context.Background(), json.RawMessage(`{"session":"over"}`), &ptyCaptureSink{}); err == nil || !strings.Contains(err.Error(), "server_busy") {
 		t.Fatalf("超限应 server_busy: %v", err)
 	}
+	// 先在锁内取出会话再逐个关：等 ready 期间不能持有 m.mu（pty_open 就绪前的 m.touch 也要拿它）；
+	// 生产代码里调用 closeWith 的地方都先等 ready（proc 由 pty_open 在 ready 前写入），这里照做。
 	m.mu.Lock()
+	var all []*ptySession
 	for _, s := range m.sessions {
-		s.closeWith("closed")
+		all = append(all, s)
 	}
 	m.mu.Unlock()
+	for _, s := range all {
+		if s.waitReady() {
+			s.closeWith("closed")
+		}
+	}
 }
 
 func TestPTYInputNeverLogged(t *testing.T) {
