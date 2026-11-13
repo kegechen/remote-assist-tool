@@ -52,7 +52,7 @@ type ShareMode struct {
 	stickyHinted   bool      // 「中转服务不支持固定码」的提示已打印过；重连不重复刷屏
 	sbCfg          agent.SandboxConfig
 	minProto       string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
-	allowPTY       bool   // 设了 --allow-exec 白名单时是否仍开放真终端（默认 false=禁用）
+	allowPTY       bool   // 是否开放真终端（PTY），默认 false=关闭，需被控端显式 --allow-pty
 	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭
 	daemon         *agent.Daemon
 	daemonOnce     sync.Once
@@ -1280,7 +1280,7 @@ func (s *ShareMode) handleRelayToolHello(msg *proto.Message) error {
 // SetEnableDesktop 开关远程桌面工具；必须在 Run 之前调用。
 func (s *ShareMode) SetEnableDesktop(on bool) { s.enableDesktop = on }
 
-// SetAllowPTY 白名单模式下显式开放真终端；必须在 Run 之前调用。
+// SetAllowPTY 显式开放真终端（默认关闭）；必须在 Run 之前调用。
 func (s *ShareMode) SetAllowPTY(on bool) { s.allowPTY = on }
 
 // ensureDaemon 首次 hello 时构造 daemon；后续 hello 仅轮换会话。
@@ -1303,7 +1303,7 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		reg.Register(tools.NewScreenCapture(s.enableDesktop))
 		reg.Register(tools.NewInput(s.enableDesktop))
 		// 真终端（PTY）：设了 --allow-exec 白名单时默认整体禁用，避免经 shell 绕过白名单；--allow-pty 可显式开放。
-		for _, t := range tools.NewPTYTools(tools.PTYDisabled(len(s.sbCfg.AllowExec), s.allowPTY)) {
+		for _, t := range tools.NewPTYTools(tools.PTYDisabled(s.allowPTY)) {
 			reg.Register(t)
 		}
 		d :=agent.NewDaemon(reg, s.client, sess)

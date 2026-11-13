@@ -84,7 +84,7 @@ var ptyIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // 错误码前缀会被 agent.classifyError 或调用方按字符串识别。
 var (
-	errPTYDisabled = errors.New("exec_denied: 被控端设置了 --allow-exec 命令白名单，已禁用真终端（如需开放请在被控端加 --allow-pty）")
+	errPTYDisabled = errors.New("exec_denied: 被控端未启用真终端（默认关闭），如需开放请在被控端加 --allow-pty")
 	errPTYNotFound = errors.New("pty_not_found: 终端会话不存在或已结束")
 )
 
@@ -186,13 +186,14 @@ type ptySpec struct {
 	Rows  uint16
 }
 
-// PTYDisabled 判定真终端是否应被禁用：设了 --allow-exec 白名单时默认禁用（PTY 内的 shell 可绕过白名单），
-// 除非被控端显式加了 --allow-pty。
-func PTYDisabled(allowExecCount int, allowPTY bool) bool {
-	return allowExecCount > 0 && !allowPTY
+// PTYDisabled 判定真终端是否应被禁用：默认禁用，只有被控端显式加了 --allow-pty 才开放。
+// 原因：PTY 是交互式 shell，能执行任意命令，绕过 exec 的 --allow-exec 白名单、--deny-exec 黑名单
+// 和 --root；默认开启会让这些护栏形同虚设。与远程桌面需要 --enable-desktop 显式开启保持一致。
+func PTYDisabled(allowPTY bool) bool {
+	return !allowPTY
 }
 
-// NewPTYManager disabled=true 时所有 pty 工具返回 exec_denied（被控端设了 --allow-exec 白名单）。
+// NewPTYManager disabled=true 时所有 pty 工具返回 exec_denied（被控端未加 --allow-pty）。
 func NewPTYManager(disabled bool) *PTYManager {
 	return &PTYManager{
 		disabled: disabled, sessions: map[string]*ptySession{}, start: startPTY,
