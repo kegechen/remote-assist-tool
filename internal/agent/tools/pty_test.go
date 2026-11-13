@@ -242,7 +242,7 @@ func TestPTYOpenArgValidation(t *testing.T) {
 	}
 }
 
-func TestPTYDisabledByAllowExec(t *testing.T) {
+func TestPTYDisabledByDefault(t *testing.T) {
 	for _, tool := range NewPTYTools(true) {
 		_, err := tool.Run(context.Background(), json.RawMessage(`{"session":"x","cols":10,"rows":10,"data":""}`), &ptyCaptureSink{})
 		if err == nil || !strings.Contains(err.Error(), "exec_denied") {
@@ -251,16 +251,14 @@ func TestPTYDisabledByAllowExec(t *testing.T) {
 	}
 }
 
+// 真终端默认关闭，与 --enable-desktop 保持一致：只有被控端显式加 --allow-pty 才开放。
+// 与是否设置 --allow-exec / --deny-exec 无关——PTY 里的 shell 能绕过 exec 的白/黑名单与 --root。
 func TestPTYDisabledPolicy(t *testing.T) {
-	cases := []struct {
-		n     int
-		allow bool
-		want  bool
-	}{{0, false, false}, {0, true, false}, {2, false, true}, {2, true, false}}
-	for _, c := range cases {
-		if got := PTYDisabled(c.n, c.allow); got != c.want {
-			t.Errorf("PTYDisabled(%d,%v)=%v 期望 %v", c.n, c.allow, got, c.want)
-		}
+	if !PTYDisabled(false) {
+		t.Error("默认（未加 --allow-pty）必须禁用真终端")
+	}
+	if PTYDisabled(true) {
+		t.Error("显式 --allow-pty 后应开放真终端")
 	}
 }
 
