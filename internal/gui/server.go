@@ -691,7 +691,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := mc.Initialize(ctx); err != nil {
 		mc.Close()
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "initialize failed: " + err.Error()})
+		// 总时限在初始化阶段就到点（负载很高/子进程迟迟不应答）：同样按超时/取消归类，不留无 code 的 500
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "initialize failed: " + err.Error(), "code": reasonTimeout, "reason": "连接超时"})
+		case errors.Is(ctx.Err(), context.Canceled):
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "已取消", "code": reasonCanceled, "reason": "已取消"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "initialize failed: " + err.Error()})
+		}
 		return
 	}
 
