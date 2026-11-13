@@ -406,7 +406,7 @@ func platformDesktopOps() *DesktopOps {
 			ms, err := listMonitors()
 			return len(ms), err
 		},
-		Capture: winCapture,
+		Capture: winCaptureAuto,
 		Bounds:  monitorRect,
 		Mouse:   winMouse,
 		Key:     winKey,
@@ -419,4 +419,5 @@ func platformReleaseIdle() {
 	capMu.Lock()
 	capSt.release()
 	capMu.Unlock()
+	dxgiReleaseAll()
 }
