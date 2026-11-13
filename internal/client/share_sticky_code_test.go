@@ -115,22 +115,47 @@ func TestShareReconnectKeepsCodeAndCodeFile(t *testing.T) {
 	}
 }
 
-// relay 重启（丢失全部状态）后 share 重连，用请求复用拿回同一个码；过了原 TTL 也一样。
+// relay 重启后（配置了 --state-dir，密钥落盘）share 重连，凭复用令牌拿回同一个码；过了原 TTL 也一样。
 func TestShareReconnectAfterRelayRestartKeepsCode(t *testing.T) {
 	stubClipboard(t)
-	addr, stop := startPlainRelayAt(t, "", relay.Config{CodeTTL: 30 * time.Millisecond})
+	state := t.TempDir()
+	addr, stop := startPlainRelayAt(t, "", relay.Config{CodeTTL: 30 * time.Millisecond, StateDir: state})
 	s := newTestShare(addr, "")
 	defer s.client.Close()
 	s.reconnectWithBackoff()
 	code := s.GetCode()
+	if s.reuseToken == "" {
+		t.Fatal("新 relay 应下发复用令牌，share 应缓存")
+	}
 
 	time.Sleep(100 * time.Millisecond) // 超过 TTL
 	stop()
 	time.Sleep(100 * time.Millisecond)
-	startPlainRelayAt(t, addr, relay.Config{CodeTTL: 30 * time.Millisecond})
+	startPlainRelayAt(t, addr, relay.Config{CodeTTL: 30 * time.Millisecond, StateDir: state})
 	s.reconnectWithBackoff()
 	if s.GetCode() != code {
-		t.Fatalf("relay 重启后码应保持: %s -> %s", code, s.GetCode())
+		t.Fatalf("relay 重启（落盘密钥）后码应保持: %s -> %s", code, s.GetCode())
+	}
+}
+
+// 默认（无 --state-dir）relay 重启后，原持有者也不能凭旧令牌复用：换新码，且提示讲清原因。
+func TestShareReconnectAfterRelayRestartWithoutStateDirGetsNewCode(t *testing.T) {
+	stubClipboard(t)
+	addr, stop := startPlainRelayAt(t, "", relay.Config{})
+	s := newTestShare(addr, "")
+	defer s.client.Close()
+	s.reconnectWithBackoff()
+	code := s.GetCode()
+	s.client.Close()
+	stop()
+	time.Sleep(100 * time.Millisecond)
+	startPlainRelayAt(t, addr, relay.Config{})
+	s.reconnectWithBackoff()
+	if s.GetCode() == code || s.GetCode() == "" {
+		t.Fatalf("无落盘密钥的 relay 重启后应换新码: %s -> %s", code, s.GetCode())
+	}
+	if n := codeChangeNotice(code, s.GetCode(), s.codeSticky); !strings.Contains(n, "--state-dir") {
+		t.Fatalf("提示应指明 --state-dir: %q", n)
 	}
 }
 
@@ -151,10 +176,12 @@ func TestNewShareProcessGetsNewCode(t *testing.T) {
 	}
 }
 
-// 复用冲突：relay 重启后原码先被别的 share 占了，重连得到新码，code.json 随之更新。
-func TestShareReconnectCodeTakenGetsNewCode(t *testing.T) {
+// 防冒领：relay 重启后，知道泄露的码的另一个 share（没有复用令牌）抢先注册，拿不到该码；
+// 随后原持有者回来仍能拿回原码，协助端连到的是原持有者。
+func TestShareThiefCannotClaimCodeAfterRelayRestart(t *testing.T) {
 	stubClipboard(t)
-	addr, stop := startPlainRelayAt(t, "", relay.Config{})
+	state := t.TempDir()
+	addr, stop := startPlainRelayAt(t, "", relay.Config{StateDir: state})
 	codeFile := filepath.Join(t.TempDir(), "code.json")
 	s := newTestShare(addr, codeFile)
 	defer s.client.Close()
@@ -163,23 +190,23 @@ func TestShareReconnectCodeTakenGetsNewCode(t *testing.T) {
 	s.client.Close()
 	stop()
 	time.Sleep(100 * time.Millisecond)
-	startPlainRelayAt(t, addr, relay.Config{})
+	startPlainRelayAt(t, addr, relay.Config{StateDir: state})
 
-	// 另一个 share 抢先用同样的码注册（构造「码被占」）
+	// 攻击者抢先用泄露的码注册（既无令牌，ClientID 也不同）
 	thief := newTestShare(addr, "")
 	defer thief.client.Close()
 	thief.code = code
 	thief.reconnectWithBackoff()
-	if thief.GetCode() != code {
-		t.Fatalf("前置：空闲的码应被复用，得 %s", thief.GetCode())
+	if thief.GetCode() == code || thief.GetCode() == "" {
+		t.Fatalf("攻击者不得拿到泄露的码，得 %s", thief.GetCode())
 	}
 
 	s.reconnectWithBackoff()
-	if s.GetCode() == code || s.GetCode() == "" {
-		t.Fatalf("码被占时应换新码，得 %s", s.GetCode())
+	if s.GetCode() != code {
+		t.Fatalf("原持有者应拿回原码，得 %s（原 %s）", s.GetCode(), code)
 	}
-	if v, _ := readCodeFile(t, codeFile); v.Code != s.GetCode() {
-		t.Fatalf("code.json 应更新为新码: %+v", v)
+	if v, _ := readCodeFile(t, codeFile); v.Code != code {
+		t.Fatalf("code.json 应仍是原码: %+v", v)
 	}
 }
 
