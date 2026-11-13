@@ -1442,7 +1442,15 @@ async function deskStart(forceLoading){
   if(desk.ac===ac)desk.ac=null;
   if(my===desk.loopId){desk.running=false;if(fail)deskState('error',fail);else if(!connected)deskState('idle','连接已断开，请重新连接对端')}
 }
-function deskAbort(){if(desk.ac){desk.ac.abort();desk.ac=null;desk.loopId++;desk.running=false}}
+function deskAbort(){
+  if(desk.ac){
+    desk.ac.abort();desk.ac=null;desk.loopId++;desk.running=false;
+    // 离开桌面页后画布上还留着最后一帧；再次打开时若直接当成实时画面显示会误导用户（看起来“秒开”）。
+    // 这里清空并回到“加载中”，等真正的新帧到达后才显示画面。
+    const cv=$('#deskCv');if(cv){const c=cv.getContext('2d');c.clearRect(0,0,cv.width,cv.height)}
+    deskState('loading','正在获取画面…');
+  }
+}
 // 画面显示尺寸：适应窗口=按屏幕宽高比缩放到视口内；原始大小=1 屏幕像素对应 1 CSS 像素（可滚动）
 function deskLayout(){
   const view=$('#desk-view'),cv=$('#deskCv');
