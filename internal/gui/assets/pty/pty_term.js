@@ -196,13 +196,24 @@
     if (!term) return;
     term.write('\r\n\x1b[' + (cls || '33') + 'm' + msg + '\x1b[0m\r\n');
   }
+  // 把底层错误翻译成对用户有意义的回退原因（不再笼统说“无 PTY”）
+  function fallbackReason(msg) {
+    msg = msg || '';
+    if (/unknown_tool/.test(msg)) return '对端版本过旧，不支持真终端（缺少 pty_open 工具）。请升级被控端到最新版后重新连接；当前使用命令行模式，不支持 vim/top 等全屏程序。';
+    if (/exec_denied/.test(msg)) return '被控端设置了 --allow-exec 命令白名单，已禁用真终端（shell 可绕过白名单）。如确需真终端，请让被控端加 --allow-pty 重启；当前使用命令行模式，不支持 vim/top 等全屏程序。';
+    if (/pty_unsupported/.test(msg)) return '被控端系统不支持 ConPTY（需要 Windows 10 1809 或更新版本）；当前使用命令行模式，不支持 vim/top 等全屏程序。';
+    if (/找不到可用的 shell|启动 shell 失败/.test(msg)) return '被控端无法启动 shell（' + msg + '）；当前使用命令行模式，不支持 vim/top 等全屏程序。';
+    return '真终端不可用（' + msg + '）；当前使用命令行模式，不支持 vim/top 等全屏程序。';
+  }
   function useExecMode(reason) {
     mode = 'exec';
     state = 'idle';
     var b = termBox();
     if (b) b.classList.remove('pty-on');
+    var note = $('#termNote');
+    if (note) { note.textContent = '命令行模式：' + (reason || '').replace(/[；;。].*$/, ''); note.title = reason || ''; }
     if (typeof termLog === 'function') {
-      termLog('<span class="meta">' + (reason || '对端不支持真终端，已回退到命令行模式') + '</span>');
+      termLog('<span class="err">' + String(reason || '对端不支持真终端，已回退到命令行模式').replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }) + '</span>');
     }
     var inp = $('#termInput'); if (inp && termVisible()) inp.focus();
   }
@@ -265,7 +276,7 @@
     sessionId = '';
     sessionWaiters.splice(0).forEach(function (f) { f(false); });
     if (!gotOutput && errText && shouldFallback(errText)) {
-      useExecMode('真终端不可用（' + errText + '），已回退到命令行模式');
+      useExecMode(fallbackReason(errText));
       return;
     }
     state = 'ended';
@@ -290,7 +301,10 @@
   window.PtyTerm = {
     connected: function () {
       isConnected = true;
-      if (mode === 'exec') mode = ''; // 换了对端/重连：重新探测
+      if (mode === 'exec') {
+        mode = ''; // 换了对端/重连：重新探测
+        var n = $('#termNote'); if (n) { n.textContent = ''; n.title = ''; }
+      }
       if (termVisible()) startSession();
     },
     disconnected: function () {
@@ -303,6 +317,7 @@
       if (term && state !== 'idle') { doFit(); term.focus(); }
       return mode !== 'exec';
     },
+    _fallbackReason: fallbackReason, // 供测试核对各回退原因文案
     _state: function () { return { mode: mode, state: state, id: sessionId, cols: term ? term.cols : 0, rows: term ? term.rows : 0 }; }
   };
 

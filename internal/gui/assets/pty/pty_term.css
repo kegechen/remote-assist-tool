@@ -4,3 +4,4 @@
 #term-box.pty-on #xterm-host{display:block}
 #xterm-host .xterm{height:100%;padding:10px 12px;box-sizing:border-box}
 #xterm-host .xterm-viewport{background-color:transparent !important}
+#term-box.pty-on #term-status{display:none}
