@@ -214,6 +214,20 @@ type InputResult struct {
 	Applied int `json:"applied"`
 }
 
+// inputSem 是进程内唯一的输入注入互斥（容量 1 的信号量，以便等待时响应 ctx 取消）。
+var inputSem = make(chan struct{}, 1)
+
+func lockInput(ctx context.Context) error {
+	select {
+	case inputSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func unlockInput() { <-inputSem }
+
 type InputTool struct {
 	enabled bool
 	ops     *DesktopOps
@@ -261,6 +275,12 @@ func (t *InputTool) Run(ctx context.Context, raw json.RawMessage, _ agent.Stream
 			needBounds = true
 		}
 	}
+	// 整批注入互斥：多个标签/请求并发 input 时，按键、鼠标事件序列不得交错（物理上只有一套键鼠）。
+	// 锁只覆盖校验之后的注入阶段，不会跨越 screen_capture；等锁期间可被 ctx 取消。
+	if err := lockInput(ctx); err != nil {
+		return nil, err
+	}
+	defer unlockInput()
 	var rect image.Rectangle
 	if needBounds {
 		var err error

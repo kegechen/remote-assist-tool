@@ -10,9 +10,11 @@ import (
 	"image/color"
 	"image/jpeg"
 	"math/rand"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeOps 记录所有注入调用，Capture 返回纯色图。
@@ -265,5 +267,56 @@ func TestDesktopToolsLazyBackend(t *testing.T) {
 	}
 	if _, err := sc.Run(context.Background(), nil, nil); err == nil || !strings.Contains(err.Error(), "desktop_disabled") {
 		t.Fatalf("want desktop_disabled, got %v", err)
+	}
+}
+
+// 并发的 input 调用必须整批串行执行：每个调用的事件序列不能与别的调用交错。
+func TestInputConcurrentBatchesNotInterleaved(t *testing.T) {
+	var mu sync.Mutex
+	var seq []string
+	rec := func(s string) {
+		mu.Lock()
+		seq = append(seq, s)
+		mu.Unlock()
+		runtime.Gosched()
+		time.Sleep(200 * time.Microsecond) // 制造交错窗口
+	}
+	ops := &DesktopOps{
+		Bounds: func(int) (image.Rectangle, error) { return image.Rect(0, 0, 100, 100), nil },
+		Mouse: func(kind string, x, y int, b string, d int) error {
+			rec(fmt.Sprintf("m%s", kind))
+			return nil
+		},
+		Key:  func(k string, up bool) error { rec("k" + k); return nil },
+		Text: func(s string) error { rec("t" + s); return nil },
+	}
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			tool := &InputTool{enabled: true, ops: ops} // 不同实例也要互斥（同一块屏幕）
+			args := fmt.Sprintf(`{"events":[{"type":"key_down","key":"B%d"},{"type":"text","text":"B%d"},{"type":"key_up","key":"B%d"},{"type":"click","x":0.5,"y":0.5}]}`, i, i, i)
+			if _, err := tool.Run(context.Background(), json.RawMessage(args), nil); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	// 每批共 3 个键盘/文本调用 + click 的 move/down/up = 6 个记录，批内应连续。
+	const per = 6
+	if len(seq) != n*per {
+		t.Fatalf("记录数=%d 期望 %d", len(seq), n*per)
+	}
+	for b := 0; b < n; b++ {
+		first := seq[b*per]
+		if !strings.HasPrefix(first, "kB") {
+			t.Fatalf("批 %d 起点应是 key_down，得到 %q，序列=%v", b, first, seq)
+		}
+		id := first[2:]
+		if seq[b*per+1] != "tB"+id || seq[b*per+2] != "kB"+id || seq[b*per+3] != "mmove" || seq[b*per+4] != "mdown" || seq[b*per+5] != "mup" {
+			t.Fatalf("批 %d 被交错: %v", b, seq[b*per:b*per+per])
+		}
 	}
 }

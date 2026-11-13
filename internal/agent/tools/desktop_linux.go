@@ -38,22 +38,29 @@ type x11Backend struct {
 
 var x11 = &x11Backend{}
 
+// x11DisplayName 返回要连接的 X 显示名：沿用 DISPLAY，为空（如 ssh 等非图形会话）时兜底常见的本机主显示器 :0。
+func x11DisplayName() string {
+	if d := os.Getenv("DISPLAY"); d != "" {
+		return d
+	}
+	return ":0"
+}
+
 // ensureConn 建立或复用 X 连接；调用方持有 mu。
 func (b *x11Backend) ensureConn() error {
 	if b.conn != nil {
 		return nil
 	}
-	if os.Getenv("DISPLAY") == "" {
-		// ssh 等非图形会话启动时没有 DISPLAY，按常见的本机主显示器兜底。
-		os.Setenv("DISPLAY", ":0")
-	}
-	c, err := xgb.NewConn()
+	// 不修改进程环境：之后启动的子进程（pty 里的 shell、exec 的命令）会继承 DISPLAY，
+	// 兜底值只用于本次连接。
+	display := x11DisplayName()
+	c, err := xgb.NewConnDisplay(display)
 	if err != nil {
 		hint := ""
 		if strings.EqualFold(os.Getenv("XDG_SESSION_TYPE"), "wayland") {
 			hint = "（当前是 Wayland 会话，暂不支持，请切换到 X11 会话）"
 		}
-		return fmt.Errorf("连接 X 显示 %s 失败: %w%s；请在被控用户的图形会话里启动 share，必要时设置 DISPLAY/XAUTHORITY", os.Getenv("DISPLAY"), err, hint)
+		return fmt.Errorf("连接 X 显示 %s 失败: %w%s；请在被控用户的图形会话里启动 share，必要时设置 DISPLAY/XAUTHORITY", display, err, hint)
 	}
 	setup := xproto.Setup(c)
 	scr := setup.DefaultScreen(c)
