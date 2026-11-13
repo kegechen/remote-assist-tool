@@ -124,6 +124,9 @@ button.ghost{height:32px;padding:0 13px}
 #themeMenu .ti[aria-checked=true]{font-weight:600}
 #themeMenu .ti[aria-checked=true] .ck{visibility:visible}
 #fSave{background:var(--ok);color:var(--ok-ink);border-color:transparent}
+#compat{margin-left:auto;display:inline-flex;align-items:center;gap:6px;color:var(--warn);font-size:12px;font-weight:500;white-space:nowrap}
+#compat[hidden]{display:none}
+#compat:not([hidden])+#status{margin-left:0}
 #status{margin-left:auto;display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 13px;border-radius:14px;background:var(--fill);border:1px solid var(--line);color:var(--muted);font-size:12px;font-weight:500}
 #status::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--dim);flex:none}
 #status.ok{background:rgba(var(--ok-rgb),.14);border-color:rgba(var(--ok-rgb),.38);color:var(--ok)}
@@ -341,8 +344,8 @@ main{flex:1;display:flex;min-height:0;min-width:0}
     <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code"></div>
     <div class="hgrp"><span class="lbl">Relay</span><input class="server" id="server" placeholder="host:port"></div>
     <label class="chk"><input type="checkbox" id="noauth" aria-describedby="tipNoauth"><span>NoAuth</span></label><button type="button" class="qm" id="qmNoauth" data-tip="tipNoauth" aria-label="NoAuth 说明" aria-describedby="tipNoauth" aria-expanded="false">?</button>
-    <label class="chk"><input type="checkbox" id="legacy" aria-describedby="tipLegacy"><span>禁止降级</span></label><button type="button" class="qm" id="qmLegacy" data-tip="tipLegacy" aria-label="禁止自动降级说明" aria-describedby="tipLegacy" aria-expanded="false">?</button>
     <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop）">远程桌面</button></div>
+    <span id="compat" hidden><span class="cm-txt">当前为兼容模式连接</span><button type="button" class="qm" id="qmCompat" data-tip="tipCompat" aria-label="兼容模式说明" aria-describedby="tipCompat" aria-expanded="false">?</button></span>
     <button id="status" title="连接详情" disabled>未连接</button>
     <button class="sm" id="themeBtn" title="主题" aria-label="切换主题" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></svg></button>
   </header>
@@ -367,7 +370,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
 </div>
 <div id="connToast" role="status" aria-live="polite" data-state=""><div class="ct-row"><span class="spin" aria-hidden="true"></span><span class="ct-ico" aria-hidden="true">!</span><div><div class="ct-msg" id="connToastMsg"></div><div class="ct-sub" id="connToastSub"></div></div></div><div class="ct-act c"><button type="button" class="sm" id="connCancel">取消连接 (Esc)</button></div><div class="ct-act f"><button type="button" class="sm" id="connLegacyNo">取消</button><button type="button" id="connLegacyOk">以兼容模式继续</button></div></div>
 <div class="tip" id="tipNoauth" role="tooltip"><b>NoAuth（免协助码）</b><br>不输入协助码直接连接。仅当被控端以 share --standalone --no-auth 启动、且网络完全可信（内网）时使用：任何能连到该中继的设备都能控制被控端。</div>
-<div class="tip" id="tipLegacy" role="tooltip"><b>禁止自动降级（高级）</b><br>默认按新版协议 v2 连接；若对端是 0.0.x 旧版，在本机/内网中继上会自动改用 v1 兼容模式重试一次（公网中继上会先询问您）。勾选后永不降级，遇到旧版对端直接报错，更安全。<br>兼容模式会关闭 AAD 绑定、强制密文参数与抗重放，仅限可信网络。</div>
+<div class="tip" id="tipCompat" role="tooltip"><b>兼容模式（协议 v1）</b><br>对端是 0.0.x 旧版，已自动用 v1 兼容模式连接。该模式关闭了 AAD 绑定、强制密文参数与抗重放，仅限可信网络使用。建议升级被控端到新版。</div>
 <div id="conn-info"></div>
 <div id="ctxmenu"></div>
 <div id="themeMenu" role="menu" aria-label="主题"></div>
@@ -385,7 +388,8 @@ let tabs=[],activeTab=null;
 const ICO={dir:'<svg viewBox="0 0 16 16"><path d="M1.8 4.2c0-.7.5-1.2 1.2-1.2h3l1.5 1.7H13c.7 0 1.2.5 1.2 1.2v6c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2z"/></svg>',drv:'<svg viewBox="0 0 16 16"><rect x="1.8" y="8" width="12.4" height="5" rx="1.4"/><path d="M3 8l1.6-4.5c.2-.5.6-.8 1.1-.8h4.6c.5 0 .9.3 1.1.8L13 8"/><path d="M11 10.5h.01"/></svg>',fil:'<svg viewBox="0 0 16 16"><path d="M4 1.8h5.2L12.6 5.2V13c0 .7-.5 1.2-1.2 1.2H4.6c-.7 0-1.2-.5-1.2-1.2V3c0-.7.5-1.2 1.2-1.2z"/><path d="M9 1.9v3.4h3.4"/></svg>'};
 function mkIco(k){const e=document.createElement('span');e.className='ico '+k;e.innerHTML=ICO[k];return e}
 
-function setStatus(ok,text){connected=ok;if(ok&&protoLegacy)text+=' · v1 兼容';status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');status.disabled=!ok;if(!ok)$('#conn-info').style.display='none';renderConnBtn()}
+function setCompat(on){const c=$('#compat');if(!c)return;if(!on){const q=$('#qmCompat'),t=$('#tipCompat');t.style.display='none';q.classList.remove('on');q.setAttribute('aria-expanded','false');q._pin=false}c.hidden=!on}
+function setStatus(ok,text){connected=ok;setCompat(ok&&protoLegacy);status.textContent=text;status.className=ok?'ok':(text==='未连接'?'':'bad');status.disabled=!ok;if(!ok)$('#conn-info').style.display='none';renderConnBtn()}
 // 连接与断开共用一个按钮：连上了它就是「断开」，没连就是「连接」。
 function renderConnBtn(){const b=$('#connect');if(!b)return;
   if(connecting){b.disabled=true;b.className='loading';b.innerHTML='<span class="spin" aria-hidden="true"></span>连接中…';b.setAttribute('aria-busy','true');return}
@@ -395,7 +399,9 @@ const es=new EventSource(withToken('/api/events')); // EventSource 设不了自�
 // 后端广播的全是具名事件（event: xxx，不带 data 字段），而 onmessage 只对带 data 的帧
 // 触发——所以原先那条 onmessage→底部日志框的线永远不会有内容，日志框一直是空的。
 // 日志框已移除：状态归右上角状态灯，值得留痕的（重连/丢失）直接说给终端。
-es.addEventListener('connected',()=>{setStatus(true,'已连接');loadDrives();termOnConnected()});
+es.addEventListener('connected',()=>{setStatus(true,'已连接');loadDrives();termOnConnected();refreshProto()});
+// 自动重连后协议版本可能变化（对端升级后会重新协商为 v2），以后端状态为准刷新兼容模式标识。
+async function refreshProto(){const r=await api('/api/status',{});if(!connected||!r||!r.connected||!r.proto_version)return;protoLegacy=String(r.proto_version)==='1';setCompat(protoLegacy)}
 es.addEventListener('disconnected',()=>{setStatus(false,'已断开');termOnDisconnected()});
 es.addEventListener('reconnecting',()=>{setStatus(false,'重连中...');termLog('<span class="meta">连接断开，正在自动重连...</span>')});
 es.addEventListener('lost',()=>{setStatus(false,'丢失');termLog('<span class="err">自动重连失败，请重新点击连接</span>')});
@@ -520,7 +526,7 @@ es.addEventListener('connect-fallback',()=>{if(connecting)connToastShow('retry',
 
 async function doConnect(allowLegacy){
   if(connecting)return;
-  const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked,noDown=$('#legacy').checked;
+  const code=$('#code').value.trim(),server=$('#server').value.trim(),noauth=$('#noauth').checked;
   const label=connectLabel(server,code);
   const ctrl=new AbortController();connecting={ctrl};
   resetRemoteState(); // 可能换了一台远端，旧缓存一律作废
@@ -530,7 +536,7 @@ async function doConnect(allowLegacy){
   let r;
   try{
     const resp=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Auth-Token':TOKEN},
-      body:JSON.stringify({code,server,no_auth:noauth,no_downgrade:noDown,allow_legacy:!!allowLegacy}),signal:ctrl.signal});
+      body:JSON.stringify({code,server,no_auth:noauth,allow_legacy:!!allowLegacy}),signal:ctrl.signal});
     r=await resp.json();
   }catch(e){r=ctrl.signal.aborted?{ok:false,code:'canceled'}:{ok:false,code:'other',reason:'请求失败',error:String(e)}}
   clearTimeout(timer);connecting=null;renderConnBtn();
@@ -561,7 +567,7 @@ async function doConnect(allowLegacy){
   }
   let msg=r.reason||'连接失败';
   let sub='';
-  if(r.code==='peer_legacy')sub='已勾选「禁止降级」；取消勾选后可自动以兼容模式连接，或升级对端。';
+  if(r.code==='peer_legacy')sub='对端协议版本不兼容，请升级对端到新版。';
   else if(r.code==='bad_code')sub='请核对协助码，并确认被协助端已启动 share。';
   else if(r.code==='timeout'||r.code==='unreachable'||r.code==='refused')sub='请检查中继地址「'+label+'」与网络。';
   connToastShow('error',msg,sub,6000);
