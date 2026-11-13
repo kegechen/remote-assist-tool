@@ -27,7 +27,7 @@ import (
 )
 
 // connectTotalTimeout 一次连接（含最多一次降级重试）的总时限。
-const connectTotalTimeout = 45 * time.Second
+var connectTotalTimeout = 45 * time.Second // 变量仅为便于测试缩短
 
 // Server 是 GUI 的后端：托管前端静态页 + 通过 JSON 把请求转发给 MCP 子进程。
 type Server struct {
@@ -682,10 +682,12 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 取消/被新连接顶替：必须杀掉子进程，否则它还在后台把连接建起来，成为没人管的「幽灵连接」。
+	// 注意区分：用户取消 / 被新连接顶替才算“已取消”；自己的总时限到点（DeadlineExceeded）是超时，
+	// 要走失败分类给出“连接超时”，不能误报成取消。
 	superseded := func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return ctx.Err() != nil || s.connGen != gen
+		return errors.Is(ctx.Err(), context.Canceled) || s.connGen != gen
 	}
 	if err := mc.Initialize(ctx); err != nil {
 		mc.Close()
@@ -716,6 +718,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		s.connected = false
 		s.mu.Unlock()
 		code, reason := classifyConnectError(err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && code != reasonPeerLegacy {
+			// 总时限到点：无论底层错误怎么包装，都归为超时（保持不重试、不降级）
+			code, reason = reasonTimeout, "连接超时"
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"ok": false, "error": "connect failed: " + err.Error(), "code": code, "reason": reason,
 			"needs_confirm": out.NeedsAsk, "attempts": out.Attempts, "server": req.Server,
