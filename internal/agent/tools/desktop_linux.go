@@ -34,6 +34,11 @@ type x11Backend struct {
 	hasRR   bool
 	// 临时借用来输入任意 Unicode 的键码（可有多个）；非空表示映射还没还原。
 	spareKCs []xproto.Keycode
+	// 显示器布局缓存：RandR 查询要 4 次以上往返（每帧 capture+displays 各查一遍约 20~30ms），布局极少变化，缓存 1s
+	monCache   []image.Rectangle
+	monCacheAt time.Time
+	shm        x11Shm
+	shmTried   bool
 }
 
 var x11 = &x11Backend{}
@@ -105,6 +110,9 @@ func (b *x11Backend) checkImageFormat(setup *xproto.SetupInfo, scr *xproto.Scree
 
 // drop 丢弃出错的连接，下次调用重连（X 服务器重启/注销后自动恢复）。
 func (b *x11Backend) drop() {
+	b.monCache = nil
+	b.shmRelease()
+	b.shm, b.shmTried = x11Shm{}, false
 	if b.conn != nil {
 		b.conn.Close()
 		b.conn = nil
@@ -113,6 +121,17 @@ func (b *x11Backend) drop() {
 
 // monitors 返回显示器矩形，主显示器第 0；无 RandR 时退化为整个根窗口。调用方持有 mu。
 func (b *x11Backend) monitors() []image.Rectangle {
+	if b.monCache != nil && time.Since(b.monCacheAt) < monitorCacheTTL {
+		return b.monCache
+	}
+	ms := b.queryMonitors()
+	b.monCache, b.monCacheAt = ms, time.Now()
+	return ms
+}
+
+const monitorCacheTTL = time.Second
+
+func (b *x11Backend) queryMonitors() []image.Rectangle {
 	whole := []image.Rectangle{image.Rect(0, 0, b.width, b.height)}
 	if !b.hasRR {
 		return whole
@@ -192,6 +211,12 @@ func (b *x11Backend) capture(display int) (*image.RGBA, image.Rectangle, error) 
 	}
 	r := ms[display]
 	w, h := r.Dx(), r.Dy()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	// 优先 MIT-SHM（共享内存零拷贝）；不可用时回退核心协议 GetImage
+	if data, err := b.shmGetImage(int16(r.Min.X), int16(r.Min.Y), uint16(w), uint16(h)); err == nil {
+		swizzleToRGBA(img, data, w*4, 2, 1, 0)
+		return img, r, nil
+	}
 	reply, err := xproto.GetImage(b.conn, xproto.ImageFormatZPixmap, xproto.Drawable(b.root),
 		int16(r.Min.X), int16(r.Min.Y), uint16(w), uint16(h), 0xffffffff).Reply()
 	if err != nil {
@@ -201,7 +226,6 @@ func (b *x11Backend) capture(display int) (*image.RGBA, image.Rectangle, error) 
 	if len(reply.Data) < w*h*4 {
 		return nil, r, fmt.Errorf("GetImage 返回数据不足: %d < %d", len(reply.Data), w*h*4)
 	}
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	swizzleToRGBA(img, reply.Data, w*4, 2, 1, 0) // BGRX → RGBA，强制不透明，行块并行
 	return img, r, nil
 }
