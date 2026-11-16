@@ -36,33 +36,44 @@ func computeTiles(img *image.RGBA) *tileGrid {
 	g.hashes = make([]uint64, g.tw*g.th)
 	parallelRows(g.th, 1, func(lo, hi int) {
 		for ty := lo; ty < hi; ty++ {
-			y0, y1 := ty*tileSize, (ty+1)*tileSize
-			if y1 > h {
-				y1 = h
-			}
 			for tx := 0; tx < g.tw; tx++ {
-				x0, x1 := tx*tileSize, (tx+1)*tileSize
-				if x1 > w {
-					x1 = w
-				}
-				var acc uint64 = 1469598103934665603
-				for y := y0; y < y1; y++ {
-					off := y*img.Stride + x0*4
-					acc = (acc ^ hashRow(img.Pix[off:off+(x1-x0)*4])) * 1099511628211
-					acc ^= acc >> 29
-				}
-				g.hashes[ty*g.tw+tx] = acc
+				g.hashes[ty*g.tw+tx] = tileHash(img, tx, ty)
 			}
 		}
 	})
+	g.total = foldTiles(g)
+	return g
+}
+
+// tileHash 计算块 (tx,ty) 的哈希。
+func tileHash(img *image.RGBA, tx, ty int) uint64 {
+	b := img.Bounds()
+	x0, x1 := tx*tileSize, (tx+1)*tileSize
+	y0, y1 := ty*tileSize, (ty+1)*tileSize
+	if x1 > b.Dx() {
+		x1 = b.Dx()
+	}
+	if y1 > b.Dy() {
+		y1 = b.Dy()
+	}
+	var acc uint64 = 1469598103934665603
+	for y := y0; y < y1; y++ {
+		off := y*img.Stride + x0*4
+		acc = (acc ^ hashRow(img.Pix[off:off+(x1-x0)*4])) * 1099511628211
+		acc ^= acc >> 29
+	}
+	return acc
+}
+
+// foldTiles 把各块哈希折叠成整幅哈希（与尺寸相关）。
+func foldTiles(g *tileGrid) uint64 {
 	const prime = 1099511628211
-	sum := uint64(14695981039346656037) ^ uint64(w)<<32 ^ uint64(h)
+	sum := uint64(14695981039346656037) ^ uint64(g.w)<<32 ^ uint64(g.h)
 	for _, v := range g.hashes {
 		sum = (sum ^ v) * prime
 		sum ^= sum >> 29
 	}
-	g.total = sum
-	return g
+	return sum
 }
 
 // changedTiles 返回 a→b 之间哈希不同的块下标集合（两者尺寸须一致）。
@@ -161,4 +172,28 @@ func srcRectToDst(r image.Rectangle, sw, sh, dw, dh int) image.Rectangle {
 // deltaWorth 判断变化区域是否小到值得发增量。
 func deltaWorth(r image.Rectangle, w, h int) bool {
 	return r.Dx()*r.Dy()*100 <= w*h*deltaMaxAreaPct
+}
+
+// computeTilesHinted 在 old（上一幅图像的块哈希）基础上，只重算与 dirty 相交的块。
+func computeTilesHinted(img *image.RGBA, old *tileGrid, dirty image.Rectangle) *tileGrid {
+	b := img.Bounds()
+	if old.w != b.Dx() || old.h != b.Dy() {
+		return computeTiles(img)
+	}
+	d := dirty.Intersect(b)
+	if d.Empty() {
+		return old
+	}
+	g := &tileGrid{w: old.w, h: old.h, tw: old.tw, th: old.th, hashes: append([]uint64(nil), old.hashes...)}
+	tx0, tx1 := d.Min.X/tileSize, (d.Max.X-1)/tileSize
+	ty0, ty1 := d.Min.Y/tileSize, (d.Max.Y-1)/tileSize
+	parallelRows(ty1-ty0+1, 1, func(lo, hi int) {
+		for ty := ty0 + lo; ty < ty0+hi; ty++ {
+			for tx := tx0; tx <= tx1; tx++ {
+				g.hashes[ty*g.tw+tx] = tileHash(img, tx, ty)
+			}
+		}
+	})
+	g.total = foldTiles(g)
+	return g
 }

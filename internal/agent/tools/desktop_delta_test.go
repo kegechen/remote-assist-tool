@@ -86,7 +86,7 @@ func TestDeltaCanvasAlwaysConverges(t *testing.T) {
 		c := newFrameCache()
 		key := frameKey{0, MAXW, 70}
 		dw, dh := scaledSize(W, H, MAXW)
-		seq, _, _, _ := c.checkDelta(key, computeTiles(cur), 0)
+		seq, _, _, _ := c.checkDelta(key, computeTiles(cur), cur, 0)
 		canvas := scaleRect(cur, dw, dh, image.Rect(0, 0, dw, dh))
 		history := []uint64{seq}
 		for step := 0; step < 60; step++ {
@@ -106,7 +106,7 @@ func TestDeltaCanvasAlwaysConverges(t *testing.T) {
 				}
 			}
 			since := history[len(history)-1-r.Intn(min(3, len(history)))]
-			seq, same, reg, ok := c.checkDelta(key, computeTiles(cur), since)
+			seq, same, reg, ok := c.checkDelta(key, computeTiles(cur), cur, since)
 			full := scaleRect(cur, dw, dh, image.Rect(0, 0, dw, dh))
 			switch {
 			case same:
