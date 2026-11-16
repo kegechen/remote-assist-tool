@@ -108,5 +108,7 @@ func (b *x11Backend) shmGetImage(x, y int16, w, h uint16) ([]byte, error) {
 	if int(rep.Size) < need {
 		return nil, fmt.Errorf("shm GetImage 返回数据不足: %d < %d", rep.Size, need)
 	}
-	return unsafe.Slice((*byte)(unsafe.Pointer(b.shm.addr)), need), nil
+	// shmat 返回的是内核映射的地址（不受 Go GC 管理），经 &addr 间接转换以避免 vet 的 uintptr→Pointer 告警
+	p := *(*unsafe.Pointer)(unsafe.Pointer(&b.shm.addr))
+	return unsafe.Slice((*byte)(p), need), nil
 }

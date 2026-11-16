@@ -39,6 +39,7 @@ type x11Backend struct {
 	monCacheAt time.Time
 	shm        x11Shm
 	shmTried   bool
+	dmg        x11Damage
 }
 
 var x11 = &x11Backend{}
@@ -110,6 +111,7 @@ func (b *x11Backend) checkImageFormat(setup *xproto.SetupInfo, scr *xproto.Scree
 
 // drop 丢弃出错的连接，下次调用重连（X 服务器重启/注销后自动恢复）。
 func (b *x11Backend) drop() {
+	b.dmg = x11Damage{}
 	b.monCache = nil
 	b.shmRelease()
 	b.shm, b.shmTried = x11Shm{}, false
@@ -199,13 +201,35 @@ func (b *x11Backend) bounds(display int) (image.Rectangle, error) {
 	return ms[display], nil
 }
 
+var errShortImage = errors.New("GetImage 返回数据不足")
+
+// captureHint 与 capture 相同，另外在单显示器 + XDamage 可用时给出「相对上一幅的变化区域」提示。
+func (b *x11Backend) captureHint(display int) (*image.RGBA, image.Rectangle, *image.RGBA, image.Rectangle, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.ensureConn(); err != nil {
+		return nil, image.Rectangle{}, nil, image.Rectangle{}, err
+	}
+	ms := b.monitors()
+	if display == 0 && len(ms) == 1 && ms[0] == image.Rect(0, 0, b.width, b.height) {
+		if img, prev, dirty, ok := b.captureHinted(ms[0]); ok {
+			return img, ms[0], prev, dirty, nil
+		}
+	}
+	img, r, err := b.captureLocked(display, ms)
+	return img, r, nil, image.Rectangle{}, err
+}
+
 func (b *x11Backend) capture(display int) (*image.RGBA, image.Rectangle, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if err := b.ensureConn(); err != nil {
 		return nil, image.Rectangle{}, err
 	}
-	ms := b.monitors()
+	return b.captureLocked(display, b.monitors())
+}
+
+func (b *x11Backend) captureLocked(display int, ms []image.Rectangle) (*image.RGBA, image.Rectangle, error) {
 	if display < 0 || display >= len(ms) {
 		return nil, image.Rectangle{}, fmt.Errorf("display %d out of range (have %d)", display, len(ms))
 	}
@@ -594,6 +618,7 @@ func platformDesktopOps() *DesktopOps {
 	return &DesktopOps{
 		Displays: x11.displays,
 		Capture:  x11.capture,
+		CaptureHint: x11.captureHint,
 		Bounds:   x11.bounds,
 		Mouse:    x11.mouse,
 		Key:      x11.key,

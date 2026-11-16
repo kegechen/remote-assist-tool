@@ -38,6 +38,9 @@ type DesktopOps struct {
 	Displays func() (int, error)
 	// Capture 抓取指定显示器整屏，返回图像及其在虚拟桌面中的矩形。
 	Capture func(display int) (*image.RGBA, image.Rectangle, error)
+	// CaptureHint 可选：同 Capture，另返回本幅所基于的上一幅图像 prev 及相对 prev 的变化区域 dirty（图像坐标），
+	// 让调用方只重算变化部分的哈希；prev 为 nil 表示没有提示。返回的图像不得被调用方或后端再修改。
+	CaptureHint func(display int) (img *image.RGBA, r image.Rectangle, prev *image.RGBA, dirty image.Rectangle, err error)
 	// Bounds 返回指定显示器在虚拟桌面中的矩形。
 	Bounds func(display int) (image.Rectangle, error)
 	// Mouse kind: move | down | up | wheel；button: left|right|middle；wheel 用 delta（>0 向下滚）。
@@ -132,7 +135,16 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	}
 	tm := newDesktopTrace()
 	began := time.Now()
-	img, rect, err := ops.Capture(a.Display)
+	var (
+		img, prevImg *image.RGBA
+		rect, dirty  image.Rectangle
+		err          error
+	)
+	if ops.CaptureHint != nil {
+		img, rect, prevImg, dirty, err = ops.CaptureHint(a.Display)
+	} else {
+		img, rect, err = ops.Capture(a.Display)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("capture failed: %w", err)
 	}
@@ -148,8 +160,9 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	if t.frames == nil { // 兼容直接构造 ScreenCaptureTool{} 的用法（测试）
 		t.frames = newFrameCache()
 	}
-	grid := computeTiles(img)
-	seq, same, reg, canDelta := t.frames.checkDelta(frameKey{a.Display, a.MaxWidth, a.Quality}, grid, a.Since)
+	fk := frameKey{a.Display, a.MaxWidth, a.Quality}
+	grid := t.frames.gridFor(fk, img, prevImg, dirty)
+	seq, same, reg, canDelta := t.frames.checkDelta(fk, grid, img, a.Since)
 	tm.mark("hash")
 	if same {
 		res, err := json.Marshal(ScreenCaptureResult{
