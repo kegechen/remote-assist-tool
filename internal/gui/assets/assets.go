@@ -1452,6 +1452,10 @@ function deskSanitize(d){
   o.seq=deskInt(d.seq,0,Number.MAX_SAFE_INTEGER,0);
   o.proc_ms=(d.proc_ms==null)?null:deskInt(d.proc_ms,0,3600000,-1);
   o.unchanged=d.unchanged===true;
+  // 增量帧：只是整幅画面里的一块；坐标与整幅尺寸都必须在界内，否则拒绝
+  o.delta=d.delta===true;o.x=deskInt(d.x,0,DESK_MAX_DIM,0);o.y=deskInt(d.y,0,DESK_MAX_DIM,0);
+  o.canvas_w=deskInt(d.canvas_w,0,DESK_MAX_DIM,0);o.canvas_h=deskInt(d.canvas_h,0,DESK_MAX_DIM,0);
+  if(o.delta&&(o.canvas_w<1||o.canvas_h<1||o.x+o.width>o.canvas_w||o.y+o.height>o.canvas_h)){o.delta=false;o.data='';o.bad='对端返回的增量画面区域异常，已拒绝显示'}
   o.data=typeof d.data==='string'?d.data:'';
   if(o.width*o.height>DESK_MAX_PIXELS){o.width=0;o.height=0;o.data='';o.bad='对端返回的画面尺寸异常，已拒绝显示'}
   if(o.data.length>DESK_MAX_B64){o.data='';o.bad='对端返回的画面数据过大，已拒绝显示'}
@@ -1484,7 +1488,7 @@ async function deskStart(forceLoading){
     let w=wSel,q=qSel;
     // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35），很慢时再把宽度压到 800
     if(!qSel){q=[70,50,35][level];if(level>=2)w=Math.min(w,800)}
-    const a={display:+$('#deskDisp').value||0,max_width:w,quality:q};
+    const a={display:+$('#deskDisp').value||0,max_width:w,quality:q,delta:true};
     const key=a.display+'/'+a.max_width+'/'+a.quality;
     if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS)a.since=have.seq;
     return a;
@@ -1516,7 +1520,11 @@ async function deskStart(forceLoading){
     if(!r.ok){fail=deskErrText(r.error);break}
     let d;try{d=deskSanitize(parseMCP(r.result))}catch(e){fail='解析帧失败';break}
     if(d&&d.bad){fail=d.bad;break}
-    const unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
+    let unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
+    // 流水线里较早发出的请求可能比后面的晚到：画布已更新到更新的 seq，迟到的旧帧直接丢弃，避免画面回退
+    if(d&&d.data&&d.seq&&have.seq&&have.key===key&&d.seq<have.seq)unchanged=true;
+    // 增量帧必须叠在尺寸一致、同参数的现有画布上；对不上就放弃增量，下一个请求不带 since 以取整帧
+    if(d&&d.delta&&(!have.seq||have.key!==key||cv.width!==d.canvas_w||cv.height!==d.canvas_h)){have.seq=0;continue}
     if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
     const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
     const net=proc>=0?Math.max(0,rtt-proc):rtt;
@@ -1533,10 +1541,10 @@ async function deskStart(forceLoading){
         const u=deskB64ToBytes(d.data);
         if(!deskFrameOK(deskJpegSize(u))){fail='对端返回的画面尺寸异常，已拒绝显示';break}
         const bm=await createImageBitmap(new Blob([u],{type:'image/jpeg'}));
-        if(d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}
+        if(!d.delta&&d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}
         // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
         if(d.screen_width>0&&d.screen_height>0&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
-        ctx.drawImage(bm,0,0);if(bm.close)bm.close();
+        ctx.drawImage(bm,d.delta?d.x:0,d.delta?d.y:0);if(bm.close)bm.close();
       }catch(e){fail='绘制帧失败: '+e;break}
       // 旧被控端不回 seq：have.seq 保持 0，永远不会带 since，行为与改造前一致
       if(d.seq){have.seq=d.seq;have.key=key;have.at=performance.now()}

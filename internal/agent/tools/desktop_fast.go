@@ -49,39 +49,56 @@ func scaleToWidth(src *image.RGBA, maxW int) *image.RGBA {
 	if sw <= maxW || sw == 0 {
 		return src
 	}
-	dw := maxW
-	dh := sh * dw / sw
+	dw, dh := scaledSize(sw, sh, maxW)
+	return scaleRect(src, dw, dh, image.Rect(0, 0, dw, dh))
+}
+
+// scaledSize 返回把 sw x sh 缩到宽度 maxW 后的尺寸（与 scaleToWidth 一致）；不需要缩小时原样返回。
+func scaledSize(sw, sh, maxW int) (int, int) {
+	if sw <= maxW || sw == 0 {
+		return sw, sh
+	}
+	dh := sh * maxW / sw
 	if dh < 1 {
 		dh = 1
 	}
-	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
-	xb := make([]int, dw+1) // 目标列 dx 对应源列 [xb[dx], xb[dx+1])
-	for dx := 0; dx <= dw; dx++ {
-		xb[dx] = dx * sw / dw
+	return maxW, dh
+}
+
+// scaleRect 把 src 按 dw x dh 的目标尺寸做区域平均缩放，只计算目标矩形 r（目标坐标）对应的像素，
+// 返回 r 大小的图像。每个目标像素只取决于它自己的源块，所以区域结果与整幅缩放后裁剪逐像素一致。
+func scaleRect(src *image.RGBA, dw, dh int, r image.Rectangle) *image.RGBA {
+	sb := src.Bounds()
+	sw, sh := sb.Dx(), sb.Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+	xb := make([]int, r.Dx()+1) // 目标列 r.Min.X+i 对应源列 [xb[i], xb[i+1])
+	for i := 0; i <= r.Dx(); i++ {
+		xb[i] = (r.Min.X + i) * sw / dw
 	}
-	parallelRows(dh, 16, func(lo, hi int) {
-		for dy := lo; dy < hi; dy++ {
+	parallelRows(r.Dy(), 16, func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			dy := r.Min.Y + i
 			y0, y1 := dy*sh/dh, (dy+1)*sh/dh
 			if y1 <= y0 {
 				y1 = y0 + 1
 			}
-			o := dy * dst.Stride
-			for dx := 0; dx < dw; dx++ {
+			o := i * dst.Stride
+			for dx := 0; dx < r.Dx(); dx++ {
 				x0, x1 := xb[dx], xb[dx+1]
 				if x1 <= x0 {
 					x1 = x0 + 1
 				}
-				var r, g, b uint32
+				var rr, g, bb uint32
 				for y := y0; y < y1; y++ {
 					p := src.Pix[y*src.Stride+x0*4 : y*src.Stride+x1*4]
-					for i := 0; i+3 < len(p); i += 4 {
-						r += uint32(p[i])
-						g += uint32(p[i+1])
-						b += uint32(p[i+2])
+					for k := 0; k+3 < len(p); k += 4 {
+						rr += uint32(p[k])
+						g += uint32(p[k+1])
+						bb += uint32(p[k+2])
 					}
 				}
 				cnt := uint32((y1 - y0) * (x1 - x0))
-				dst.Pix[o], dst.Pix[o+1], dst.Pix[o+2], dst.Pix[o+3] = uint8(r/cnt), uint8(g/cnt), uint8(b/cnt), 255
+				dst.Pix[o], dst.Pix[o+1], dst.Pix[o+2], dst.Pix[o+3] = uint8(rr/cnt), uint8(g/cnt), uint8(bb/cnt), 255
 				o += 4
 			}
 		}

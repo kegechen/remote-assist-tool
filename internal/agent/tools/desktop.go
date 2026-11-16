@@ -57,6 +57,8 @@ type ScreenCaptureArgs struct {
 	// Since 上一帧返回的 seq（可选）。画面与编码参数都没变时只回 {unchanged:true,seq}，不编码不传 JPEG。
 	// 旧版调用方不传，行为不变。
 	Since uint64 `json:"since,omitempty"`
+	// Delta 允许只返回相对 since 变化的区域（增量帧）。旧版调用方不传，永远收到整帧。
+	Delta bool `json:"delta,omitempty"`
 }
 
 type ScreenCaptureResult struct {
@@ -70,6 +72,12 @@ type ScreenCaptureResult struct {
 	// 以下为可选新增字段，旧前端忽略即可：
 	Seq       uint64 `json:"seq,omitempty"`       // 画面内容版本号，下次请求可作为 since 带回
 	Unchanged bool   `json:"unchanged,omitempty"` // true 表示与 since 对应的帧完全一致，无 data
+	// 增量帧：Delta=true 时 Data 只是整幅画面里 (X,Y) 起、Width x Height 的一块，整幅尺寸为 CanvasW x CanvasH。
+	Delta   bool `json:"delta,omitempty"`
+	X       int  `json:"x,omitempty"`
+	Y       int  `json:"y,omitempty"`
+	CanvasW int  `json:"canvas_w,omitempty"`
+	CanvasH int  `json:"canvas_h,omitempty"`
 	ProcMS    int    `json:"proc_ms"`             // 被控端处理耗时（抓屏+缩放+编码），前端据此把它从网络时延里剔除
 }
 
@@ -140,7 +148,8 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	if t.frames == nil { // 兼容直接构造 ScreenCaptureTool{} 的用法（测试）
 		t.frames = newFrameCache()
 	}
-	seq, same := t.frames.check(frameKey{a.Display, a.MaxWidth, a.Quality}, frameHash(img), a.Since)
+	grid := computeTiles(img)
+	seq, same, reg, canDelta := t.frames.checkDelta(frameKey{a.Display, a.MaxWidth, a.Quality}, grid, a.Since)
 	tm.mark("hash")
 	if same {
 		res, err := json.Marshal(ScreenCaptureResult{
@@ -149,6 +158,27 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 		})
 		tm.flush(len(res))
 		return res, err
+	}
+	if a.Delta && canDelta {
+		sw, sh := img.Bounds().Dx(), img.Bounds().Dy()
+		dw, dh := scaledSize(sw, sh, a.MaxWidth)
+		if dr := srcRectToDst(reg, sw, sh, dw, dh); !dr.Empty() && deltaWorth(dr, dw, dh) {
+			part := scaleRect(img, dw, dh, dr)
+			tm.mark("scale")
+			data, err := encodeJPEGCapped(part, a.Quality, desktopMaxJPEGBytes)
+			if err != nil {
+				return nil, err
+			}
+			tm.mark("jpeg")
+			res, err := json.Marshal(ScreenCaptureResult{
+				Format: "jpeg", Width: dr.Dx(), Height: dr.Dy(), ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(),
+				Displays: n, Data: data, Seq: seq, ProcMS: int(time.Since(began).Milliseconds()),
+				Delta: true, X: dr.Min.X, Y: dr.Min.Y, CanvasW: dw, CanvasH: dh,
+			})
+			tm.mark("json")
+			tm.flush(len(res))
+			return res, err
+		}
 	}
 	out := scaleToWidth(img, a.MaxWidth)
 	tm.mark("scale")

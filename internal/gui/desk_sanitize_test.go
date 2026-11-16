@@ -39,7 +39,7 @@ func TestDeskPeerDataIsSanitized(t *testing.T) {
 	}
 
 	// 4) 画布尺寸只在合法时赋值
-	if !strings.Contains(html, "if(d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}") {
+	if !strings.Contains(html, "if(!d.delta&&d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}") {
 		t.Error("canvas 宽高赋值前必须确认是净化后的合法正数")
 	}
 
