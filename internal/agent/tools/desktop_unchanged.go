@@ -65,9 +65,10 @@ type frameKey struct {
 }
 
 type frameState struct {
-	hash uint64
-	key  frameKey
-	seq  uint64
+	hash    uint64
+	key     frameKey
+	seq     uint64
+	tracker *tileTracker // 块级变化记录，供增量帧使用
 }
 
 // frameCache 每个显示器缓存最近一次的哈希、参数与 seq。
@@ -94,4 +95,28 @@ func (c *frameCache) check(k frameKey, hash, since uint64) (seq uint64, unchange
 	c.next++
 	c.last[k.display] = &frameState{hash: hash, key: k, seq: c.next}
 	return c.next, false
+}
+
+// checkDelta 与 check 同义，另外维护块级变化记录：
+// 返回 region/delta=true 表示对端（持有 since 对应的画面）只需要源图里 region 这块区域的新内容。
+func (c *frameCache) checkDelta(k frameKey, g *tileGrid, since uint64) (seq uint64, unchanged bool, region image.Rectangle, delta bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.last[k.display]
+	if st != nil && st.hash == g.total && st.key == k {
+		if since != 0 && since == st.seq {
+			return st.seq, true, image.Rectangle{}, false
+		}
+		region, delta = st.tracker.regionSince(since)
+		return st.seq, false, region, delta
+	}
+	c.next++
+	if st == nil || st.key != k {
+		st = &frameState{key: k, tracker: &tileTracker{}}
+		c.last[k.display] = st
+	}
+	st.hash, st.seq = g.total, c.next
+	st.tracker.push(c.next, g)
+	region, delta = st.tracker.regionSince(since)
+	return c.next, false, region, delta
 }
