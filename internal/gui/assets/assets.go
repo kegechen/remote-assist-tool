@@ -1451,6 +1451,7 @@ function deskSanitize(d){
   o.seq=deskInt(d.seq,0,Number.MAX_SAFE_INTEGER,0);
   o.proc_ms=(d.proc_ms==null)?null:deskInt(d.proc_ms,0,3600000,-1);
   o.unchanged=d.unchanged===true;
+  o.waited=d.waited===true;o.wait_ms=deskInt(d.wait_ms,0,10000,0);
   // 增量帧：只是整幅画面里的一块；坐标与整幅尺寸都必须在界内，否则拒绝
   o.delta=d.delta===true;o.x=deskInt(d.x,0,DESK_MAX_DIM,0);o.y=deskInt(d.y,0,DESK_MAX_DIM,0);
   o.canvas_w=deskInt(d.canvas_w,0,DESK_MAX_DIM,0);o.canvas_h=deskInt(d.canvas_h,0,DESK_MAX_DIM,0);
@@ -1472,6 +1473,8 @@ function deskFetch(args,sig){const t0=performance.now();const key=args.display+'
 //  - 画面无变化不重复传：请求带上一帧的 seq 作 since，被控端发现画面和参数都没变就只回 {unchanged:true}，
 //    前端跳过解码与绘制；静止一阵后降低请求频率（有鼠标键盘操作立即恢复），每 30 秒强制取一次完整帧兜底。
 const DESK_KEYFRAME_MS=30000;
+// 长轮询：带 since 的请求让被控端在画面没变时最多等这么久，变了立即返回（省掉空轮询的往返与间隔，降延迟）
+const DESK_WAIT_MS=800;
 async function deskStart(forceLoading){
   if(desk.running)return;
   if(!connected){deskState('idle','尚未连接对端：请先在顶部输入协助码并点击「连接」');return}
@@ -1482,16 +1485,19 @@ async function deskStart(forceLoading){
   // ema：网络时延；pema：被控端处理耗时（-1 表示对端没有回传）；have：最近一次绘制的完整帧；still：连续“未变化”次数
   let ema=0,pema=-1,level=0,lastStart=0,inflight=[],fail=null,lastStat=0,still=0;
   const have={seq:0,key:'',at:0};
+  // sharp：画面静止后升到高画质（增量帧很小，高画质几乎不增加带宽）；链路变差(level>0)或手动选画质时关闭
+  let sharp=false,longPoll=false;
   const params=()=>{
     const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
     let w=wSel,q=qSel;
-    // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35），很慢时再把宽度压到 800
-    if(!qSel){q=[70,50,35][level];if(level>=2)w=Math.min(w,800)}
+    // 画质“自动”：按链路档位取质量（好 85 / 慢 60 / 很慢 40；画面静止后升到 95），很慢时再把宽度压到 800
+    if(!qSel){q=[85,60,40][level];if(sharp&&level===0)q=95;if(level>=2)w=Math.min(w,800)}
     const a={display:+$('#deskDisp').value||0,max_width:w,quality:q,delta:true};
     const key=a.display+'/'+a.max_width+'/'+a.quality;
-    if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS)a.since=have.seq;
+    if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS){a.since=have.seq;a.wait=DESK_WAIT_MS}
     return a;
   };
+  const qSel_=()=>!!+$('#deskQ').value;
   const issue=()=>{lastStart=performance.now();inflight.push(deskFetch(params(),ac.signal))};
   const sleep=ms=>new Promise(res=>setTimeout(res,ms));
   while(my===desk.loopId&&connected&&activeTab==='desk'){
@@ -1499,7 +1505,7 @@ async function deskStart(forceLoading){
     let interval=1000/(auto?30:fpsSel);
     // 静止且近期没有操作：放慢轮询，省被控端 CPU（每次轮询仍要抓屏+哈希）；一有操作或画面变化立即恢复
     const quiet=still>=8&&performance.now()-(desk.lastInput||0)>1500;
-    if(quiet)interval=Math.max(interval,still>=40?200:100);
+    if(quiet&&!longPoll)interval=Math.max(interval,still>=40?200:100);
     let depth=1;
     if(auto&&!quiet&&level<2){depth=2;if(level===0&&pema>0)depth=Math.max(1,Math.min(3,Math.ceil((ema+pema)/pema)))}
     // 补足在途请求；相邻两次请求至少间隔 interval/depth，避免一次性打出两个相同的帧。
@@ -1526,14 +1532,16 @@ async function deskStart(forceLoading){
     if(d&&d.delta&&(!have.seq||have.key!==key||cv.width!==d.canvas_w||cv.height!==d.canvas_h)){have.seq=0;continue}
     if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
     const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
-    const net=proc>=0?Math.max(0,rtt-proc):rtt;
+    const net=proc>=0?Math.max(0,rtt-proc-(d.wait_ms||0)):Math.max(0,rtt-(d.wait_ms||0));
+    longPoll=d.waited===true;
     if(proc>=0)pema=pema<0?proc:pema*0.8+proc*0.2;
     if(anyAuto){
       ema=ema?ema*0.8+net*0.2:net;
       if(ema>900)level=2;else if(ema>400)level=Math.max(level,1);else if(ema<150)level=0;
       else if(ema<300&&level===2)level=1;
     }else{ema=net;level=0}
-    if(unchanged){still++}
+    if(level>0||qSel_()){sharp=false}
+    if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
     else{
       still=0;
       try{
