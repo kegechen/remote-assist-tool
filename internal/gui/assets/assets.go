@@ -1470,6 +1470,7 @@ function deskFetch(args,sig){const t0=performance.now();const key=args.display+'
 const DESK_KEYFRAME_MS=30000;
 // 长轮询：带 since 的请求让被控端在画面没变时最多等这么久，变了立即返回（省掉空轮询的往返与间隔，降延迟）
 const DESK_WAIT_MS=800;
+const DESK_DBG=/[?&]dbg=1(&|$)/.test(location.search);
 async function deskStart(forceLoading){
   if(desk.running)return;
   if(!connected){deskState('idle','尚未连接对端：请先在顶部输入协助码并点击「连接」');return}
@@ -1539,8 +1540,8 @@ async function deskStart(forceLoading){
       else if(ema<300&&level===2)level=1;
     }else{ema=net;level=0}
     if(level>0||qSel_()){sharp=false}
-    // 调试出口：最近 200 帧的往返/处理/网络/ema/档位/在途数，页面控制台读取 window.__deskDbg，不影响功能
-    (window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift();
+    // 调试出口：仅地址带 ?dbg=1 时记录最近 200 帧的往返/处理/网络/ema/档位/在途数到 window.__deskDbg；平时不产生任何对象
+    if(DESK_DBG)(window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift();
     if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
     else{
       still=0;
