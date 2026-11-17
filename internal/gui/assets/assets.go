@@ -1490,8 +1490,8 @@ async function deskStart(forceLoading){
   const params=()=>{
     const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
     let w=wSel,q=qSel;
-    // 画质“自动”：按链路档位取质量（好 85 / 慢 60 / 很慢 40；画面静止后升到 95），很慢时再把宽度压到 800
-    if(!qSel){q=[85,60,40][level];if(sharp&&level===0)q=95;if(level>=2)w=Math.min(w,800)}
+    // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35，与上游一致，首帧不变慢；画面静止后升到 95），很慢时再把宽度压到 800
+    if(!qSel){q=[70,50,35][level];if(sharp&&level===0)q=95;if(level>=2)w=Math.min(w,800)}
     const a={display:+$('#deskDisp').value||0,max_width:w,quality:q,delta:true};
     const key=a.display+'/'+a.max_width+'/'+a.quality;
     if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS){a.since=have.seq;a.wait=DESK_WAIT_MS}
