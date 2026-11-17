@@ -1486,7 +1486,7 @@ async function deskStart(forceLoading){
   let ema=0,pema=-1,level=0,lastStart=0,inflight=[],fail=null,lastStat=0,still=0;
   const have={seq:0,key:'',at:0};
   // sharp：画面静止后升到高画质（增量帧很小，高画质几乎不增加带宽）；链路变差(level>0)或手动选画质时关闭
-  let sharp=false,longPoll=false;
+  let sharp=false,longPoll=false,samples=0,lastWait=0;
   const params=()=>{
     const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
     let w=wSel,q=qSel;
@@ -1508,6 +1508,7 @@ async function deskStart(forceLoading){
     if(quiet&&!longPoll)interval=Math.max(interval,still>=40?200:100);
     let depth=1;
     if(auto&&!quiet&&level<2){depth=2;if(level===0&&pema>0)depth=Math.max(1,Math.min(3,Math.ceil((ema+pema)/pema)))}
+    if(longPoll&&lastWait>=60)depth=1; // 长轮询在空等：多发只会收到重复响应；画面持续变化(几乎不用等)时再恢复流水线
     // 补足在途请求；相邻两次请求至少间隔 interval/depth，避免一次性打出两个相同的帧。
     // 已有在途请求时，等待间隔与“最早的请求返回”二者先到者处理，保证第 2、3 路真的能发出去。
     if(inflight.length<depth){
@@ -1533,14 +1534,18 @@ async function deskStart(forceLoading){
     if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
     const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
     const net=proc>=0?Math.max(0,rtt-proc-(d.wait_ms||0)):Math.max(0,rtt-(d.wait_ms||0));
-    longPoll=d.waited===true;
+    longPoll=d.waited===true;lastWait=d.wait_ms||0;
     if(proc>=0)pema=pema<0?proc:pema*0.8+proc*0.2;
-    if(anyAuto){
+    samples++;
+    if(samples<=2){/* 冷启动样本：被控端首次抓屏初始化、连接初期背景请求都会让它异常大，不据此降质 */}
+    else if(anyAuto){
       ema=ema?ema*0.8+net*0.2:net;
       if(ema>900)level=2;else if(ema>400)level=Math.max(level,1);else if(ema<150)level=0;
       else if(ema<300&&level===2)level=1;
     }else{ema=net;level=0}
     if(level>0||qSel_()){sharp=false}
+    // 调试出口：最近 200 帧的往返/处理/网络/ema/档位/在途数，页面控制台读取 window.__deskDbg，不影响功能
+    (window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift();
     if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
     else{
       still=0;
