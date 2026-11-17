@@ -543,7 +543,7 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStatus 返回当前连接的稳定元数据，并通过一次小型远端调用测量当前通道 RTT。
-// process_list 在旧 share 上也存在，因此连接 0.0.5 时仍能显示延迟。
+// 延迟探针优先用 stat（轻量），回退 process_list（旧 share 也有），因此连接 0.0.5 时仍能显示延迟。
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	client := s.client
@@ -565,7 +565,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	started := time.Now()
-	_, err := client.CallTool(ctx, "process_list", map[string]any{"max_count": 1})
+	// 延迟探针用 stat：枚举进程在部分 Windows 机器上要 9~30 秒（安全软件拖慢），会把连接后的第一帧一起拖慢。
+	// stat 是最基础的文件工具，各版本 share 都有；万一不可用再回退 process_list（旧 share 兼容）。
+	_, err := client.CallTool(ctx, "stat", map[string]any{"path": "."})
+	if err != nil && ctx.Err() == nil {
+		_, err = client.CallTool(ctx, "process_list", map[string]any{"max_count": 1})
+	}
 	if err == nil {
 		latency := time.Since(started).Milliseconds()
 		if latency < 1 {
