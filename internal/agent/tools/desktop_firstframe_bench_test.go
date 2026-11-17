@@ -3,12 +3,16 @@ package tools
 import (
 	"image"
 	"math/rand"
+	"os"
 	"testing"
 	"time"
 )
 
 // 纯 CPU 基准（不碰屏幕）：首帧服务端的计算开销，整帧哈希 vs 块哈希，及 q70/q85 的 JPEG 编码。
 func TestFirstFrameCPUCost(t *testing.T) {
+	if os.Getenv("RD_BENCH") == "" {
+		t.Skip("基准：设置 RD_BENCH=1 才运行（只打印耗时，不做断言）")
+	}
 	r := rand.New(rand.NewSource(3))
 	img := image.NewRGBA(image.Rect(0, 0, 1920, 1080))
 	// 近似桌面：大面积平色 + 一些噪点文字区域
