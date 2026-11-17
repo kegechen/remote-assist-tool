@@ -91,7 +91,7 @@ header input.server:focus,#treePath:focus,#grepPattern:focus,#grepRoot:focus{bor
 ::placeholder{color:var(--dim);opacity:1}
 .codebox{display:inline-flex;align-items:center;cursor:text;background:var(--field);border:1px solid var(--line);border-radius:var(--r-md);padding:0 10px;height:32px;transition:border-color .15s,box-shadow .15s,opacity .15s}
 .codebox:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-header .codebox input.cseg{width:15.5ch;background:transparent;border:0;outline:0;padding:0;text-align:left;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
+header .codebox input.cseg{width:calc(14*(1ch + .08em) + 6px);background:transparent;border:0;outline:0;padding:0;text-align:left;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
 header .codebox input.cseg::placeholder{color:var(--dim);letter-spacing:.08em}
 .codebox.off,.codebox.off:focus-within{opacity:.4;border-color:var(--line);box-shadow:none}
 .codebox.off input.cseg{cursor:not-allowed}
