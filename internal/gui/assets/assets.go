@@ -89,10 +89,9 @@ header input.server,#treePath,#grepPattern,#grepRoot{background:var(--field);bor
 header input.server{width:170px}
 header input.server:focus,#treePath:focus,#grepPattern:focus,#grepRoot:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 ::placeholder{color:var(--dim);opacity:1}
-.codebox{display:inline-flex;align-items:center;gap:3px;background:var(--field);border:1px solid var(--line);border-radius:var(--r-md);padding:0 10px;height:32px;transition:border-color .15s,box-shadow .15s,opacity .15s}
+.codebox{display:inline-flex;align-items:center;cursor:text;background:var(--field);border:1px solid var(--line);border-radius:var(--r-md);padding:0 10px;height:32px;transition:border-color .15s,box-shadow .15s,opacity .15s}
 .codebox:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.codebox i{color:var(--dim);font-style:normal;user-select:none}
-header .codebox input.cseg{width:5.2ch;background:transparent;border:0;outline:0;padding:0;text-align:center;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
+header .codebox input.cseg{width:15.5ch;background:transparent;border:0;outline:0;padding:0;text-align:left;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
 header .codebox input.cseg::placeholder{color:var(--dim);letter-spacing:.08em}
 .codebox.off,.codebox.off:focus-within{opacity:.4;border-color:var(--line);box-shadow:none}
 .codebox.off input.cseg{cursor:not-allowed}
@@ -342,7 +341,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
 <div id="app">
   <header>
     <div class="brand"><svg viewBox="0 0 28 28" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--brand1)"/><stop offset="1" style="stop-color:var(--brand2)"/></linearGradient></defs><rect x="1" y="1" width="26" height="26" rx="8" fill="url(#lg)" fill-opacity=".22" stroke="url(#lg)" stroke-width="1.4"/><path d="M8 10.5h12v7H8z" fill="none" stroke="url(#lg)" stroke-width="1.6" stroke-linejoin="round"/><path d="M11.5 20.5h5" stroke="url(#lg)" stroke-width="1.6" stroke-linecap="round"/></svg><span class="bname">Remote Assist</span></div>
-    <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code"></div>
+    <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：直接输入或粘贴整串，自动按 4 位加“-”（也可粘贴 协助码@host:port）"><input class="cseg" id="codeInput" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="协助码" placeholder="XXXX-XXXX-XXXX"></span><input type="hidden" id="code"></div>
     <div class="hgrp"><span class="lbl">中转地址</span><input class="server" id="server" placeholder="host:port" title="中转服务地址，如 127.0.0.1:28443。留空使用默认中转；填过的地址连接成功后会被记住"></div>
     <label class="chk"><input type="checkbox" id="noauth" aria-describedby="tipNoauth"><span>NoAuth</span></label><button type="button" class="qm" id="qmNoauth" data-tip="tipNoauth" aria-label="NoAuth 说明" aria-describedby="tipNoauth" aria-expanded="false">?</button>
     <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop，且在已登录的图形会话中运行）">远程桌面</button></div>
@@ -477,53 +476,49 @@ status.onclick=e=>{e.stopPropagation();const panel=$('#conn-info');if(panel.styl
 $('#conn-info').onclick=e=>e.stopPropagation();
 document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
 
-// ========== 协助码分段输入 ==========
-// 三格各 4 位；隐藏的 #code 始终是数据源（12 位无分隔大写 或 10 位大小写混合（旧版公网中转），或粘贴的 code@host:port 原串）。
+// ========== 协助码输入 ==========
+// 一个输入框：输入/粘贴时自动按 4 位加“-”显示（XXXX-XXXX-XXXX）。隐藏的 #code 始终是数据源：
+// 无分隔的码（12 位全大写；旧版公网中转的 10 位大小写混合码保持原样），或粘贴的 code@host:port 原串。
+// 支持 Ctrl+A 全选、点输入框任意处聚焦（点框内空白处光标落在末尾，继续填写）、中间插入/删除后光标位置保持。
 (function(){
-  const segs=Array.from(document.querySelectorAll('#codeBox .cseg')),hid=$('#code');
-  // 保留大小写：旧版公网中转发 10 位大小写混合码（大小写敏感）；本版中转的 12 位码全大写，输入小写时同步转大写
+  const inp=$('#codeInput'),hid=$('#code'),box=$('#codeBox');
   const clean=s=>String(s||'').replace(/[^A-Za-z0-9]/g,'');
+  // 12 位码全大写（本版中转）；其他长度（旧版中转的 10 位混合码）保持用户输入的大小写
   const norm=s=>s.length===12?s.toUpperCase():s;
+  const group=s=>s.replace(/(.{4})(?=.)/g,'$1-');
   let raw=''; // 非空表示 #code 保留粘贴的原串（含 @host:port）
-  function sync(){hid.value=raw||norm(segs.map(s=>s.value).join(''))}
-  // 从第 start 格开始铺满字符，返回应聚焦的格序号与光标位置
-  function fill(str,start){
-    let i=start,pos=0;
-    for(let k=start;k<segs.length;k++)segs[k].value='';
-    while(str&&i<segs.length){const part=str.slice(0,4);segs[i].value=part;str=str.slice(4);pos=part.length;if(str&&i<segs.length-1)i++;else break}
-    return{i,pos};
-  }
-  function focusAt(i,pos){const s=segs[i];s.focus();const p=pos==null?s.value.length:pos;s.setSelectionRange(p,p)}
-  segs.forEach((s,idx)=>{
-    s.addEventListener('input',()=>{
-      raw='';
-      const v=clean(s.value);
-      if(v.length>4){const r=fill(v,idx);focusAt(r.i,r.pos)}
-      else{s.value=v;if(v.length===4&&idx<2&&s.selectionStart>=4)focusAt(idx+1,0)}
-      sync();
-    });
-    s.addEventListener('keydown',e=>{
-      if(e.isComposing)return;
-      if(e.key==='Enter'){e.preventDefault();if(!connected)$('#connect').click();return}
-      if(e.key==='-'||e.key==='_'||e.key===' '){e.preventDefault();if(s.value.length>0&&idx<2)focusAt(idx+1,0);return} // 空格里的分隔符忽略：敲满 4 位已自动跳格，再按 - 不能多跳一格
-      const atStart=s.selectionStart===0&&s.selectionEnd===0,atEnd=s.selectionStart===s.value.length&&s.selectionEnd===s.value.length;
-      if(e.key==='Backspace'&&atStart&&idx>0){e.preventDefault();const p=segs[idx-1];p.value=p.value.slice(0,-1);raw='';sync();focusAt(idx-1);return}
-      if(e.key==='ArrowLeft'&&atStart&&idx>0){e.preventDefault();focusAt(idx-1);return}
-      if(e.key==='ArrowRight'&&atEnd&&idx<2){e.preventDefault();focusAt(idx+1,0)}
-    });
-    s.addEventListener('paste',e=>{
-      e.preventDefault();
-      const t=(e.clipboardData||window.clipboardData).getData('text').trim();
-      const at=t.indexOf('@'),body=clean(at>=0?t.slice(0,at):t);
-      const r=fill(body,body.length>=12?0:idx);
-      raw=at>=0?t:'';
-      focusAt(r.i,r.pos);sync();
-    });
+  function sync(){hid.value=raw||norm(clean(inp.value))}
+  inp.addEventListener('input',()=>{
+    const v=inp.value;
+    if(v.indexOf('@')>=0){raw=v.trim();hid.value=raw;return} // 带 @host:port 的原串：不重排
+    raw='';
+    const pos=inp.selectionStart==null?v.length:inp.selectionStart;
+    const before=clean(v.slice(0,pos)).length; // 光标之前的有效字符数
+    const c=norm(clean(v).slice(0,12));
+    const out=group(c);
+    let p=0,n=0;
+    while(p<out.length&&n<Math.min(before,c.length)){if(out[p]!=='-')n++;p++}
+    if(out!==v)inp.value=out;
+    inp.setSelectionRange(p,p);
+    sync();
   });
-  // 外部直接改 #code.value 后可派发 input 事件让三格跟随
-  hid.addEventListener('input',()=>{const t=hid.value;const at=t.indexOf('@');fill(clean(at>=0?t.slice(0,at):t),0);raw=at>=0?t:''});
+  inp.addEventListener('keydown',e=>{
+    if(e.isComposing)return;
+    if(e.key==='Enter'){e.preventDefault();if(!connected)$('#connect').click()}
+  });
+  // 点输入框以外的框内区域（内边距）也聚焦，并把光标放到末尾：空则从头填，有内容则继续填
+  box.addEventListener('mousedown',e=>{
+    if(e.target===inp||inp.disabled)return;
+    e.preventDefault();inp.focus();inp.setSelectionRange(inp.value.length,inp.value.length);
+  });
+  // 外部直接改 #code.value 后可派发 input 事件让输入框跟随
+  hid.addEventListener('input',()=>{
+    const t=hid.value;
+    if(t.indexOf('@')>=0){raw=t;inp.value=t}
+    else{raw='';inp.value=group(norm(clean(t).slice(0,12)))}
+  });
   const na=$('#noauth');
-  function syncNA(){const off=na.checked;segs.forEach(s=>s.disabled=off);$('#codeBox').classList.toggle('off',off)}
+  function syncNA(){const off=na.checked;inp.disabled=off;box.classList.toggle('off',off)}
   na.addEventListener('change',syncNA);syncNA();
 })();
 
