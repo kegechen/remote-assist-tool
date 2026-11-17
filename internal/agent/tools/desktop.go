@@ -38,6 +38,9 @@ type DesktopOps struct {
 	Displays func() (int, error)
 	// Capture 抓取指定显示器整屏，返回图像及其在虚拟桌面中的矩形。
 	Capture func(display int) (*image.RGBA, image.Rectangle, error)
+	// CaptureHint 可选：同 Capture，另返回本幅所基于的上一幅图像 prev 及相对 prev 的变化区域 dirty（图像坐标），
+	// 让调用方只重算变化部分的哈希；prev 为 nil 表示没有提示。返回的图像不得被调用方或后端再修改。
+	CaptureHint func(display int) (img *image.RGBA, r image.Rectangle, prev *image.RGBA, dirty image.Rectangle, err error)
 	// Bounds 返回指定显示器在虚拟桌面中的矩形。
 	Bounds func(display int) (image.Rectangle, error)
 	// Mouse kind: move | down | up | wheel；button: left|right|middle；wheel 用 delta（>0 向下滚）。
@@ -48,6 +51,12 @@ type DesktopOps struct {
 	Text func(s string) error
 }
 
+// 长轮询参数：单次最长等待、等待期间的最小重查间隔。
+const (
+	desktopMaxWaitMS = 2000
+	desktopWaitPoll  = 6 * time.Millisecond
+)
+
 // ---------- screen_capture ----------
 
 type ScreenCaptureArgs struct {
@@ -57,6 +66,11 @@ type ScreenCaptureArgs struct {
 	// Since 上一帧返回的 seq（可选）。画面与编码参数都没变时只回 {unchanged:true,seq}，不编码不传 JPEG。
 	// 旧版调用方不传，行为不变。
 	Since uint64 `json:"since,omitempty"`
+	// Delta 允许只返回相对 since 变化的区域（增量帧）。旧版调用方不传，永远收到整帧。
+	Delta bool `json:"delta,omitempty"`
+	// Wait 长轮询：带 since 且画面没变时，服务端最多等 Wait 毫秒（上限 2000），一有变化立即返回，
+	// 省掉“反复空轮询”的往返与间隔，降低延迟。旧版服务端忽略此字段（立即返回 unchanged）。
+	Wait int `json:"wait,omitempty"`
 }
 
 type ScreenCaptureResult struct {
@@ -70,6 +84,14 @@ type ScreenCaptureResult struct {
 	// 以下为可选新增字段，旧前端忽略即可：
 	Seq       uint64 `json:"seq,omitempty"`       // 画面内容版本号，下次请求可作为 since 带回
 	Unchanged bool   `json:"unchanged,omitempty"` // true 表示与 since 对应的帧完全一致，无 data
+	// 增量帧：Delta=true 时 Data 只是整幅画面里 (X,Y) 起、Width x Height 的一块，整幅尺寸为 CanvasW x CanvasH。
+	Waited  bool `json:"waited,omitempty"` // 服务端支持长轮询（请求带了 wait 时回传）
+	WaitMS  int  `json:"wait_ms,omitempty"` // 本次实际等待毫秒数，前端据此把等待时间从网络时延里剔除
+	Delta   bool `json:"delta,omitempty"`
+	X       int  `json:"x,omitempty"`
+	Y       int  `json:"y,omitempty"`
+	CanvasW int  `json:"canvas_w,omitempty"`
+	CanvasH int  `json:"canvas_h,omitempty"`
 	ProcMS    int    `json:"proc_ms"`             // 被控端处理耗时（抓屏+缩放+编码），前端据此把它从网络时延里剔除
 }
 
@@ -122,33 +144,93 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	tm := newDesktopTrace()
-	began := time.Now()
-	img, rect, err := ops.Capture(a.Display)
-	if err != nil {
-		return nil, fmt.Errorf("capture failed: %w", err)
-	}
-	tm.mark("capture")
-	n := 1
-	if ops.Displays != nil {
-		if c, e := ops.Displays(); e == nil && c > 0 {
-			n = c
-		}
-	}
-	tm.mark("displays")
-	// 画面无变化检测：哈希整幅捕获图（含鼠标指针，指针移动会改变画面），未变化时跳过缩放与编码。
 	if t.frames == nil { // 兼容直接构造 ScreenCaptureTool{} 的用法（测试）
 		t.frames = newFrameCache()
 	}
-	seq, same := t.frames.check(frameKey{a.Display, a.MaxWidth, a.Quality}, frameHash(img), a.Since)
-	tm.mark("hash")
+	fk := frameKey{a.Display, a.MaxWidth, a.Quality}
+	if a.Wait < 0 || a.Wait > desktopMaxWaitMS {
+		a.Wait = desktopMaxWaitMS
+	}
+	var (
+		img, prevImg   *image.RGBA
+		rect, dirty    image.Rectangle
+		tm             *desktopTrace
+		began          time.Time
+		n              int
+		seq            uint64
+		same, canDelta bool
+		reg            image.Rectangle
+	)
+	t0 := time.Now()
+	deadline := t0.Add(time.Duration(a.Wait) * time.Millisecond)
+	for {
+		tm = newDesktopTrace()
+		began = time.Now()
+		var err error
+		if ops.CaptureHint != nil {
+			img, rect, prevImg, dirty, err = ops.CaptureHint(a.Display)
+		} else {
+			img, rect, err = ops.Capture(a.Display)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("capture failed: %w", err)
+		}
+		tm.mark("capture")
+		n = 1
+		if ops.Displays != nil {
+			if c, e := ops.Displays(); e == nil && c > 0 {
+				n = c
+			}
+		}
+		tm.mark("displays")
+		// 画面无变化检测：哈希捕获图（含鼠标指针，指针移动会改变画面），未变化时跳过缩放与编码。
+		grid := t.frames.gridFor(fk, img, prevImg, dirty)
+		seq, same, reg, canDelta = t.frames.checkDelta(fk, grid, img, a.Since)
+		tm.mark("hash")
+		// 长轮询：画面没变且还没到期就等一会儿再看，轮询间隔随单次耗时自适应，避免在抓屏昂贵的平台上空转。
+		if !same || a.Wait <= 0 || a.Since == 0 || !time.Now().Before(deadline) {
+			break
+		}
+		poll := 2 * time.Since(began)
+		if poll < desktopWaitPoll {
+			poll = desktopWaitPoll
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+	waitMS := int(began.Sub(t0).Milliseconds())
 	if same {
 		res, err := json.Marshal(ScreenCaptureResult{
 			Format: "jpeg", ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(), Displays: n,
 			Seq: seq, Unchanged: true, ProcMS: int(time.Since(began).Milliseconds()),
+			Waited: a.Wait > 0, WaitMS: waitMS,
 		})
 		tm.flush(len(res))
 		return res, err
+	}
+	if a.Delta && canDelta {
+		sw, sh := img.Bounds().Dx(), img.Bounds().Dy()
+		dw, dh := scaledSize(sw, sh, a.MaxWidth)
+		if dr := srcRectToDst(reg, sw, sh, dw, dh); !dr.Empty() && deltaWorth(dr, dw, dh) {
+			part := scaleRect(img, dw, dh, dr)
+			tm.mark("scale")
+			data, err := encodeJPEGCapped(part, a.Quality, desktopMaxJPEGBytes)
+			if err != nil {
+				return nil, err
+			}
+			tm.mark("jpeg")
+			res, err := json.Marshal(ScreenCaptureResult{
+				Format: "jpeg", Width: dr.Dx(), Height: dr.Dy(), ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(),
+				Displays: n, Data: data, Seq: seq, ProcMS: int(time.Since(began).Milliseconds()),
+				Waited: a.Wait > 0, WaitMS: waitMS, Delta: true, X: dr.Min.X, Y: dr.Min.Y, CanvasW: dw, CanvasH: dh,
+			})
+			tm.mark("json")
+			tm.flush(len(res))
+			return res, err
+		}
 	}
 	out := scaleToWidth(img, a.MaxWidth)
 	tm.mark("scale")
@@ -161,6 +243,7 @@ func (t *ScreenCaptureTool) Run(ctx context.Context, raw json.RawMessage, _ agen
 		Format: "jpeg", Width: out.Bounds().Dx(), Height: out.Bounds().Dy(),
 		ScreenWidth: rect.Dx(), ScreenHeight: rect.Dy(), Displays: n, Data: data,
 		Seq: seq, ProcMS: int(time.Since(began).Milliseconds()),
+		Waited: a.Wait > 0, WaitMS: waitMS,
 	})
 	tm.mark("json")
 	tm.flush(len(res))

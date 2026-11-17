@@ -65,9 +65,11 @@ type frameKey struct {
 }
 
 type frameState struct {
-	hash uint64
-	key  frameKey
-	seq  uint64
+	hash    uint64
+	key     frameKey
+	seq     uint64
+	tracker *tileTracker // 块级变化记录，供增量帧使用
+	src     *image.RGBA  // tracker.grid 对应的图像（用来核对 CaptureHint 的 prev）
 }
 
 // frameCache 每个显示器缓存最近一次的哈希、参数与 seq。
@@ -94,4 +96,45 @@ func (c *frameCache) check(k frameKey, hash, since uint64) (seq uint64, unchange
 	c.next++
 	c.last[k.display] = &frameState{hash: hash, key: k, seq: c.next}
 	return c.next, false
+}
+
+// checkDelta 与 check 同义，另外维护块级变化记录：
+// 返回 region/delta=true 表示对端（持有 since 对应的画面）只需要源图里 region 这块区域的新内容。
+func (c *frameCache) checkDelta(k frameKey, g *tileGrid, src *image.RGBA, since uint64) (seq uint64, unchanged bool, region image.Rectangle, delta bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.last[k.display]
+	if st != nil && st.hash == g.total && st.key == k {
+		if since != 0 && since == st.seq {
+			return st.seq, true, image.Rectangle{}, false
+		}
+		region, delta = st.tracker.regionSince(since)
+		return st.seq, false, region, delta
+	}
+	c.next++
+	if st == nil || st.key != k {
+		st = &frameState{key: k, tracker: &tileTracker{}}
+		c.last[k.display] = st
+	}
+	st.hash, st.seq, st.src = g.total, c.next, src
+	st.tracker.push(c.next, g)
+	region, delta = st.tracker.regionSince(since)
+	return c.next, false, region, delta
+}
+
+// gridFor 计算 img 的块哈希。prev 非空且正是当前缓存哈希所对应的那幅图像时，只重算 dirty 覆盖的块，
+// dirty 为空则直接复用；否则整幅重算。（并发下缓存可能已被别的请求更新，此时 src 对不上，自然退回整幅。）
+func (c *frameCache) gridFor(k frameKey, img, prev *image.RGBA, dirty image.Rectangle) *tileGrid {
+	if prev != nil {
+		c.mu.Lock()
+		var old *tileGrid
+		if st := c.last[k.display]; st != nil && st.key == k && st.src == prev && st.tracker != nil {
+			old = st.tracker.grid
+		}
+		c.mu.Unlock()
+		if old != nil {
+			return computeTilesHinted(img, old, dirty)
+		}
+	}
+	return computeTiles(img)
 }

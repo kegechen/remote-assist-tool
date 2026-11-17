@@ -89,10 +89,9 @@ header input.server,#treePath,#grepPattern,#grepRoot{background:var(--field);bor
 header input.server{width:170px}
 header input.server:focus,#treePath:focus,#grepPattern:focus,#grepRoot:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 ::placeholder{color:var(--dim);opacity:1}
-.codebox{display:inline-flex;align-items:center;gap:3px;background:var(--field);border:1px solid var(--line);border-radius:var(--r-md);padding:0 10px;height:32px;transition:border-color .15s,box-shadow .15s,opacity .15s}
+.codebox{display:inline-flex;align-items:center;cursor:text;background:var(--field);border:1px solid var(--line);border-radius:var(--r-md);padding:0 10px;height:32px;transition:border-color .15s,box-shadow .15s,opacity .15s}
 .codebox:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.codebox i{color:var(--dim);font-style:normal;user-select:none}
-header .codebox input.cseg{width:5.2ch;background:transparent;border:0;outline:0;padding:0;text-align:center;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
+header .codebox input.cseg{width:calc(14*(1ch + .08em) + 6px);background:transparent;border:0;outline:0;padding:0;text-align:left;color:var(--text);font-family:var(--mono);font-size:13px;letter-spacing:.08em}
 header .codebox input.cseg::placeholder{color:var(--dim);letter-spacing:.08em}
 .codebox.off,.codebox.off:focus-within{opacity:.4;border-color:var(--line);box-shadow:none}
 .codebox.off input.cseg{cursor:not-allowed}
@@ -342,7 +341,7 @@ main{flex:1;display:flex;min-height:0;min-width:0}
 <div id="app">
   <header>
     <div class="brand"><svg viewBox="0 0 28 28" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--brand1)"/><stop offset="1" style="stop-color:var(--brand2)"/></linearGradient></defs><rect x="1" y="1" width="26" height="26" rx="8" fill="url(#lg)" fill-opacity=".22" stroke="url(#lg)" stroke-width="1.4"/><path d="M8 10.5h12v7H8z" fill="none" stroke="url(#lg)" stroke-width="1.6" stroke-linejoin="round"/><path d="M11.5 20.5h5" stroke="url(#lg)" stroke-width="1.6" stroke-linecap="round"/></svg><span class="bname">Remote Assist</span></div>
-    <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：每格 4 位，可直接粘贴整串（支持 协助码@host:port）"><input class="cseg" maxlength="4" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 1 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 2 段" placeholder="XXXX"><i>-</i><input class="cseg" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="协助码第 3 段" placeholder="XXXX"></span><input type="hidden" id="code"></div>
+    <div class="hgrp"><span class="lbl">协助码</span><span class="codebox" id="codeBox" title="协助码：直接输入或粘贴整串，自动按 4 位加“-”（也可粘贴 协助码@host:port）"><input class="cseg" id="codeInput" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="协助码" placeholder="XXXX-XXXX-XXXX"></span><input type="hidden" id="code"></div>
     <div class="hgrp"><span class="lbl">中转地址</span><input class="server" id="server" placeholder="host:port" title="中转服务地址，如 127.0.0.1:28443。留空使用默认中转；填过的地址连接成功后会被记住"></div>
     <label class="chk"><input type="checkbox" id="noauth" aria-describedby="tipNoauth"><span>NoAuth</span></label><button type="button" class="qm" id="qmNoauth" data-tip="tipNoauth" aria-label="NoAuth 说明" aria-describedby="tipNoauth" aria-expanded="false">?</button>
     <div class="hgrp hacts"><button id="connect">连接</button><button class="sm ghost" id="btnProc">进程</button><button class="sm ghost" id="btnDesk" title="查看并操控对端桌面（对端需 share --enable-desktop，且在已登录的图形会话中运行）">远程桌面</button></div>
@@ -477,53 +476,49 @@ status.onclick=e=>{e.stopPropagation();const panel=$('#conn-info');if(panel.styl
 $('#conn-info').onclick=e=>e.stopPropagation();
 document.addEventListener('click',()=>{$('#conn-info').style.display='none'});
 
-// ========== 协助码分段输入 ==========
-// 三格各 4 位；隐藏的 #code 始终是数据源（12 位无分隔大写 或 10 位大小写混合（旧版公网中转），或粘贴的 code@host:port 原串）。
+// ========== 协助码输入 ==========
+// 一个输入框：输入/粘贴时自动按 4 位加“-”显示（XXXX-XXXX-XXXX）。隐藏的 #code 始终是数据源：
+// 无分隔的码（12 位全大写；旧版公网中转的 10 位大小写混合码保持原样），或粘贴的 code@host:port 原串。
+// 支持 Ctrl+A 全选、点输入框任意处聚焦（点框内空白处光标落在末尾，继续填写）、中间插入/删除后光标位置保持。
 (function(){
-  const segs=Array.from(document.querySelectorAll('#codeBox .cseg')),hid=$('#code');
-  // 保留大小写：旧版公网中转发 10 位大小写混合码（大小写敏感）；本版中转的 12 位码全大写，输入小写时同步转大写
+  const inp=$('#codeInput'),hid=$('#code'),box=$('#codeBox');
   const clean=s=>String(s||'').replace(/[^A-Za-z0-9]/g,'');
+  // 12 位码全大写（本版中转）；其他长度（旧版中转的 10 位混合码）保持用户输入的大小写
   const norm=s=>s.length===12?s.toUpperCase():s;
+  const group=s=>s.replace(/(.{4})(?=.)/g,'$1-');
   let raw=''; // 非空表示 #code 保留粘贴的原串（含 @host:port）
-  function sync(){hid.value=raw||norm(segs.map(s=>s.value).join(''))}
-  // 从第 start 格开始铺满字符，返回应聚焦的格序号与光标位置
-  function fill(str,start){
-    let i=start,pos=0;
-    for(let k=start;k<segs.length;k++)segs[k].value='';
-    while(str&&i<segs.length){const part=str.slice(0,4);segs[i].value=part;str=str.slice(4);pos=part.length;if(str&&i<segs.length-1)i++;else break}
-    return{i,pos};
-  }
-  function focusAt(i,pos){const s=segs[i];s.focus();const p=pos==null?s.value.length:pos;s.setSelectionRange(p,p)}
-  segs.forEach((s,idx)=>{
-    s.addEventListener('input',()=>{
-      raw='';
-      const v=clean(s.value);
-      if(v.length>4){const r=fill(v,idx);focusAt(r.i,r.pos)}
-      else{s.value=v;if(v.length===4&&idx<2&&s.selectionStart>=4)focusAt(idx+1,0)}
-      sync();
-    });
-    s.addEventListener('keydown',e=>{
-      if(e.isComposing)return;
-      if(e.key==='Enter'){e.preventDefault();if(!connected)$('#connect').click();return}
-      if(e.key==='-'||e.key==='_'||e.key===' '){e.preventDefault();if(s.value.length>0&&idx<2)focusAt(idx+1,0);return} // 空格里的分隔符忽略：敲满 4 位已自动跳格，再按 - 不能多跳一格
-      const atStart=s.selectionStart===0&&s.selectionEnd===0,atEnd=s.selectionStart===s.value.length&&s.selectionEnd===s.value.length;
-      if(e.key==='Backspace'&&atStart&&idx>0){e.preventDefault();const p=segs[idx-1];p.value=p.value.slice(0,-1);raw='';sync();focusAt(idx-1);return}
-      if(e.key==='ArrowLeft'&&atStart&&idx>0){e.preventDefault();focusAt(idx-1);return}
-      if(e.key==='ArrowRight'&&atEnd&&idx<2){e.preventDefault();focusAt(idx+1,0)}
-    });
-    s.addEventListener('paste',e=>{
-      e.preventDefault();
-      const t=(e.clipboardData||window.clipboardData).getData('text').trim();
-      const at=t.indexOf('@'),body=clean(at>=0?t.slice(0,at):t);
-      const r=fill(body,body.length>=12?0:idx);
-      raw=at>=0?t:'';
-      focusAt(r.i,r.pos);sync();
-    });
+  function sync(){hid.value=raw||norm(clean(inp.value))}
+  inp.addEventListener('input',()=>{
+    const v=inp.value;
+    if(v.indexOf('@')>=0){raw=v.trim();hid.value=raw;return} // 带 @host:port 的原串：不重排
+    raw='';
+    const pos=inp.selectionStart==null?v.length:inp.selectionStart;
+    const before=clean(v.slice(0,pos)).length; // 光标之前的有效字符数
+    const c=norm(clean(v).slice(0,12));
+    const out=group(c);
+    let p=0,n=0;
+    while(p<out.length&&n<Math.min(before,c.length)){if(out[p]!=='-')n++;p++}
+    if(out!==v)inp.value=out;
+    inp.setSelectionRange(p,p);
+    sync();
   });
-  // 外部直接改 #code.value 后可派发 input 事件让三格跟随
-  hid.addEventListener('input',()=>{const t=hid.value;const at=t.indexOf('@');fill(clean(at>=0?t.slice(0,at):t),0);raw=at>=0?t:''});
+  inp.addEventListener('keydown',e=>{
+    if(e.isComposing)return;
+    if(e.key==='Enter'){e.preventDefault();if(!connected)$('#connect').click()}
+  });
+  // 点输入框以外的框内区域（内边距）也聚焦，并把光标放到末尾：空则从头填，有内容则继续填
+  box.addEventListener('mousedown',e=>{
+    if(e.target===inp||inp.disabled)return;
+    e.preventDefault();inp.focus();inp.setSelectionRange(inp.value.length,inp.value.length);
+  });
+  // 外部直接改 #code.value 后可派发 input 事件让输入框跟随
+  hid.addEventListener('input',()=>{
+    const t=hid.value;
+    if(t.indexOf('@')>=0){raw=t;inp.value=t}
+    else{raw='';inp.value=group(norm(clean(t).slice(0,12)))}
+  });
   const na=$('#noauth');
-  function syncNA(){const off=na.checked;segs.forEach(s=>s.disabled=off);$('#codeBox').classList.toggle('off',off)}
+  function syncNA(){const off=na.checked;inp.disabled=off;box.classList.toggle('off',off)}
   na.addEventListener('change',syncNA);syncNA();
 })();
 
@@ -1451,6 +1446,11 @@ function deskSanitize(d){
   o.seq=deskInt(d.seq,0,Number.MAX_SAFE_INTEGER,0);
   o.proc_ms=(d.proc_ms==null)?null:deskInt(d.proc_ms,0,3600000,-1);
   o.unchanged=d.unchanged===true;
+  o.waited=d.waited===true;o.wait_ms=deskInt(d.wait_ms,0,10000,0);
+  // 增量帧：只是整幅画面里的一块；坐标与整幅尺寸都必须在界内，否则拒绝
+  o.delta=d.delta===true;o.x=deskInt(d.x,0,DESK_MAX_DIM,0);o.y=deskInt(d.y,0,DESK_MAX_DIM,0);
+  o.canvas_w=deskInt(d.canvas_w,0,DESK_MAX_DIM,0);o.canvas_h=deskInt(d.canvas_h,0,DESK_MAX_DIM,0);
+  if(o.delta&&(o.canvas_w<1||o.canvas_h<1||o.x+o.width>o.canvas_w||o.y+o.height>o.canvas_h)){o.delta=false;o.data='';o.bad='对端返回的增量画面区域异常，已拒绝显示'}
   o.data=typeof d.data==='string'?d.data:'';
   if(o.width*o.height>DESK_MAX_PIXELS){o.width=0;o.height=0;o.data='';o.bad='对端返回的画面尺寸异常，已拒绝显示'}
   if(o.data.length>DESK_MAX_B64){o.data='';o.bad='对端返回的画面数据过大，已拒绝显示'}
@@ -1468,6 +1468,9 @@ function deskFetch(args,sig){const t0=performance.now();const key=args.display+'
 //  - 画面无变化不重复传：请求带上一帧的 seq 作 since，被控端发现画面和参数都没变就只回 {unchanged:true}，
 //    前端跳过解码与绘制；静止一阵后降低请求频率（有鼠标键盘操作立即恢复），每 30 秒强制取一次完整帧兜底。
 const DESK_KEYFRAME_MS=30000;
+// 长轮询：带 since 的请求让被控端在画面没变时最多等这么久，变了立即返回（省掉空轮询的往返与间隔，降延迟）
+const DESK_WAIT_MS=800;
+const DESK_DBG=/[?&]dbg=1(&|$)/.test(location.search);
 async function deskStart(forceLoading){
   if(desk.running)return;
   if(!connected){deskState('idle','尚未连接对端：请先在顶部输入协助码并点击「连接」');return}
@@ -1478,16 +1481,19 @@ async function deskStart(forceLoading){
   // ema：网络时延；pema：被控端处理耗时（-1 表示对端没有回传）；have：最近一次绘制的完整帧；still：连续“未变化”次数
   let ema=0,pema=-1,level=0,lastStart=0,inflight=[],fail=null,lastStat=0,still=0;
   const have={seq:0,key:'',at:0};
+  // sharp：画面静止后升到高画质（增量帧很小，高画质几乎不增加带宽）；链路变差(level>0)或手动选画质时关闭
+  let sharp=false,longPoll=false,samples=0,lastWait=0;
   const params=()=>{
     const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
     let w=wSel,q=qSel;
-    // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35），很慢时再把宽度压到 800
-    if(!qSel){q=[70,50,35][level];if(level>=2)w=Math.min(w,800)}
-    const a={display:+$('#deskDisp').value||0,max_width:w,quality:q};
+    // 画质“自动”：按链路档位取质量（好 70 / 慢 50 / 很慢 35，与上游一致，首帧不变慢；画面静止后升到 95），很慢时再把宽度压到 800
+    if(!qSel){q=[70,50,35][level];if(sharp&&level===0)q=95;if(level>=2)w=Math.min(w,800)}
+    const a={display:+$('#deskDisp').value||0,max_width:w,quality:q,delta:true};
     const key=a.display+'/'+a.max_width+'/'+a.quality;
-    if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS)a.since=have.seq;
+    if(have.seq&&have.key===key&&performance.now()-have.at<DESK_KEYFRAME_MS){a.since=have.seq;a.wait=DESK_WAIT_MS}
     return a;
   };
+  const qSel_=()=>!!+$('#deskQ').value;
   const issue=()=>{lastStart=performance.now();inflight.push(deskFetch(params(),ac.signal))};
   const sleep=ms=>new Promise(res=>setTimeout(res,ms));
   while(my===desk.loopId&&connected&&activeTab==='desk'){
@@ -1495,9 +1501,10 @@ async function deskStart(forceLoading){
     let interval=1000/(auto?30:fpsSel);
     // 静止且近期没有操作：放慢轮询，省被控端 CPU（每次轮询仍要抓屏+哈希）；一有操作或画面变化立即恢复
     const quiet=still>=8&&performance.now()-(desk.lastInput||0)>1500;
-    if(quiet)interval=Math.max(interval,still>=40?200:100);
+    if(quiet&&!longPoll)interval=Math.max(interval,still>=40?200:100);
     let depth=1;
     if(auto&&!quiet&&level<2){depth=2;if(level===0&&pema>0)depth=Math.max(1,Math.min(3,Math.ceil((ema+pema)/pema)))}
+    if(longPoll&&lastWait>=60)depth=1; // 长轮询在空等：多发只会收到重复响应；画面持续变化(几乎不用等)时再恢复流水线
     // 补足在途请求；相邻两次请求至少间隔 interval/depth，避免一次性打出两个相同的帧。
     // 已有在途请求时，等待间隔与“最早的请求返回”二者先到者处理，保证第 2、3 路真的能发出去。
     if(inflight.length<depth){
@@ -1515,27 +1522,37 @@ async function deskStart(forceLoading){
     if(!r.ok){fail=deskErrText(r.error);break}
     let d;try{d=deskSanitize(parseMCP(r.result))}catch(e){fail='解析帧失败';break}
     if(d&&d.bad){fail=d.bad;break}
-    const unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
+    let unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
+    // 流水线里较早发出的请求可能比后面的晚到：画布已更新到更新的 seq，迟到的旧帧直接丢弃，避免画面回退
+    if(d&&d.data&&d.seq&&have.seq&&have.key===key&&d.seq<have.seq)unchanged=true;
+    // 增量帧必须叠在尺寸一致、同参数的现有画布上；对不上就放弃增量，下一个请求不带 since 以取整帧
+    if(d&&d.delta&&(!have.seq||have.key!==key||cv.width!==d.canvas_w||cv.height!==d.canvas_h)){have.seq=0;continue}
     if(!d||(!d.data&&!unchanged)){fail=deskErrText(JSON.stringify(d||{}));break}
     const proc=(d.proc_ms!=null&&d.proc_ms>=0)?d.proc_ms:-1;
-    const net=proc>=0?Math.max(0,rtt-proc):rtt;
+    const net=proc>=0?Math.max(0,rtt-proc-(d.wait_ms||0)):Math.max(0,rtt-(d.wait_ms||0));
+    longPoll=d.waited===true;lastWait=d.wait_ms||0;
     if(proc>=0)pema=pema<0?proc:pema*0.8+proc*0.2;
-    if(anyAuto){
+    samples++;
+    if(samples<=2){/* 冷启动样本：被控端首次抓屏初始化、连接初期背景请求都会让它异常大，不据此降质 */}
+    else if(anyAuto){
       ema=ema?ema*0.8+net*0.2:net;
       if(ema>900)level=2;else if(ema>400)level=Math.max(level,1);else if(ema<150)level=0;
       else if(ema<300&&level===2)level=1;
     }else{ema=net;level=0}
-    if(unchanged){still++}
+    if(level>0||qSel_()){sharp=false}
+    // 调试出口：仅地址带 ?dbg=1 时记录最近 200 帧的往返/处理/网络/ema/档位/在途数到 window.__deskDbg；平时不产生任何对象
+    if(DESK_DBG)(window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift();
+    if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
     else{
       still=0;
       try{
         const u=deskB64ToBytes(d.data);
         if(!deskFrameOK(deskJpegSize(u))){fail='对端返回的画面尺寸异常，已拒绝显示';break}
         const bm=await createImageBitmap(new Blob([u],{type:'image/jpeg'}));
-        if(d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}
+        if(!d.delta&&d.width>0&&d.height>0&&(cv.width!==d.width||cv.height!==d.height)){cv.width=d.width;cv.height=d.height}
         // 显示大小由真实屏幕尺寸决定，与返回图像的像素尺寸（自动画质会改宽度）无关，画面不会忽大忽小
         if(d.screen_width>0&&d.screen_height>0&&(desk.sw!==d.screen_width||desk.sh!==d.screen_height)){desk.sw=d.screen_width;desk.sh=d.screen_height;deskLayout()}
-        ctx.drawImage(bm,0,0);if(bm.close)bm.close();
+        ctx.drawImage(bm,d.delta?d.x:0,d.delta?d.y:0);if(bm.close)bm.close();
       }catch(e){fail='绘制帧失败: '+e;break}
       // 旧被控端不回 seq：have.seq 保持 0，永远不会带 since，行为与改造前一致
       if(d.seq){have.seq=d.seq;have.key=key;have.at=performance.now()}
