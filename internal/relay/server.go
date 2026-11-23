@@ -916,7 +916,10 @@ func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeCon
 		// 已有协助端时，若新加入者与现有协助端来自同一来源地址（典型场景：本机 webui
 		// 没断就再用 CLI 连），回一条可识别的错误，让客户端能提示「请先断开已连接的
 		// 协助端」；其它来源仍走统一 rejectJoin，不泄露会话状态。
-		if errors.Is(err, ErrSessionHasHelper) {
+		// --trust-source-ip=false（DisableSourceIPLimits）时地址不可信：SNAT 后的不同
+		// 客户端会共用一个 IP，此时返回专用错误会让「有效但已占用」与「无效码」可区分，
+		// 变成协助码枚举信号，因此直接退回统一响应。
+		if errors.Is(err, ErrSessionHasHelper) && !s.sourceIPLimitsDisabled() {
 			if helperHost, ok := s.sessions.HelperHost(code); ok && helperHost != "" && helperHost == host {
 				return s.rejectJoinWithMessage(client, code, joinRejectReason(err), proto.ErrJoinSessionBusySameAddr)
 			}

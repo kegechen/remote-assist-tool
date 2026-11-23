@@ -532,14 +532,18 @@ func (sm *SessionManager) JoinSession(code string, help *ClientConn) (*JoinSessi
 // HelperHost 返回指定协助码当前协助端的来源 IP；不存在或协助端处于待断开（可被顶替）
 // 时返回 ok=false。调用方只用它判断「同源地址再次加入」，不对外暴露。
 func (sm *SessionManager) HelperHost(code string) (string, bool) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	sm.mu.RLock()
 	session, exists := sm.byCode[code]
-	if !exists || session.Help == nil || session.pendingHelpID != "" {
+	var help *ClientConn
+	if exists && session.Help != nil && session.pendingHelpID == "" {
+		help = session.Help
+	}
+	sm.mu.RUnlock()
+	if help == nil {
 		return "", false
 	}
-	return clientHost(session.Help), true
+	// RemoteAddr 在连接生命周期内不变，放到锁外读取，避免与所有会话读路径互斥。
+	return clientHost(help), true
 }
 
 // RollbackJoin 回滚 JoinSession 的副作用：清除 session.Help 绑定。
