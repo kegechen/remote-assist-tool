@@ -299,8 +299,8 @@ func TestPTYDisabledPolicy(t *testing.T) {
 }
 
 func TestPTYDisabledMessageMentionsAllowPTY(t *testing.T) {
-	if !strings.Contains(errPTYDisabled.Error(), "--allow-exec") || !strings.Contains(errPTYDisabled.Error(), "exec_denied") {
-		t.Errorf("禁用提示应包含 exec_denied 与 --allow-exec: %v", errPTYDisabled)
+	if !strings.Contains(errPTYDisabled.Error(), "--allow-pty") || !strings.Contains(errPTYDisabled.Error(), "exec_denied") {
+		t.Errorf("禁用提示应包含 exec_denied 与 --allow-pty: %v", errPTYDisabled)
 	}
 }
 
