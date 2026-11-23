@@ -77,7 +77,9 @@ func TestJoinAllInternalFailuresReturnSamePublicError(t *testing.T) {
 	help3a := &ClientConn{ID: "help3a", Conn: &capturingConn{remoteAddr: "10.0.0.3:5001"}}
 	_, _ = srv.sessions.JoinSession("HASHELP01", help3a)
 	srv.sessions.ActivateDataPlane(session2.ID, share3.ID, help3a.ID) // 激活后双端在线
-	conn3 := &capturingConn{remoteAddr: "10.0.0.3:5002"}
+	// 用不同来源地址：同源地址重复加入会拿到专用错误（见 server_join_busy_test.go），
+	// 本用例验证的是「对其它来源不泄露会话状态」。
+	conn3 := &capturingConn{remoteAddr: "10.0.0.5:5002"}
 	client3 := &ClientConn{ID: "c3", Conn: conn3}
 	srv.handleJoin(client3, "HASHELP01")
 	resp3 := parseLastJoinResponse(t, &conn3.buf)

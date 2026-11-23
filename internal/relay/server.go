@@ -901,6 +901,14 @@ func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 
 	joinResult, err := s.sessions.JoinSession(code, client)
 	if err != nil {
+		// 已有协助端时，若新加入者与现有协助端来自同一来源地址（典型场景：本机 webui
+		// 没断就再用 CLI 连），回一条可识别的错误，让客户端能提示「请先断开已连接的
+		// 协助端」；其它来源仍走统一 rejectJoin，不泄露会话状态。
+		if errors.Is(err, ErrSessionHasHelper) {
+			if helperHost, ok := s.sessions.HelperHost(code); ok && helperHost != "" && helperHost == host {
+				return s.rejectJoinWithMessage(client, code, joinRejectReason(err), proto.ErrJoinSessionBusySameAddr)
+			}
+		}
 		return s.rejectJoin(client, code, joinRejectReason(err), false)
 	}
 
@@ -940,11 +948,17 @@ func (s *Server) handleJoin(client *ClientConn, code string) (closeConn bool) {
 	return false
 }
 
-// rejectJoin 是所有 Join 失败（含限流拒绝）的唯一出口。对外始终返回相同的通用响应，
+// rejectJoin 是所有 Join 失败（含限流拒绝）的默认出口。对外始终返回相同的通用响应，
 // 不区分内部原因，防协助码枚举；内部原因（code 指纹、来源 IP、reason 枚举）只进审计日志。
 // 所有拒绝统一按 RejectAuditSampleEvery 采样写审计，避免攻击下刷爆日志。
 // 累计 joinFailures，达到 MaxJoinFailures 返回 closeConn=true。
 func (s *Server) rejectJoin(client *ClientConn, code, reason string, _ bool) (closeConn bool) {
+	return s.rejectJoinWithMessage(client, code, reason, "join failed")
+}
+
+// rejectJoinWithMessage 与 rejectJoin 相同，但允许指定公开错误串。仅用于不泄露会话
+// 状态的场景（例如同源地址重复加入）；其余调用方一律走 rejectJoin。
+func (s *Server) rejectJoinWithMessage(client *ClientConn, code, reason, publicErr string) (closeConn bool) {
 	client.joinFailures++
 
 	n := atomic.AddUint64(&s.rejectSampleCtr, 1)
@@ -959,7 +973,7 @@ func (s *Server) rejectJoin(client *ClientConn, code, reason string, _ bool) (cl
 		})
 	}
 
-	resp := &proto.JoinResponse{Success: false, Error: "join failed"}
+	resp := &proto.JoinResponse{Success: false, Error: publicErr}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 

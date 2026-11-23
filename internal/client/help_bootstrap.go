@@ -428,6 +428,11 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	resp, err := h.join()
 	if err != nil {
 		h.client.Close()
+		// join 失败已经有面向用户的明确文案（含「已有协助端」的可识别错误），
+		// 不再包一层 "join failed"，否则会出现 "join failed: join failed: ..." 的嵌套。
+		if errors.Is(err, ErrJoinFailed) || errors.Is(err, ErrSessionBusySameAddr) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("join failed: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "MCP: 已连接中转服务 %s\n", relayDesc(&effectiveCfg))

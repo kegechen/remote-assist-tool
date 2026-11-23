@@ -135,6 +135,10 @@ const (
 	// 顶替（典型是旧版 share 没退出又起了新版）。relay 拒绝后来者、保留在线的那个；
 	// 收到的 share 应提示用户停掉另一个进程，并退避重试。
 	ErrCodeClientIDConflict = "CLIENT_ID_CONFLICT"
+	// ErrJoinSessionBusySameAddr 是 JoinResponse.Error 的专用标记：同一协助码已有协助端，
+	// 且新加入的连接与现有协助端来自同一来源地址。relay 只在同源时下发它，对其它来源仍回
+	// 统一的 "join failed"，不给外部猜测者增加枚举信号。
+	ErrJoinSessionBusySameAddr = "session busy: same address"
 )
 
 // PeerAddrAdvertise 对等端地址通告（发送给服务器）

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -47,6 +48,26 @@ func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
 	}
 }
 
+// Join 失败的公开文案。relay 出于防协助码枚举的考虑，对多数内部失败只回统一的
+// "join failed"，客户端无法区分「码错 / 已过期 / 对端离线 / 已有协助端」。这里把可能
+// 原因并列提示，避免用户误以为只有码错一种可能。
+var (
+	// ErrJoinFailed join 被拒（原因未知）。
+	ErrJoinFailed = errors.New("连接失败：协助码错误或已失效、被协助端未在线，或该协助码已有另一个协助端在连接。请核对协助码，并确认对端 share 仍在等待")
+	// ErrSessionBusySameAddr relay 明确下发「已有协助端，且与本次连接来自同一来源地址」。
+	ErrSessionBusySameAddr = errors.New("该协助码已有协助端在连接（与当前连接来自同一地址，通常是本机另一个客户端或网页未断开）。同一协助码同时只允许一个协助端，请先在已连接的协助端断开后重试")
+)
+
+// joinFailureError 把 JoinResponse.Error 映射为面向用户的错误。只有 relay 明确下发
+// 「同源地址已有协助端」时才用专用文案，其余（含旧 relay 的统一 "join failed"）都用
+// 并列原因提示，防止用户只怀疑协助码。
+func joinFailureError(respErr string) error {
+	if respErr == proto.ErrJoinSessionBusySameAddr {
+		return ErrSessionBusySameAddr
+	}
+	return ErrJoinFailed
+}
+
 // join 向 relay 发 JoinRequest 并等待 JoinResponse；返回 resp 或 error。
 // 不打印 stdout，让调用方决定输出。
 func (h *HelpMode) join() (*proto.JoinResponse, error) {
@@ -70,7 +91,7 @@ func (h *HelpMode) join() (*proto.JoinResponse, error) {
 		return nil, err
 	}
 	if !resp.Success {
-		return nil, fmt.Errorf("join failed: %s", resp.Error)
+		return nil, joinFailureError(resp.Error)
 	}
 	h.client.setRelaySTUN(resp.STUNServers)
 	return &resp, nil
