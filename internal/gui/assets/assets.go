@@ -605,7 +605,8 @@ async function doConnect(allowLegacy){
   let msg=r.reason||'连接失败';
   let sub='';
   if(r.code==='peer_legacy')sub='对端协议版本不兼容，请升级对端到新版。';
-  else if(r.code==='bad_code')sub='请核对协助码，并确认被协助端已启动 share。';
+  else if(r.code==='already_connected')sub='同一协助码同时只允许一个协助端，请先在已连接的协助端（另一个 webui/CLI）断开后重试。';
+  else if(r.code==='bad_code')sub='请核对协助码，确认被协助端已启动 share；也可能已有另一个协助端在连接。';
   else if(r.code==='timeout'||r.code==='unreachable'||r.code==='refused')sub='请检查中继地址「'+label+'」与网络。';
   connToastShow('error',msg,sub,6000);
 }

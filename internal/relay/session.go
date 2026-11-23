@@ -529,6 +529,19 @@ func (sm *SessionManager) JoinSession(code string, help *ClientConn) (*JoinSessi
 	}, nil
 }
 
+// HelperHost 返回指定协助码当前协助端的来源 IP；不存在或协助端处于待断开（可被顶替）
+// 时返回 ok=false。调用方只用它判断「同源地址再次加入」，不对外暴露。
+func (sm *SessionManager) HelperHost(code string) (string, bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, exists := sm.byCode[code]
+	if !exists || session.Help == nil || session.pendingHelpID != "" {
+		return "", false
+	}
+	return clientHost(session.Help), true
+}
+
 // RollbackJoin 回滚 JoinSession 的副作用：清除 session.Help 绑定。
 // 用于 ActivateDataPlane 失败后清理已绑定的 Help，避免留下不一致状态。
 func (sm *SessionManager) RollbackJoin(sessionID string, helpID string) {

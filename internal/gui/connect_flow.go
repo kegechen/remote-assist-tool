@@ -20,6 +20,9 @@ const (
 	reasonRejected   = "rejected"
 	reasonUnreach    = "unreachable"
 	reasonOther      = "other"
+	// reasonAlreadyConnected：relay 明确告知「已有协助端且来自同一地址」。与 bad_code
+	// 区分开，提示用户先断开已有的协助端（常见是本机 webui 没关又用 CLI 连）。
+	reasonAlreadyConnected = "already_connected"
 )
 
 // classifyConnectError 把 connect 的原始错误归一为（原因码, 人话）。
@@ -48,8 +51,10 @@ func classifyConnectError(err error) (code, reason string) {
 		strings.Contains(low, "relay connect failed"), strings.Contains(low, "failed to connect"),
 		strings.Contains(low, "dial"):
 		return reasonUnreach, "网络不可达（请检查中继地址与网络）"
-	case strings.Contains(low, "join failed"):
-		return reasonBadCode, "协助码错误，或被协助端未在线"
+	case strings.Contains(msg, "同一协助码同时只允许一个协助端"):
+		return reasonAlreadyConnected, "该协助码已有协助端在连接"
+	case strings.Contains(low, "join failed") || strings.Contains(msg, "协助码错误或已失效"):
+		return reasonBadCode, "协助码错误或已失效、被协助端未在线，或已有另一个协助端在连接"
 	}
 	return reasonOther, "连接失败"
 }
