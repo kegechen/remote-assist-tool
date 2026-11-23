@@ -64,6 +64,9 @@ type relayOptions struct {
 	blocklistMaxTracked   int
 	blocklistAllowSpec    string         // --blocklist-allow 原文
 	blocklistAllow        []netip.Prefix // 解析后的放行范围，空 = 不放行任何地址
+	// 节点模式（--directory-url），见 relay.Config.DirectoryURL。
+	directoryURL     string
+	directoryRefresh time.Duration
 }
 
 func main() {
@@ -143,27 +146,8 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 			}
 		}()
 	}
-	cfg := &relay.Config{
-		ListenAddr:            opts.listenAddr,
-		TLSCertFile:           opts.certFile,
-		TLSKeyFile:            opts.keyFile,
-		CodeTTL:               opts.codeTTL,
-		CodeMaxAge:            opts.codeMaxAge,
-		StateDir:              opts.stateDir,
-		LegacyCodeExpiry:      opts.legacyExpiry,
-		CodeLength:            opts.codeLength,
-		AuditLogFile:          opts.auditLog,
-		UseTLS:                !opts.plain,
-		STUNListenAddr:        opts.stunAddr,
-		QUICListenAddr:        opts.quicAddr,
-		NoAuth:                opts.noAuth,
-		DisableSourceIPLimits: !opts.trustSourceIP,
-		Limits:                limits,
-		Update:                updateInfo,
-		UpdateInfoFile:        opts.updateInfoFile,
-		AdvertiseSTUN:         opts.advertiseSTUN,
-		Blocklist:             bl,
-	}
+	cfg := newRelayConfig(opts, limits, updateInfo)
+	cfg.Blocklist = bl
 
 	if opts.noAuth {
 		log.Printf("WARNING: NO-AUTH mode enabled. Any device that can reach this relay can connect and fully control the share side. Use ONLY on a fully trusted private LAN.")
@@ -192,18 +176,45 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 	return nil
 }
 
+// newRelayConfig 把解析好的参数转成 relay.Config（TLS 证书路径可能随后由 configureTLS 补上）。
+func newRelayConfig(opts relayOptions, limits relay.Limits, updateInfo proto.UpdateInfo) *relay.Config {
+	return &relay.Config{
+		ListenAddr:            opts.listenAddr,
+		TLSCertFile:           opts.certFile,
+		TLSKeyFile:            opts.keyFile,
+		CodeTTL:               opts.codeTTL,
+		CodeMaxAge:            opts.codeMaxAge,
+		StateDir:              opts.stateDir,
+		LegacyCodeExpiry:      opts.legacyExpiry,
+		CodeLength:            opts.codeLength,
+		AuditLogFile:          opts.auditLog,
+		UseTLS:                !opts.plain,
+		STUNListenAddr:        opts.stunAddr,
+		QUICListenAddr:        opts.quicAddr,
+		NoAuth:                opts.noAuth,
+		DisableSourceIPLimits: !opts.trustSourceIP,
+		Limits:                limits,
+		Update:                updateInfo,
+		UpdateInfoFile:        opts.updateInfoFile,
+		AdvertiseSTUN:         opts.advertiseSTUN,
+		DirectoryURL:          opts.directoryURL,
+		DirectoryRefresh:      opts.directoryRefresh,
+	}
+}
+
 func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	opts := relayOptions{
-		listenAddr:    ":8443",
-		codeTTL:       30 * time.Minute,
-		codeMaxAge:    defaultCodeMaxAge,
-		codeLength:    12,
-		auditLog:      "audit.log",
-		certsDir:      "./certs",
-		trustSourceIP: true,
-		limitsFile:    strings.TrimSpace(os.Getenv("REMOTE_RELAY_LIMITS_FILE")),
-		downloadURL:   update.DefaultDownloadURL,
-		releasePage:   update.DefaultReleasePage,
+		listenAddr:       ":8443",
+		codeTTL:          30 * time.Minute,
+		codeMaxAge:       defaultCodeMaxAge,
+		codeLength:       12,
+		auditLog:         "audit.log",
+		certsDir:         "./certs",
+		trustSourceIP:    true,
+		limitsFile:       strings.TrimSpace(os.Getenv("REMOTE_RELAY_LIMITS_FILE")),
+		downloadURL:      update.DefaultDownloadURL,
+		releasePage:      update.DefaultReleasePage,
+		directoryRefresh: relay.DefaultDirectoryRefresh,
 	}
 	bd := blocklist.DefaultConfig()
 	opts.blocklistEnabled = true
@@ -251,6 +262,8 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.DurationVar(&opts.blocklistUnbanGrace, "blocklist-unban-grace", opts.blocklistUnbanGrace, "After a manual unban, suppress auto-ban for this long")
 	fs.IntVar(&opts.blocklistMaxTracked, "blocklist-max-tracked", opts.blocklistMaxTracked, "Maximum number of tracked IPs kept in memory")
 	fs.StringVar(&opts.blocklistAllowSpec, "blocklist-allow", "", "Comma-separated IPs or CIDRs that are never auto-banned, rejected or manually banned (e.g. your office NAT); bans already on file inside the range are lifted at startup")
+	fs.StringVar(&opts.directoryURL, "directory-url", "", "Node mode: https URL of the signed relay node directory. The relay finds itself in it by its TLS certificate fingerprint, issues codes starting with its node prefix, enforces its node status and forwards the directory to new clients. Requires --state-dir and TLS (empty: disabled)")
+	fs.DurationVar(&opts.directoryRefresh, "directory-refresh", opts.directoryRefresh, "Node mode: how often to fetch --directory-url (at least 1m)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
 		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
@@ -300,6 +313,16 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 		return relayOptions{}, err
 	}
 	opts.blocklistAllow = allow
+	if err := relay.ValidateNodeMode(&relay.Config{
+		DirectoryURL:     opts.directoryURL,
+		DirectoryRefresh: opts.directoryRefresh,
+		StateDir:         opts.stateDir,
+		UseTLS:           !opts.plain,
+		NoAuth:           opts.noAuth,
+		CodeLength:       opts.codeLength,
+	}); err != nil {
+		return relayOptions{}, fmt.Errorf("--directory-url: %w", err)
+	}
 	return opts, nil
 }
 

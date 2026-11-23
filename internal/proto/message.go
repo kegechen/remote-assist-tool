@@ -64,6 +64,13 @@ type RegisterRequest struct {
 	// 配对、不再让它重新加入（RegisterResponse.HelpKept）。旧 share 不发、旧 relay 忽略，都回到
 	// 「踢掉协助端、要求重新加入」的旧行为。
 	KeepHelp string `json:"keep_help,omitempty"`
+	// DirectorySerial 客户端本地缓存的节点列表序号，没有缓存时为 0。字段出现即声明本客户端理解节点列表协议：
+	// relay 的列表比客户端的新时在响应里下发列表；节点排空、停用时按新协议拒绝（NODE_DRAINING / NODE_DISABLED）。
+	// 用指针是为了区分「没有缓存（0）」和「旧客户端（不发）」。旧 relay 忽略。
+	DirectorySerial *uint64 `json:"directory_serial,omitempty"`
+	// DirectoryKeySerial 客户端缓存的列表所用状态密钥的授权序号，没有缓存时为 0。
+	// 列表的新旧按（状态密钥授权序号, 列表序号）的字典序比较：换了状态密钥后列表序号可以从头算，只比列表序号会漏发。
+	DirectoryKeySerial uint64 `json:"directory_key_serial,omitempty"`
 }
 
 // RegisterResponse 注册响应
@@ -83,6 +90,12 @@ type RegisterResponse struct {
 	// HelpKept 只回应 RegisterRequest.KeepHelp：relay 保留了原协助端的配对，会话照旧可用，
 	// 不会再有 SessionReady。旧 relay 不发，share 按「等协助端重新加入」处理。
 	HelpKept bool `json:"help_kept,omitempty"`
+	// Directory relay 手里比客户端更新的节点列表（签名信封，客户端必须自行验签后才能使用）。
+	// 只发给声明了 directory_serial、且列表比 relay 的旧的客户端。
+	Directory json.RawMessage `json:"directory,omitempty"`
+	// NodeStatus 本节点在列表里的状态（active / draining），只在节点模式下发给声明了 directory_serial 的 share。
+	// draining 表示 share 应在空闲时迁到别的节点。
+	NodeStatus string `json:"node_status,omitempty"`
 }
 
 // UpdateInfo relay 下发的新版本软提示（旧 relay 不发、旧客户端忽略）。只用于提示，
@@ -110,6 +123,9 @@ type JoinRequest struct {
 	// share 跑 P2P 的那个协助端（见 resume.go）。relay 原样放进 SessionReady.ResumeProof
 	// 转给 share。旧 relay 忽略本字段，share 收不到证明，会按换人处理。
 	ResumeProof *P2PResumeProof `json:"resume_proof,omitempty"`
+	// DirectorySerial、DirectoryKeySerial 同 RegisterRequest 的同名字段。
+	DirectorySerial    *uint64 `json:"directory_serial,omitempty"`
+	DirectoryKeySerial uint64  `json:"directory_key_serial,omitempty"`
 }
 
 // JoinResponse 加入响应
@@ -125,6 +141,8 @@ type JoinResponse struct {
 	// 的 join：help 端手打小写时需按它派生会话密钥（share 端总是用 relay 下发的
 	// 原码）。旧 relay 不发本字段，help 端保持用输入的码。
 	Code string `json:"code,omitempty"`
+	// Directory 同 RegisterResponse.Directory，只在加入成功时下发。
+	Directory json.RawMessage `json:"directory,omitempty"`
 }
 
 // TunnelData 隧道数据
@@ -175,6 +193,11 @@ const (
 	// 且新加入的连接与现有协助端来自同一来源地址。relay 只在同源时下发它，对其它来源仍回
 	// 统一的 "join failed"，不给外部猜测者增加枚举信号。
 	ErrJoinSessionBusySameAddr = "session busy: same address"
+	// ErrCodeNodeDraining 本节点在节点列表里被标为排空：拒绝声明了 directory_serial 的 share 新注册，
+	// 客户端应改选别的节点。凭复用令牌取回原码的重连照常接受。
+	ErrCodeNodeDraining = "NODE_DRAINING"
+	// ErrCodeNodeDisabled 本节点在节点列表里被停用：拒绝所有注册（含复用）。已建立的会话不受影响。
+	ErrCodeNodeDisabled = "NODE_DISABLED"
 )
 
 // PeerAddrAdvertise 对等端地址通告（发送给服务器）

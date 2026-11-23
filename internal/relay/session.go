@@ -64,9 +64,11 @@ type ClientConn struct {
 	supportsStickyCode bool
 	requestCode        string
 	reuseToken         string // register 首帧写入：share 回传的复用令牌（持有证明），见 reuse.go
-	Conn               Conn
-	Send               chan []byte
-	writeMu            sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
+	// directoryPos register/join 首帧写入：客户端缓存的节点列表位置；nil 表示没声明 directory_serial（旧客户端）。
+	directoryPos *directoryPosition
+	Conn         Conn
+	Send         chan []byte
+	writeMu      sync.Mutex // 串行化对 Conn 的并发写：转发对端消息、心跳 echo、P2P 推送等可能来自不同 goroutine，无锁并发 Write 会交错撕裂单行 JSON 帧
 
 	// joinFailures 本连接累计的 Join 失败次数（含限流拒绝）。仅由该连接的读循环 goroutine
 	// 单线程访问，无需加锁。达到 maxJoinFailures 即关闭连接；一次成功 Join 后清零。

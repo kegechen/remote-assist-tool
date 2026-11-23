@@ -202,8 +202,9 @@ const (
 
 func isRootName(name string) bool { return name == SignerPrimary || name == SignerBackup }
 
-// usable 报告是否至少配置了一把格式正确的根公钥。
-func (r Roots) usable() bool {
+// Usable 报告是否至少配置了一把格式正确的根公钥。不满足时 Verify 一律返回 ErrNoRoots，
+// relay 据此在启动时就拒绝开启节点模式，而不是等到第一次拉取才发现。
+func (r Roots) Usable() bool {
 	for _, name := range []string{SignerPrimary, SignerBackup} {
 		if _, ok := r.key(name); ok {
 			return true
@@ -233,7 +234,7 @@ func window(notBefore, notAfter int64, now time.Time) error {
 // 状态密钥公钥写在正文里，所以必须先解析正文再验外层签名；在外层签名验过之前，正文里只有自带根签名的
 // 吊销列表与状态密钥授权会被使用。
 func Verify(raw []byte, roots Roots, st State, now time.Time) (*Verified, error) {
-	if !roots.usable() {
+	if !roots.Usable() {
 		return nil, verr(LayerRoots, ErrNoRoots, "")
 	}
 	env, err := parseEnvelope(raw)

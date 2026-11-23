@@ -33,6 +33,16 @@ func (cm *CodeManager) Generate() (string, error) {
 	return generateCode(cm.codeLength)
 }
 
+// GenerateWithPrefix 生成以 prefix 开头、总长不变的协助码（节点模式：首位是本节点前缀，其余随机）。
+// prefix 为空时同 Generate。调用方保证 prefix 比码长短（节点模式要求码长 12、前缀 1 位）。
+func (cm *CodeManager) GenerateWithPrefix(prefix string) (string, error) {
+	rest, err := generateCode(cm.codeLength - len(prefix))
+	if err != nil {
+		return "", err
+	}
+	return prefix + rest, nil
+}
+
 func generateCode(length int) (string, error) {
 	result := make([]byte, length)
 	for i := range result {

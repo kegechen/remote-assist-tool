@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/relay"
 )
 
@@ -58,6 +59,49 @@ func TestParseRelayOptionsRejectsInvalidValues(t *testing.T) {
 		{"--plain", "--quic-listen", ":8443"},
 		{"--advertise-stun", "no-port"},
 		{"--advertise-stun", "a:1,b:1,c:1,d:1,e:1"},
+	}
+	for _, args := range tests {
+		if _, err := parseRelayOptions(args, &bytes.Buffer{}); err == nil {
+			t.Fatalf("parseRelayOptions(%q) succeeded, want error", args)
+		}
+	}
+}
+
+// --directory-url 开启节点模式：默认不开；拉取间隔默认 5m，可改。
+func TestParseRelayOptionsDirectory(t *testing.T) {
+	t.Setenv("REMOTE_RELAY_LIMITS_FILE", "")
+	opts, err := parseRelayOptions(nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.directoryURL != "" || opts.directoryRefresh != 5*time.Minute {
+		t.Fatalf("节点模式默认应关闭、拉取间隔默认 5m，得 %q %v", opts.directoryURL, opts.directoryRefresh)
+	}
+	const u = "https://relay-list.example.test/v1/directory"
+	opts, err = parseRelayOptions([]string{"--directory-url", u, "--directory-refresh", "10m", "--state-dir", "/var/lib/relay"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.directoryURL != u || opts.directoryRefresh != 10*time.Minute {
+		t.Fatalf("显式值应生效，得 %q %v", opts.directoryURL, opts.directoryRefresh)
+	}
+	cfg := newRelayConfig(opts, relay.DefaultLimits(), proto.UpdateInfo{})
+	if cfg.DirectoryURL != u || cfg.DirectoryRefresh != 10*time.Minute {
+		t.Fatalf("节点模式参数没有传进 relay.Config: %q %v", cfg.DirectoryURL, cfg.DirectoryRefresh)
+	}
+}
+
+// 节点模式的非法组合在解析参数时就报错。
+func TestParseRelayOptionsRejectsBadDirectory(t *testing.T) {
+	const u = "https://relay-list.example.test/v1/directory"
+	tests := [][]string{
+		{"--directory-url", u},
+		{"--directory-url", "http://relay-list.example.test/v1/directory", "--state-dir", "/var/lib/relay"},
+		{"--directory-url", "relay-list.example.test", "--state-dir", "/var/lib/relay"},
+		{"--directory-url", u, "--state-dir", "/var/lib/relay", "--plain"},
+		{"--directory-url", u, "--state-dir", "/var/lib/relay", "--no-auth"},
+		{"--directory-url", u, "--state-dir", "/var/lib/relay", "--length", "10"},
+		{"--directory-url", u, "--state-dir", "/var/lib/relay", "--directory-refresh", "30s"},
 	}
 	for _, args := range tests {
 		if _, err := parseRelayOptions(args, &bytes.Buffer{}); err == nil {

@@ -66,6 +66,10 @@ type windowsServiceConfig struct {
 	// 沿用默认值（开启、数据目录下的 blocklist.json）；blocklist_db 置空 = 纯内存。
 	BlocklistEnabled bool   `json:"blocklist_enabled"`
 	BlocklistDB      string `json:"blocklist_db"`
+	// DirectoryURL 节点列表地址（https），对应 --directory-url；非空即开启节点模式，要求 state_dir、TLS、码长 12。
+	DirectoryURL string `json:"directory_url,omitempty"`
+	// DirectoryRefresh 拉取节点列表的间隔（如 "5m"，不小于 1m），对应 --directory-refresh；空串用 relay 默认值。
+	DirectoryRefresh string `json:"directory_refresh,omitempty"`
 }
 
 func defaultWindowsServicePaths() (windowsServicePaths, error) {
@@ -185,6 +189,22 @@ func (cfg windowsServiceConfig) validate() error {
 	if err := relay.ValidateAdvertiseSTUN(splitList(cfg.AdvertiseSTUN)); err != nil {
 		return fmt.Errorf("advertise_stun: %w", err)
 	}
+	var directoryRefresh time.Duration
+	if cfg.DirectoryRefresh != "" {
+		if directoryRefresh, err = time.ParseDuration(cfg.DirectoryRefresh); err != nil {
+			return fmt.Errorf("directory_refresh must be a duration: %q", cfg.DirectoryRefresh)
+		}
+	}
+	if err := relay.ValidateNodeMode(&relay.Config{
+		DirectoryURL:     cfg.DirectoryURL,
+		DirectoryRefresh: directoryRefresh,
+		StateDir:         cfg.StateDir,
+		UseTLS:           !cfg.Plain,
+		NoAuth:           cfg.NoAuth,
+		CodeLength:       cfg.CodeLength,
+	}); err != nil {
+		return fmt.Errorf("directory_url: %w", err)
+	}
 	paths := map[string]string{
 		"cert":             cfg.CertFile,
 		"key":              cfg.KeyFile,
@@ -255,6 +275,12 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 	}
 	if cfg.AdvertiseSTUN != "" {
 		args = append(args, "--advertise-stun", cfg.AdvertiseSTUN)
+	}
+	if cfg.DirectoryURL != "" {
+		args = append(args, "--directory-url", cfg.DirectoryURL)
+	}
+	if cfg.DirectoryRefresh != "" {
+		args = append(args, "--directory-refresh", cfg.DirectoryRefresh)
 	}
 	return args
 }

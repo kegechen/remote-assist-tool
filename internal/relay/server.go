@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/remote-assist/tool/internal/crypto"
+	"github.com/remote-assist/tool/internal/directory"
 	"github.com/remote-assist/tool/internal/logger"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
@@ -158,6 +160,18 @@ type Config struct {
 	// 客户端把它们加入公网地址发现的竞速候选。用于本机 3478 对外不通（如云安全组未放行 UDP）
 	// 的部署：让客户端改用别处可达的 STUN。为空不下发。
 	AdvertiseSTUN []string
+	// DirectoryURL 非空时开启节点模式（--directory-url，https）：定时拉取签名节点列表，用本机 TLS 证书指纹在列表里
+	// 找到自己，按节点前缀发码、按节点状态接受注册，并把列表转发给声明了能力的客户端。见 directory.go。
+	// 要求 StateDir（列表与防回滚状态存在 <StateDir>/directory.json）和 TLS 证书文件，不能与 NoAuth 同用。
+	// 为空时行为与没有这个功能时完全一样。
+	DirectoryURL string
+	// DirectoryRefresh 拉取 DirectoryURL 的间隔，默认 5m，不得小于 1m。
+	DirectoryRefresh time.Duration
+
+	// 以下只供测试注入，零值即生产行为。
+	directoryRoots  *directory.Roots // nil = directory.BuiltinRoots()
+	directoryNow    func() time.Time // nil = time.Now
+	directoryClient *http.Client     // nil = 只跟随 https 跳转的默认客户端
 }
 
 // maxAdvertiseSTUN 限制下发条数：每条都会让客户端多开一条 NAT 映射、多发几个包。
@@ -231,6 +245,8 @@ type Server struct {
 	verifyByConn         map[string]string         // 连接 ID -> 其参与的待验证会话
 	listenAddr           atomic.Value              // net.Addr，accept 循环开始前写入
 	blockedNotice        chan struct{}             // 给被封 TCP 连接回 alert 的协程名额，见 noticeBlocked
+	// directory 节点模式的列表（--directory-url）；nil 表示未开启，行为与没有这个功能时一样。NewServer 装配后只读。
+	directory *nodeDirectory
 }
 
 // NewServer 创建服务器
@@ -263,6 +279,13 @@ func NewServer(cfg *Config) (*Server, error) {
 	signer, err := newReuseSigner(cfg.StateDir)
 	if err != nil {
 		return nil, err
+	}
+	var nodeDir *nodeDirectory
+	if cfg.DirectoryURL != "" {
+		// 在 newReuseSigner 之后：它负责建好 StateDir。
+		if nodeDir, err = newNodeDirectory(cfg); err != nil {
+			return nil, err
+		}
 	}
 	limiterIdleDuration := time.Duration(limits.LimiterIdleSeconds) * time.Second
 
@@ -325,6 +348,7 @@ func NewServer(cfg *Config) (*Server, error) {
 			cfg.Blocklist.SetOnManualBan(srv.closeConnsFromIP)
 		}
 	}
+	srv.directory = nodeDir
 	return srv, nil
 }
 
@@ -394,6 +418,7 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 	log.Printf("Relay limits: %s", s.limits.JSON())
 	go s.cleanupLoop(ctx)
 	go s.updateInfoLoop(ctx)
+	go s.directoryLoop(ctx)
 
 	// Close listener when context is cancelled
 	go func() {
@@ -1001,6 +1026,7 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		if len(req.KeepHelp) <= maxKeepHelpLen {
 			client.keepHelp = req.KeepHelp
 		}
+		client.directoryPos = clientDirectoryPosition(req.DirectorySerial, req.DirectoryKeySerial)
 		return s.handleRegister(client)
 	case proto.MsgJoinRequest:
 		// join 只能在 new 状态执行一次
@@ -1019,6 +1045,7 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		client.Version = sanitizePeerString(req.Version)
 		client.Host = sanitizePeerString(req.Host)
 		client.supportsUpdateNotice = req.SupportsUpdateNotice
+		client.directoryPos = clientDirectoryPosition(req.DirectorySerial, req.DirectoryKeySerial)
 		return s.handleJoin(client, req)
 	case proto.MsgTunnelData, proto.MsgHeartbeat, proto.MsgPeerAddrAdvertise, proto.MsgP2PConnected,
 		proto.MsgToolHello, proto.MsgToolHelloAck, proto.MsgToolReq, proto.MsgToolResp,
@@ -1109,6 +1136,17 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 		return true
 	}
 
+	// 节点状态（节点模式且列表里有本机时才有）。停用拒绝一切注册，且必须在按 ClientID 复用之前：
+	// 复用会把会话换绑到新连接并关掉原 share 的连接，而停用不踢已建立的会话。
+	view := s.nodeView()
+	if view.self != nil && view.self.Status == directory.StatusDisabled {
+		log.Printf("Share register rejected (node %s disabled) client_fp=%s (version: %s)", view.self.Prefix, logger.CodeFingerprint(client.ClientID), client.Version)
+		s.sendError(client, proto.ErrCodeNodeDisabled, "该节点已停用，请升级客户端")
+		return true
+	}
+	// 排空只拒绝新客户端拿新码（它们会改选别的节点）；旧客户端不会迁移，拒绝它也没用。
+	draining := view.self != nil && view.self.Status == directory.StatusDraining && client.directoryPos != nil
+
 	var code string
 	var expiresAt time.Time
 	var reused bool
@@ -1151,17 +1189,6 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 
 	// 如果没有复用到，生成新的
 	if !reused {
-		if s.config.NoAuth {
-			// --no-auth 模式：使用固定 code，省掉 code 交换
-			code = proto.NoAuthCode
-		} else {
-			var err error
-			code, err = s.codes.Generate()
-			if err != nil {
-				s.sendError(client, "CODE_GEN_FAILED", err.Error())
-				return true
-			}
-		}
 		maxPerIP := s.limits.MaxActiveSessionsPerIP
 		if s.sourceIPLimitsDisabled() {
 			maxPerIP = 0
@@ -1172,7 +1199,7 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 		// 由 share 对比 RegisterResponse.Code 发现并提示。
 		// 必须出示持有证明（令牌绑定了码、ClientID 与原始签发时间）且未超 max-age 才复用，
 		// 并沿用原始 CreatedAt（复用不重置 max-age 计时）；否则落回新码。
-		if createdAt, ok := s.authorizeRequestedCode(client); ok {
+		if createdAt, ok := s.authorizeRequestedCode(client, view.prefix()); ok {
 			session, err = s.sessions.createPendingSessionExact(client.requestCode, client, s.config.CodeTTL, client.ClientID, host, maxPerIP, s.limits.MaxActiveSessionsTotal, createdAt)
 			if err == nil {
 				code = client.requestCode
@@ -1185,6 +1212,18 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 			}
 		}
 		if session == nil {
+			if draining {
+				log.Printf("Share register rejected (node %s draining) client_fp=%s (version: %s)", view.self.Prefix, logger.CodeFingerprint(client.ClientID), client.Version)
+				s.sendError(client, proto.ErrCodeNodeDraining, "该节点正在排空，请改选其他节点")
+				return true
+			}
+			if s.config.NoAuth {
+				// --no-auth 模式：使用固定 code，省掉 code 交换
+				code = proto.NoAuthCode
+			} else if code, err = s.codes.GenerateWithPrefix(view.prefix()); err != nil {
+				s.sendError(client, "CODE_GEN_FAILED", err.Error())
+				return true
+			}
 			session, err = s.sessions.createPendingSession(code, client, s.config.CodeTTL, client.ClientID, host, maxPerIP, s.limits.MaxActiveSessionsTotal)
 		}
 		if err != nil {
@@ -1215,6 +1254,10 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 		UpdateInfo:  s.updateInfo(),
 		STUNServers: s.config.AdvertiseSTUN,
 		HelpKept:    reuseResult != nil && reuseResult.KeptHelp != nil,
+		Directory:   view.forwardTo(client.directoryPos),
+	}
+	if view.self != nil && client.directoryPos != nil {
+		resp.NodeStatus = view.self.Status
 	}
 
 	msg, _ := proto.NewMessage(proto.MsgRegisterResponse, resp)
@@ -1315,6 +1358,8 @@ func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeCon
 		PeerHost:    s.legacyHelpUpdateHost(client, joinResult.ShareVersion, joinResult.ShareHost),
 		UpdateInfo:  s.updateInfo(),
 		STUNServers: s.config.AdvertiseSTUN,
+		// 只在加入成功时下发：失败响应保持统一，不给枚举协助码的人多一个信号。
+		Directory: s.nodeView().forwardTo(client.directoryPos),
 	}
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
@@ -1587,15 +1632,20 @@ func unixOrZero(t time.Time) int64 {
 
 // authorizeRequestedCode 判定本次注册能否复用 request_code，返回应沿用的原始签发时间。
 // 全部满足才放行，任一不满足都返回 false（调用方发新码）：
-//   - 码格式合法（no-auth 不处理；长度等于本 relay 码长、字符都在码字符集内）；
+//   - 码格式合法（no-auth 不处理；长度等于本 relay 码长、字符都在码字符集内；节点模式下首位是本节点前缀
+//     prefix——别的首位是本节点进入节点模式前发的，help 会按首位把它路由到别的节点，复用了也找不过来）；
 //   - 带有持久 ClientID 且出示的复用令牌验证通过（relay 签发、绑定该码+该 ClientID+签发时间）：
 //     这是「请求者就是码的原持有者」的证明；仅凭知道码（泄露）不够；
 //   - 令牌里的签发时间不在未来，且未超过 --code-max-age（到期后原持有者也不能续）。
 //
 // 码是否空闲由建会话时在 sm.mu 内原子判定。
-func (s *Server) authorizeRequestedCode(client *ClientConn) (time.Time, bool) {
+func (s *Server) authorizeRequestedCode(client *ClientConn, prefix string) (time.Time, bool) {
 	code := client.requestCode
 	if !s.canHonorRequestedCode(code) {
+		return time.Time{}, false
+	}
+	if !strings.HasPrefix(code, prefix) {
+		log.Printf("Requested code %s refused: not issued under this node's prefix %s", logger.MaskCode(code), prefix)
 		return time.Time{}, false
 	}
 	if client.ClientID == "" || client.reuseToken == "" {
