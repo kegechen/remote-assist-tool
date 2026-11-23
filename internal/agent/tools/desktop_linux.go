@@ -234,6 +234,11 @@ func (b *x11Backend) captureLocked(display int, ms []image.Rectangle) (*image.RG
 		return nil, image.Rectangle{}, fmt.Errorf("display %d out of range (have %d)", display, len(ms))
 	}
 	r := ms[display]
+	// grabInto 出错时会 drop() 掉连接；回退到这里时 conn 可能已为 nil。直接报错，
+	// 让调用方下次经 ensureConn 重连，避免在 nil 连接上继续发 X 请求（shm.Init(nil) 会 panic）。
+	if b.conn == nil {
+		return nil, r, errors.New("X 连接已断开")
+	}
 	w, h := r.Dx(), r.Dy()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	// 优先 MIT-SHM（共享内存零拷贝）；不可用时回退核心协议 GetImage

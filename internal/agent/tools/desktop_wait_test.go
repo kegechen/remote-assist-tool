@@ -44,7 +44,7 @@ func TestScreenCaptureLongPoll(t *testing.T) {
 	}
 
 	t0 := time.Now()
-	r := lpCap(t, tool, `{"quality":60,"since":`+itoa(first.Seq)+`,"wait":300}`)
+	r := lpCap(t, tool, `{"quality":60,"since":`+u64s(first.Seq)+`,"wait":300}`)
 	if !r.Unchanged || !r.Waited || r.WaitMS < 250 || time.Since(t0) < 250*time.Millisecond {
 		t.Fatalf("没变化时应等到期后返回 unchanged: %+v 用时 %v", r, time.Since(t0))
 	}
@@ -56,7 +56,7 @@ func TestScreenCaptureLongPoll(t *testing.T) {
 		frame.Store(b)
 	}()
 	t0 = time.Now()
-	r = lpCap(t, tool, `{"quality":60,"since":`+itoa(first.Seq)+`,"wait":2000,"delta":true}`)
+	r = lpCap(t, tool, `{"quality":60,"since":`+u64s(first.Seq)+`,"wait":2000,"delta":true}`)
 	if r.Unchanged || len(r.Data) == 0 || r.Seq == first.Seq {
 		t.Fatalf("画面变化后应返回新帧: %+v", r)
 	}
@@ -69,7 +69,7 @@ func TestScreenCaptureLongPoll(t *testing.T) {
 
 	// 不带 wait：行为不变，立即返回 unchanged
 	t0 = time.Now()
-	r = lpCap(t, tool, `{"quality":60,"since":`+itoa(r.Seq)+`}`)
+	r = lpCap(t, tool, `{"quality":60,"since":`+u64s(r.Seq)+`}`)
 	if !r.Unchanged || r.Waited || time.Since(t0) > 200*time.Millisecond {
 		t.Fatalf("无 wait 应立即返回: %+v", r)
 	}
@@ -83,13 +83,8 @@ func TestScreenCaptureLongPollHonorsCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	t0 := time.Now()
-	_, err := tool.Run(ctx, json.RawMessage(`{"since":`+itoa(first.Seq)+`,"wait":2000}`), nil)
+	_, err := tool.Run(ctx, json.RawMessage(`{"since":`+u64s(first.Seq)+`,"wait":2000}`), nil)
 	if err == nil || time.Since(t0) > time.Second {
 		t.Fatalf("取消后应尽快返回错误: err=%v 用时 %v", err, time.Since(t0))
 	}
-}
-
-func itoa(v uint64) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }

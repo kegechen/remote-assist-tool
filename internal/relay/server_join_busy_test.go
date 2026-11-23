@@ -31,7 +31,7 @@ func TestJoinSameSourceExistingHelperGetsExplicitError(t *testing.T) {
 	// 同源地址（同 IP，不同端口）再次加入：应拿到专用错误。
 	sameConn := &capturingConn{remoteAddr: "10.20.0.9:5200"}
 	same := &ClientConn{ID: "help-again", Conn: sameConn}
-	srv.handleJoin(same, code)
+	srv.handleJoin(same, proto.JoinRequest{Code: code})
 	resp := parseLastJoinResponse(t, &sameConn.buf)
 	if resp.Success {
 		t.Fatal("同源重复加入不应成功")
@@ -43,7 +43,7 @@ func TestJoinSameSourceExistingHelperGetsExplicitError(t *testing.T) {
 	// 异源地址加入：仍走统一 "join failed"。
 	otherConn := &capturingConn{remoteAddr: "10.20.0.77:5300"}
 	other := &ClientConn{ID: "help-other", Conn: otherConn}
-	srv.handleJoin(other, code)
+	srv.handleJoin(other, proto.JoinRequest{Code: code})
 	respOther := parseLastJoinResponse(t, &otherConn.buf)
 	if respOther.Success {
 		t.Fatal("异源加入不应成功")

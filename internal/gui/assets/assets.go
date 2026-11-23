@@ -1542,7 +1542,7 @@ async function deskStart(forceLoading){
     }else{ema=net;level=0}
     if(level>0||qSel_()){sharp=false}
     // 调试出口：仅地址带 ?dbg=1 时记录最近 200 帧的往返/处理/网络/ema/档位/在途数到 window.__deskDbg；平时不产生任何对象
-    if(DESK_DBG)(window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift();
+    if(DESK_DBG){(window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift()}
     if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
     else{
       still=0;
