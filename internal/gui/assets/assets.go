@@ -1451,8 +1451,8 @@ function deskSanitize(d){
   // 增量帧：只是整幅画面里的一块；坐标与整幅尺寸都必须在界内，否则拒绝
   o.delta=d.delta===true;o.x=deskInt(d.x,0,DESK_MAX_DIM,0);o.y=deskInt(d.y,0,DESK_MAX_DIM,0);
   o.canvas_w=deskInt(d.canvas_w,0,DESK_MAX_DIM,0);o.canvas_h=deskInt(d.canvas_h,0,DESK_MAX_DIM,0);
-  if(o.delta&&(o.canvas_w<1||o.canvas_h<1||o.x+o.width>o.canvas_w||o.y+o.height>o.canvas_h)){o.delta=false;o.data='';o.bad='对端返回的增量画面区域异常，已拒绝显示'}
   o.data=typeof d.data==='string'?d.data:'';
+  if(o.delta&&(o.canvas_w<1||o.canvas_h<1||o.x+o.width>o.canvas_w||o.y+o.height>o.canvas_h)){o.delta=false;o.data='';o.bad='对端返回的增量画面区域异常，已拒绝显示'}
   if(o.width*o.height>DESK_MAX_PIXELS){o.width=0;o.height=0;o.data='';o.bad='对端返回的画面尺寸异常，已拒绝显示'}
   if(o.data.length>DESK_MAX_B64){o.data='';o.bad='对端返回的画面数据过大，已拒绝显示'}
   return o;
@@ -1479,6 +1479,7 @@ async function deskStart(forceLoading){
   if(forceLoading||$('#desk-view').dataset.s!=='live')deskState('loading','正在获取画面…');
   const cv=$('#deskCv'),ctx=cv.getContext('2d');
   const ac=new AbortController();desk.ac=ac;
+  let pollCtl=null; // 在途长轮询请求的独立取消句柄：切换显示器/宽度/画质/帧率时立即中止，不必等它超时
   // ema：网络时延；pema：被控端处理耗时（-1 表示对端没有回传）；have：最近一次绘制的完整帧；still：连续“未变化”次数
   let ema=0,pema=-1,level=0,lastStart=0,inflight=[],fail=null,lastStat=0,still=0;
   const have={seq:0,key:'',at:0};
@@ -1495,7 +1496,10 @@ async function deskStart(forceLoading){
     return a;
   };
   const qSel_=()=>!!+$('#deskQ').value;
-  const issue=()=>{lastStart=performance.now();inflight.push(deskFetch(params(),ac.signal))};
+  const issue=()=>{lastStart=performance.now();const ctl=new AbortController();pollCtl=ctl;const onAc=()=>ctl.abort();ac.signal.addEventListener('abort',onAc,{once:true});inflight.push(deskFetch(params(),ctl.signal).finally(()=>ac.signal.removeEventListener('abort',onAc)))};
+  // 参数切换时中止在途长轮询：否则新参数要等旧请求（最长 DESK_WAIT_MS）返回后才生效。
+  const abortPoll=()=>{if(pollCtl)pollCtl.abort()};
+  const pollCtrls=['#deskDisp','#deskW','#deskQ','#deskFps'].map(sel=>{const el=$(sel);if(el)el.addEventListener('change',abortPoll);return el}).filter(Boolean);
   const sleep=ms=>new Promise(res=>setTimeout(res,ms));
   while(my===desk.loopId&&connected&&activeTab==='desk'){
     const fpsSel=+$('#deskFps').value,auto=!fpsSel,anyAuto=auto||!+$('#deskQ').value;
@@ -1512,12 +1516,15 @@ async function deskStart(forceLoading){
       const gap=interval/depth-(performance.now()-lastStart);
       if(gap<=0){issue();continue}
       if(!inflight.length){await sleep(gap);if(my!==desk.loopId)break;continue}
-      const first=await Promise.race([inflight[0],sleep(gap).then(()=>null)]);
+      let first;
+      try{first=await Promise.race([inflight[0],sleep(gap).then(()=>null)])}catch(e){if(my!==desk.loopId)break;if(e&&e.name==='AbortError')continue;throw e}
       if(my!==desk.loopId)break;
       if(first===null)continue;
     }
     if(!inflight.length)break;
-    const {r,t0,t1,key}=await inflight.shift();
+    let item;
+    try{item=await inflight.shift()}catch(e){if(my!==desk.loopId)break;if(e&&e.name==='AbortError')continue;throw e}
+    const {r,t0,t1,key}=item;
     if(my!==desk.loopId)break;
     const rtt=Math.round(t1-t0);
     if(!r.ok){fail=deskErrText(r.error);break}
@@ -1545,6 +1552,7 @@ async function deskStart(forceLoading){
     if(DESK_DBG){(window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift()}
     if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
     else{
+      sharp=false; // 画面恢复变化：从 q95 退回自动档，避免后续变化帧一直按高画质发送
       still=0;
       try{
         const u=deskB64ToBytes(d.data);
@@ -1578,6 +1586,7 @@ async function deskStart(forceLoading){
       if(sec>=5){desk.frames=0;desk.drawn=0;desk.bytes=0;desk.t0=now} // 滚动窗口，反映最近的帧率
     }
   }
+  pollCtrls.forEach(el=>el.removeEventListener('change',abortPoll));
   ac.abort();
   if(desk.ac===ac)desk.ac=null;
   if(my===desk.loopId){desk.running=false;if(fail)deskState('error',fail);else if(!connected)deskState('idle',dropInfo?'连接已断开：'+dropInfo.text+'。'+dropInfo.hint:'连接已断开，请重新连接对端')}

@@ -1312,7 +1312,8 @@ func (s *ShareMode) ensureDaemon(sess proto.Session) {
 		// 远程桌面工具始终注册，未启用时调用会返回 desktop_disabled 并提示开关，便于排查。
 		reg.Register(tools.NewScreenCapture(s.enableDesktop))
 		reg.Register(tools.NewInput(s.enableDesktop))
-		// 真终端（PTY）：设了 --allow-exec 白名单时默认整体禁用，避免经 shell 绕过白名单；--allow-pty 可显式开放。
+		// 真终端（PTY）默认禁用，由被控端 --allow-pty 显式开放；开放后 shell 会绕过
+		// --allow-exec / --deny-exec / --root 等护栏。
 		for _, t := range tools.NewPTYTools(tools.PTYDisabled(s.allowPTY)) {
 			reg.Register(t)
 		}
