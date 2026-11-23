@@ -621,13 +621,13 @@ func keysymForKey(key string) (xproto.Keysym, bool) {
 
 func platformDesktopOps() *DesktopOps {
 	return &DesktopOps{
-		Displays: x11.displays,
-		Capture:  x11.capture,
+		Displays:    x11.displays,
+		Capture:     x11.capture,
 		CaptureHint: x11.captureHint,
-		Bounds:   x11.bounds,
-		Mouse:    x11.mouse,
-		Key:      x11.key,
-		Text:     x11.text,
+		Bounds:      x11.bounds,
+		Mouse:       x11.mouse,
+		Key:         x11.key,
+		Text:        x11.text,
 	}
 }
 

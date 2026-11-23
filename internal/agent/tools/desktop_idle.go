@@ -40,6 +40,8 @@ func touchDesktopIdle() {
 }
 
 func releaseDesktopIdle() {
+	// 抓屏缓存会常年持有整帧图像（4K 单屏约 33MB），空闲回收时必须一并释放。
+	releaseAllFrameCaches()
 	platformReleaseIdle()
 	// 抓屏/编码期间堆会涨到几十 MB，空闲后主动把空闲页还给系统，让常驻内存回落到使用前水平。
 	debug.FreeOSMemory()

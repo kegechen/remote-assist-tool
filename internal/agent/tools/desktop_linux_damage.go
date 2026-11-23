@@ -50,8 +50,19 @@ func (b *x11Backend) damageInit() bool {
 // drainDamage 取出积压的 DamageNotify，并入 dirty；之后 Subtract 复位以便继续收到事件。
 func (b *x11Backend) drainDamage() {
 	got := false
+	errSkips := 0
 	for {
-		ev, _ := b.conn.PollForEvent()
+		ev, err := b.conn.PollForEvent()
+		if err != nil {
+			// 排队的 X 错误（ev==nil、err!=nil）不能当成「队列空」提前退出，否则后面的
+			// DamageNotify 会留到下一轮，表现为输入后画面偶尔慢一拍。丢弃错误继续读；
+			// 连接真断了时 PollForEvent 会持续报错，用计数兜底避免死循环。
+			errSkips++
+			if errSkips > 32 || b.conn == nil {
+				break
+			}
+			continue
+		}
 		if ev == nil {
 			break
 		}
@@ -62,7 +73,9 @@ func (b *x11Backend) drainDamage() {
 		}
 	}
 	if got {
-		_ = damage.Subtract(b.conn, b.dmg.id, 0, 0).Check()
+		// 必须用 checked 版本：非 checked 的 .Check() 不会同步，错误反而会排进事件队列，
+		// 被下一次 drainDamage 当成 X 错误读到。
+		_ = damage.SubtractChecked(b.conn, b.dmg.id, 0, 0).Check()
 	}
 }
 

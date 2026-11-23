@@ -14,8 +14,8 @@ import (
 
 const (
 	tileSize        = 64
-	tileRingSize    = 24   // 记录的 seq 个数；流水线深度只有 1~3，足够
-	deltaMaxAreaPct = 55   // 变化包围盒超过整幅这个比例就直接发整帧
+	tileRingSize    = 24 // 记录的 seq 个数；流水线深度只有 1~3，足够
+	deltaMaxAreaPct = 55 // 变化包围盒超过整幅这个比例就直接发整帧
 )
 
 type tileGrid struct {
