@@ -52,6 +52,17 @@ func TestBuiltinRoots(t *testing.T) {
 	}
 }
 
+// 内置根必须配齐主、备两把：空着时目录功能整体关闭，只配一把时恢复路径缺角，而这两种都不会在运行时报任何错。
+// 发版换公钥时这个测试不用改，只要两个角色都在。
+func TestBuiltinRootsHaveBothRoles(t *testing.T) {
+	r := directory.BuiltinRoots()
+	for _, name := range []string{directory.SignerPrimary, directory.SignerBackup} {
+		if len(r.Keys[name]) != ed25519.PublicKeySize {
+			t.Errorf("roots.go: Keys[%q] 没配置；用 relay-admin keygen 生成后把公钥填进 builtinRoots", name)
+		}
+	}
+}
+
 // checkRoots 自己得真能查出问题，否则 TestBuiltinRoots 形同虚设（内置根现在还是空的）。
 func TestCheckRootsCatchesMistakes(t *testing.T) {
 	pub := dirtest.SeedKey("root-a").Public().(ed25519.PublicKey)

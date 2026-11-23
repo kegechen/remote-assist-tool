@@ -3,6 +3,7 @@ package directory
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 )
 
@@ -30,9 +31,24 @@ type Roots struct {
 	RevokedRoots []string
 }
 
-// 内置根公钥。由 `relay-admin keygen` 生成后填入；为空时目录功能整体关闭（Verify 返回 ErrNoRoots），
-// 客户端退回内置默认节点，行为与没有这个功能时一致。公钥本身是公开信息，可以进仓库。
-var builtinRoots = Roots{}
+// 内置根公钥，由 `relay-admin keygen` 生成。公钥本身是公开信息，可以进仓库；私钥和口令只在本机离线保管，绝不进仓库。
+// 某个角色没有有效公钥时，目录功能对该角色视同没配置：两把都没有则整体关闭（Verify 返回 ErrNoRoots），
+// 客户端退回内置默认节点，行为与没有这个功能时一致。TestBuiltinRootsHaveBothRoles 保证两个角色都配齐。
+var builtinRoots = Roots{
+	Keys: map[string]ed25519.PublicKey{
+		SignerPrimary: rootKey("RqaTxDIKWy+ET8+8OtvEnrg1BzYmRQpbkz1UJk3WD3s="),
+		SignerBackup:  rootKey("ZZylNCq6hNkEToWSZ1FDqTmmMIHeymJCyZMdlO3CxBw="),
+	},
+}
+
+// rootKey 解码内置的 base64 公钥。格式不对时返回 nil，该角色按没配置处理（失败时关闭，不会信任错误的密钥）。
+func rootKey(b64 string) ed25519.PublicKey {
+	b, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		return nil
+	}
+	return b
+}
 
 // BuiltinRoots 返回编进二进制的根。
 func BuiltinRoots() Roots { return builtinRoots }
