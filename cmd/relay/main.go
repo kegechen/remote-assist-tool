@@ -75,6 +75,9 @@ func main() {
 	}
 
 	args := os.Args[1:]
+	if handled, exitCode := dispatchSubcommand(args, os.Stdout, os.Stderr); handled {
+		os.Exit(exitCode)
+	}
 	if len(args) > 0 && args[0] == "run" {
 		args = args[1:]
 	}
@@ -266,7 +269,7 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.DurationVar(&opts.directoryRefresh, "directory-refresh", opts.directoryRefresh, "Node mode: how often to fetch --directory-url (at least 1m)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
-		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
+		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n  %s node-request [options]   (generate a node enrollment request; see node-request -h)\n\nOptions:\n", os.Args[0], os.Args[0], os.Args[0])
 		fs.PrintDefaults()
 		fmt.Fprintln(stderr)
 	}
