@@ -89,8 +89,9 @@ func (s *Server) acceptQUICConn(ctx context.Context, qc *quic.Conn) {
 	clientIP := qc.RemoteAddr().String()
 	if s.blocklist != nil {
 		if bh, _, err := net.SplitHostPort(clientIP); err == nil && !s.blocklist.CheckAccept(bh) {
-			_ = qc.CloseWithError(0, proto.BlockedMessage)
+			// 先记再关：客户端一看到关闭就可能去读计数（测试就是这样），先关的话可能读到 0。
 			s.recordBlocked(bh)
+			_ = qc.CloseWithError(0, proto.BlockedMessage)
 			return
 		}
 	}
