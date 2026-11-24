@@ -74,9 +74,14 @@ type HelpMCPBootstrap struct {
 	cfg *Config
 	// nodes 非 nil 表示自动模式（UseNodeList）：不带 server 的 connect 按协助码找节点（spec 6.4），各次 connect 共用。
 	nodes *helpNodes
+	// learn 非 nil 表示显式的进程（命令行指定了 relay，LearnNodeList）：每次 connect 照旧只连指定的地址、TOFU，
+	// 只学列表（见 HelpMode.learn）。
+	learn *dirManager
 	// stunFollowsRelay：进程是自动模式（UseNodeList，有没有列表都算），每次 connect 的 STUN 都跟着实际连上的 relay，
 	// 带不带 server 都一样（见 HelpMode.p2pSTUN）。
 	stunFollowsRelay bool
+	// stderr 是 connect 成功后那几行提示（连的哪台 relay、运营者、对端、升级）写到哪，nil 时写 os.Stderr。测试换成缓冲。
+	stderr io.Writer
 
 	connectMu    sync.Mutex // 串行化 connect，避免并发调用互相拆连接
 	mu           sync.Mutex
@@ -120,6 +125,14 @@ func (b *HelpMCPBootstrap) notConnectedErr() error {
 
 func NewHelpMCPBootstrap(cfg *Config) *HelpMCPBootstrap {
 	return &HelpMCPBootstrap{cfg: cfg}
+}
+
+// errw 返回 connect 提示的去处，见 stderr。
+func (b *HelpMCPBootstrap) errw() io.Writer {
+	if b.stderr != nil {
+		return b.stderr
+	}
+	return os.Stderr
 }
 
 // Run 阻塞跑 MCP stdio server，直到 stdin EOF
@@ -484,8 +497,19 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
 	h.stunFollowsRelay = b.stunFollowsRelay
-	if target.Auto {
+	switch {
+	case target.Auto:
 		h.useNodes(b.nodes)
+	case b.nodes != nil:
+		// 自动模式的进程里指定了地址（spec 6.1）：照旧连它，证书按这个地址属于哪个节点来校验（Client.bindAddr）；
+		// 也学列表，并在后台刷新列表（列表地址按列表严格比对，列表旧了就连不上）。展示、升级链接按认出的节点，见下面 h.node。
+		h.learn = b.nodes.dm
+		b.nodes.refreshInBackground()
+		if err := h.client.bindAddr(b.nodes.dm.AddrNode(effectiveCfg.ServerAddr)); err != nil {
+			return nil, fmt.Errorf("relay connect failed: %w", err)
+		}
+	default:
+		h.learn = b.learn
 	}
 	resp, err := h.connectAndJoin()
 	if err != nil {
@@ -503,12 +527,26 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 		}
 		return nil, fmt.Errorf("join failed: %w", err)
 	}
+	if !target.Auto && b.nodes != nil {
+		h.node = h.learned
+	}
 	// 自动模式下 h 已连到按码找到的节点：记下实际地址，结果和幂等判断都用它（spec 6.4 第 5 条）。
 	// effectiveCfg 就是 h.client.config，下面用到的地址都是这个。
 	target.Server = h.client.serverAddr()
-	fmt.Fprintf(os.Stderr, "MCP: 已连接中转服务 %s\n", relayDesc(&effectiveCfg))
+	desc := relayDesc(&effectiveCfg)
+	if h.node != nil {
+		// 写实际连的地址（可能是本机专用地址）：这一行是给本机看的，与协助信息里给协助端的地址不同。
+		desc = relayDescOnNode(target.Server)
+	}
+	errw := b.errw()
+	fmt.Fprintf(errw, "MCP: 已连接中转服务 %s\n", desc)
+	if h.node != nil {
+		if op := operatorNote(h.node); op != "" {
+			fmt.Fprintf(errw, "MCP: %s\n", op)
+		}
+	}
 	if resp.PeerHost != "" {
-		fmt.Fprintf(os.Stderr, "MCP: 对端标识 %s\n", resp.PeerHost)
+		fmt.Fprintf(errw, "MCP: 对端标识 %s\n", resp.PeerHost)
 	}
 	// --- 工具握手锚定在 relay ---
 	// relay 是可靠通道，且 join 刚在同一条连接上成功往返过，握手必成。P2P 一律降级为
@@ -558,12 +596,12 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	if sess.Version == proto.ToolProtocolVersionV1 {
 		result.Warning = v1CompatWarning
 	}
-	result.UpdateNotice, result.PeerUpdateNotice = updateNotices(resp)
+	result.UpdateNotice, result.PeerUpdateNotice = updateNotices(resp, h.node)
 	if n := result.UpdateNotice; n != nil {
-		fmt.Fprintf(os.Stderr, "MCP: %s\n", n)
+		fmt.Fprintf(errw, "MCP: %s\n", n)
 	}
 	if n := result.PeerUpdateNotice; n != nil {
-		fmt.Fprintf(os.Stderr, "MCP: %s\n", n.PeerString())
+		fmt.Fprintf(errw, "MCP: %s\n", n.PeerString())
 	}
 
 	// 必须在启动读循环前发布活动状态。否则连接若立即断开，teardown 可能先运行却

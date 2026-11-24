@@ -118,6 +118,9 @@ type Client struct {
 	// 指纹严格比对、只用这个地址声明过的传输，不退回 TOFU：那等于把身份校验降级，还会把节点地址写进指纹表。
 	// 指纹是接管时的快照，见 nodePin：会断线重连的调用方要按最新列表重新 dialNode，不要靠 Connect。
 	node *nodePin
+	// listed 是 TOFU 连接时直接放行的证书指纹，不查也不写指纹表（crypto.ClientTLSOptions.ListedFPs）。只有自动模式的进程里
+	// 指定了某节点本机专用地址的连接（MCP connect 带 server）设它，是那个节点的指纹，见 bindAddr。
+	listed []string
 	// peerFP 当前连接上 relay 出示的叶子证书指纹，没有 TLS 时为空。share 据此判断重连后连的是不是同一台 relay。
 	peerFP string
 	mu     sync.Mutex
@@ -168,6 +171,13 @@ func (c *Client) relaySTUNServers() []string {
 	return append([]string(nil), c.relaySTUN...)
 }
 
+// trustListed 设之后 TOFU 连接时按列表放行的证书指纹（见 listed）；nil 表示不按列表放行。
+func (c *Client) trustListed(fps []string) {
+	c.mu.Lock()
+	c.listed = fps
+	c.mu.Unlock()
+}
+
 // NewClient 创建客户端
 func NewClient(cfg *Config) *Client {
 	return &Client{
@@ -197,6 +207,7 @@ func (c *Client) Connect() error {
 			TrustNewCert: c.config.TrustNewCert,
 			TrustStore:   c.config.trustStore,
 			OnPin:        logPinResult(c.config.ServerAddr),
+			ListedFPs:    c.listed,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create TLS config: %w", err)

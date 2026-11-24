@@ -148,3 +148,9 @@ func isLANRelay(server, defaultServer string) bool {
 	}
 	return client.IsLANServer(client.NormalizeServerAddr(addr))
 }
+
+// sameServerAddr 判断两个 relay 地址是否相同：补上默认端口、不分大小写。
+func sameServerAddr(a, b string) bool {
+	norm := func(s string) string { return client.NormalizeServerAddr(strings.TrimSpace(s)) }
+	return strings.EqualFold(norm(a), norm(b))
+}

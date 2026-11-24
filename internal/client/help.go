@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/remote-assist/tool/internal/directory"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/sysinfo"
@@ -33,6 +35,15 @@ type HelpMode struct {
 	// stunFollowsRelay：config.STUNServer 为空时用实际连上的 relay 主机的 3478（见 p2pSTUN）。进程是自动模式时就开，
 	// 与这次有没有节点列表无关：调用方这时没按默认地址推导 STUN，MCP connect 带了 server、拿不到家目录时也要靠它。
 	stunFollowsRelay bool
+	// node 是最近一次成功加入所在的列表节点（证书按列表严格比对连上的；自动模式 MCP 进程里带 server 的 connect 是证书
+	// 按列表放行的，见 HelpMCPBootstrap.connectLocked）；连的是默认地址、TOFU 时为 nil。展示和升级链接按它来（spec 6.6、6.7）。
+	node *directory.Node
+	// learn 非 nil 时不选节点，只学列表（显式模式，或自动模式 MCP 进程里带 server 的 connect；spec 6.1、6.5）：
+	// 加入时带上列表位置，收下 relay 转发的列表，证书属于列表节点、连的又不是它的列表地址时记为本机专用地址
+	// （dirManager.Learn）。nodes 非 nil 时不用它。
+	learn *dirManager
+	// learned 是最近一次加入时 learn 认出的列表节点（relay 出示的证书属于它），没认出时为 nil。
+	learned *directory.Node
 }
 
 // NewHelpMode 创建协助模式
@@ -96,9 +107,9 @@ func isJoinRejected(err error) bool {
 // 由 share 判断这次加入的是不是正在和它跑 P2P 的那个协助端（见 proto.P2PResumeProof）。
 func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinResponse, error) {
 	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary(), SupportsUpdateNotice: true, SupportsCanonicalCode: true, ResumeProof: proof}
-	if h.nodes != nil {
-		// 自动模式带上缓存的列表位置：relay 手里的列表更新时随加入成功的响应下发。
-		serial, keySerial := h.nodes.dm.Position()
+	if dm := h.listManager(); dm != nil {
+		// 带上缓存的列表位置：relay 手里的列表更新时随加入成功的响应下发。显式模式也带，好收下列表（spec 6.1）。
+		serial, keySerial := dm.Position()
 		req.DirectorySerial, req.DirectoryKeySerial = &serial, keySerial
 	}
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
@@ -122,12 +133,23 @@ func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinRespon
 	if !resp.Success {
 		return nil, joinFailureError(resp.Error)
 	}
-	if h.nodes != nil {
+	switch {
+	case h.nodes != nil:
 		h.nodes.dm.Offer(resp.Directory, "relay "+h.client.serverAddr())
+	case h.learn != nil:
+		h.learned = h.learn.Learn(resp.Directory, h.client.serverAddr(), h.client.peerFingerprint())
 	}
 	h.adoptCanonicalCode(resp.Code)
 	h.client.setRelaySTUN(resp.STUNServers)
 	return &resp, nil
+}
+
+// listManager 返回加入时带列表位置用的管理器：自动模式是 nodes 的，只学列表时是 learn，都没有时为 nil。
+func (h *HelpMode) listManager() *dirManager {
+	if h.nodes != nil {
+		return h.nodes.dm
+	}
+	return h.learn
 }
 
 // adoptCanonicalCode 采纳 relay 返回的规范码：会话密钥由两端各自用码派生，help 端
@@ -148,15 +170,37 @@ func (h *HelpMode) adoptCanonicalCode(returned string) {
 
 // updateNotices 根据 relay 下发的最新版本，分别检查本机与被协助端是否需要升级。
 // 被协助端的下载链接按其身份串推断平台（老用户多在被协助端，这条最有用）；
-// 推断不出平台时退回 Release 页。relay 未下发时两者都为 nil。
-func updateNotices(resp *proto.JoinResponse) (self, peer *update.Notice) {
-	if n, ok := update.CheckSelf(version.Info(), resp.LatestVersion, resp.DownloadURL, resp.ReleasePage); ok {
+// 推断不出平台时退回 Release 页。relay 未下发时两者都为 nil。node 是所在的列表节点（见 HelpMode.node）：
+// 第三方节点下发的链接不用，换成内置的官方地址（updateLinks，spec 6.6）。
+func updateNotices(resp *proto.JoinResponse, node *directory.Node) (self, peer *update.Notice) {
+	downloadURL, releasePage := updateLinks(node, resp.UpdateInfo)
+	if n, ok := update.CheckSelf(version.Info(), resp.LatestVersion, downloadURL, releasePage); ok {
 		self = &n
 	}
-	if n, ok := update.CheckPeer(resp.PeerVersion, resp.PeerHost, resp.LatestVersion, resp.DownloadURL, resp.ReleasePage); ok {
+	if n, ok := update.CheckPeer(resp.PeerVersion, resp.PeerHost, resp.LatestVersion, downloadURL, releasePage); ok {
 		peer = &n
 	}
 	return self, peer
+}
+
+// printJoined 打印加入成功后的提示：对端信息、会话 ID、本机与被协助端的升级提示（链接按所在节点取，见 updateNotices）。
+func (h *HelpMode) printJoined(out io.Writer, resp *proto.JoinResponse) {
+	fmt.Fprintln(out, "已连接到被协助端！")
+	fmt.Fprintf(out, "本机标识: %s\n", sysinfo.Summary())
+	if resp.PeerVersion != "" {
+		fmt.Fprintf(out, "对端版本: %s\n", resp.PeerVersion)
+	}
+	if resp.PeerHost != "" {
+		fmt.Fprintf(out, "对端标识: %s\n", resp.PeerHost)
+	}
+	fmt.Fprintf(out, "会话ID: %s\n", resp.SessionID)
+	self, peer := updateNotices(resp, h.node)
+	if self != nil {
+		fmt.Fprintf(out, "\n[提示] %s\n", self)
+	}
+	if peer != nil {
+		fmt.Fprintf(out, "\n[提示] %s\n", peer.PeerString())
+	}
 }
 
 // Run 运行协助模式
@@ -173,25 +217,9 @@ func (h *HelpMode) Run() error {
 		if h.mcpStdio {
 			out = os.Stderr
 		}
-		println := func(args ...any) { fmt.Fprintln(out, args...) }
 		printf := func(f string, args ...any) { fmt.Fprintf(out, f, args...) }
 
-		println("已连接到被协助端！")
-		printf("本机标识: %s\n", sysinfo.Summary())
-		if resp.PeerVersion != "" {
-			printf("对端版本: %s\n", resp.PeerVersion)
-		}
-		if resp.PeerHost != "" {
-			printf("对端标识: %s\n", resp.PeerHost)
-		}
-		printf("会话ID: %s\n", resp.SessionID)
-		self, peer := updateNotices(resp)
-		if self != nil {
-			printf("\n[提示] %s\n", self)
-		}
-		if peer != nil {
-			printf("\n[提示] %s\n", peer.PeerString())
-		}
+		h.printJoined(out, resp)
 
 		// MCP stdio 模式：跳过 SSH 监听，直接运行工具通道
 		if h.mcpStdio {

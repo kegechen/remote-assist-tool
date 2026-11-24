@@ -418,16 +418,31 @@ func (sn *shareNodes) migrate(relayDraining bool, peerFP string) bool {
 }
 
 // nodeByAddr 找地址是 addr 的节点：列表里的地址，或缓存里记的本机专用地址（主机名不分大小写）。
+// 本机专用地址恰好是别的节点的列表地址时以列表为准：列表签过名，本机专用地址只是本机记下的。
 func nodeByAddr(v *directory.Verified, cache *directory.Cache, addr string) *directory.Node {
+	if n, _, ok := listedTarget(v, addr); ok {
+		return n
+	}
+	return localAddrNode(v, cache, addr)
+}
+
+// listedTarget 找 addr 是哪个节点在列表里的地址（TCP、QUIC，主机名不分大小写），t 是这个地址声明过的传输。
+func listedTarget(v *directory.Verified, addr string) (n *directory.Node, t nodeTarget, ok bool) {
 	for i := range v.Nodes {
-		n := &v.Nodes[i]
-		if local := cache.LocalAddr(v, n.Prefix); local != "" && strings.EqualFold(local, addr) {
-			return n
-		}
-		for _, t := range nodeDialOrder(*n, "") {
+		for _, t := range nodeDialOrder(v.Nodes[i], "") {
 			if strings.EqualFold(t.Addr, addr) {
-				return n
+				return &v.Nodes[i], t, true
 			}
+		}
+	}
+	return nil, nodeTarget{}, false
+}
+
+// localAddrNode 找 addr 是哪个节点记下的本机专用地址（主机名不分大小写）。
+func localAddrNode(v *directory.Verified, cache *directory.Cache, addr string) *directory.Node {
+	for i := range v.Nodes {
+		if local := cache.LocalAddr(v, v.Nodes[i].Prefix); local != "" && strings.EqualFold(local, addr) {
+			return &v.Nodes[i]
 		}
 	}
 	return nil

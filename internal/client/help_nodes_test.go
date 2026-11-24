@@ -354,6 +354,9 @@ func TestHelpFallsBackToDefaultNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantAt(t, h, d.addr, true)
+	if h.node == nil || h.node.Prefix != "D" {
+		t.Fatalf("回退后所在的节点应为默认节点 D（展示、升级链接按它）: %+v", h.node)
+	}
 	wantJoins(t, w, "W", 1)
 	wantJoins(t, d, "D", 1)
 	e.wantLogs(1, "在节点 node-W（W）上加入失败", "默认节点")
@@ -371,6 +374,9 @@ func TestHelpFallsBackToDefaultAddrWithoutDefaultNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantAt(t, h, d.addr, false)
+	if h.node != nil {
+		t.Fatalf("回退到的是默认地址（TOFU），不在列表节点上: %+v", h.node)
+	}
 	wantJoins(t, w, "W", 1)
 	wantUntouched(t, other, "停用的默认节点")
 }
@@ -900,7 +906,8 @@ func TestMCPExplicitServerReusesRoutedSession(t *testing.T) {
 	}
 }
 
-// 带了 server 的 connect 是显式模式：只连它，不路由。之后不带 server 的是新意图，按码路由。
+// 带了 server 的 connect 是显式模式：只连它，不路由（地址是 D 的列表地址，证书按 D 严格比对，spec 6.1）。
+// 之后不带 server 的是新意图，按码路由。
 func TestMCPExplicitThenAutoConnect(t *testing.T) {
 	d, w, _, b := twoNodeBootstrap(t)
 	res, err := mcpConnect(t, b, `{"code":"W234-5678-9ABC","server":"`+d.addr+`"}`)
@@ -910,8 +917,8 @@ func TestMCPExplicitThenAutoConnect(t *testing.T) {
 	b.mu.Lock()
 	onNode := b.help != nil && b.help.client.node != nil
 	b.mu.Unlock()
-	if res.Server != d.addr || onNode {
-		t.Fatalf("显式 connect 应 TOFU 连 %s，结果 %s（节点模式 %v）", d.addr, res.Server, onNode)
+	if res.Server != d.addr || !onNode {
+		t.Fatalf("显式 connect 应只连 %s、按 D 严格比对证书，结果 %s（节点模式 %v）", d.addr, res.Server, onNode)
 	}
 	wantUntouched(t, w, "W")
 	if res, err = mcpConnect(t, b, `{"code":"W234-5678-9ABC"}`); err != nil {

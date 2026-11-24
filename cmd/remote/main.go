@@ -170,7 +170,7 @@ func runShare(args []string) {
 
 	fs.Parse(args)
 	rejectPositionalArgs(fs, "share")
-	// 自动模式（spec 6.1）：没指定 relay 时按节点列表选节点。要在下面还原升级隔离的 HOME 之前取。
+	// 自动模式（spec 6.1）：没指定 relay 时按节点列表选节点；指定了时只学它转发的列表。要在下面还原升级隔离的 HOME 之前取。
 	relayMode := newShareRelay(fs, *standalone, *plain, isUpgradeSuccessor, *relayHint)
 	// 参数校验紧跟 parse：非法取值要在任何启动输出和副作用之前就退出。
 	*minProto = normalizeMinProto(*minProto)

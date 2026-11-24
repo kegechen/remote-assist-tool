@@ -75,6 +75,11 @@ type ClientTLSOptions struct {
 	AllowedFPs []string
 	// OnFPMismatch 严格比对失败时收到本次出示证书的指纹。可为 nil。
 	OnFPMismatch func(fp string)
+
+	// ListedFPs 节点列表里各节点的证书指纹。只在启用 TOFU 时起作用（见 PinAddr）：出示的叶子证书在其中（不分大小写）
+	// 就放行，不查也不写指纹表、不调 OnPin——根签名的列表已经认定它是哪个节点，指纹与记录不同是节点按列表换了证书；
+	// 不在其中照常 TOFU。给自动模式进程里指定了地址的连接用（spec 6.1）。AllowedFPs 非空时被忽略。
+	ListedFPs []string
 }
 
 // NewClientTLSConfig 按 ClientTLSOptions 构造客户端 tls.Config。
@@ -118,7 +123,11 @@ func NewClientTLSConfig(o ClientTLSOptions) (*tls.Config, error) {
 		if store == nil {
 			store = DefaultTrustStore()
 		}
-		config.VerifyPeerCertificate = pinVerifier(o.PinAddr, store, o.TrustNewCert, o.OnPin)
+		verify := pinVerifier(o.PinAddr, store, o.TrustNewCert, o.OnPin)
+		if len(o.ListedFPs) > 0 {
+			verify = listedOrPin(o.ListedFPs, verify)
+		}
+		config.VerifyPeerCertificate = verify
 	}
 
 	return config, nil

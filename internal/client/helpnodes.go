@@ -33,6 +33,9 @@ type helpNodes struct {
 	transport string // --transport
 	logf      func(format string, args ...any)
 	bg        sync.WaitGroup // 后台刷新列表的 goroutine
+
+	mu        sync.Mutex
+	lastRoute string // 上一次找节点的结果那一行（没打的为空串），见 noteRoute
 }
 
 func newHelpNodes(dm *dirManager, transport string, logf func(format string, args ...any)) *helpNodes {
@@ -47,13 +50,18 @@ type helpRoute struct {
 	cache  *directory.Cache
 }
 
-// route 为码 code 找要连的地方，并在后台按 RefreshIfStale 的规则刷新列表（spec 6.2：help 启动时在后台取，不拖慢连接）。
-func (hn *helpNodes) route(code string) helpRoute {
+// refreshInBackground 在后台按 RefreshIfStale 的规则刷新列表，不等它（spec 6.2：help 启动时在后台取，不拖慢连接）。
+func (hn *helpNodes) refreshInBackground() {
 	hn.bg.Add(1)
 	go func() {
 		defer hn.bg.Done()
 		_ = hn.dm.RefreshIfStale(context.Background())
 	}()
+}
+
+// route 为码 code 找要连的地方，并在后台刷新列表（refreshInBackground）。
+func (hn *helpNodes) route(code string) helpRoute {
+	hn.refreshInBackground()
 	v, cache := hn.dm.Current()
 	n := routeNodeForCode(v, code)
 	if n == nil && codeRoutable(code) {
@@ -65,14 +73,28 @@ func (hn *helpNodes) route(code string) helpRoute {
 		n = routeNodeForCode(v, code)
 		if n == nil && v != nil {
 			// 只写「没有」：日志里不写协助码（spec 6.5），首位也是码的一部分。
-			hn.logf("[relay] 节点列表里没有这个协助码所属的节点，改连默认节点")
+			hn.noteRoute("[relay] 节点列表里没有这个协助码所属的节点，改连默认节点")
+			return helpRoute{node: defaultNodeForHelp(v), v: v, cache: cache}
 		}
 	}
 	if n != nil {
-		hn.logf("[relay] 协助码属于节点 %s", nodeLabel(*n))
+		hn.noteRoute("[relay] 协助码属于节点 " + nodeLabel(*n))
 		return helpRoute{node: n, routed: true, v: v, cache: cache}
 	}
+	hn.noteRoute("")
 	return helpRoute{node: defaultNodeForHelp(v), v: v, cache: cache}
+}
+
+// noteRoute 打找节点的结果 line，与上一次相同时不打：MCP 每次 connect（含自动重连）都按码重新找，同一个结果不用
+// 反复说。line 为空表示这次没什么可说的（没有列表、码不路由），之后的结果照常打。
+func (hn *helpNodes) noteRoute(line string) {
+	hn.mu.Lock()
+	same := line == hn.lastRoute
+	hn.lastRoute = line
+	hn.mu.Unlock()
+	if line != "" && !same {
+		hn.logf("%s", line)
+	}
 }
 
 // defaultNodeForHelp 返回 help 能连的默认节点：列表里的默认节点没被停用（排空的照样接受它发过的码）；
@@ -122,14 +144,28 @@ func (b *HelpMCPBootstrap) UseNodeList(home string) {
 	b.nodes = newHelpNodesAt(home, b.cfg.Transport)
 }
 
-// newHelpNodesAt 建 help 用的列表状态，提示打到 stderr（MCP 的 stdout 是协议通道）。
+// LearnNodeList 用于显式模式（指定了 relay）：照旧只连指定的地址、按配置走 TOFU，展示不变；加入时带上列表位置、
+// 收下 relay 转发的列表，记下本机专用地址（spec 6.1、6.5）。不从 CF 取。home 同 UseNodeList。
+// 本程序没有内置根公钥、拿不到家目录时什么都不学。
+func (h *HelpMode) LearnNodeList(home string) {
+	h.learn = newOfflineDirManager(home, helpLogf)
+}
+
+// LearnNodeList 同 HelpMode.LearnNodeList：每次 connect（带不带 server）都照旧只连指定的地址，只学列表。
+func (b *HelpMCPBootstrap) LearnNodeList(home string) {
+	b.learn = newOfflineDirManager(home, helpLogf)
+}
+
+// helpLogf 是 help 列表提示的去处：stderr（MCP 的 stdout 是协议通道）。
+func helpLogf(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+
+// newHelpNodesAt 建 help 用的列表状态，提示打到 stderr。
 func newHelpNodesAt(home, transport string) *helpNodes {
-	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
-	dm := newDirManager(home, logf)
+	dm := newDirManager(home, helpLogf)
 	if dm == nil {
 		return nil
 	}
-	return newHelpNodes(dm, transport, logf)
+	return newHelpNodes(dm, transport, helpLogf)
 }
 
 // useNodes 让 h 按 hn 选节点；没有能用的列表时连现在配置的地址。
@@ -164,6 +200,7 @@ func (h *HelpMode) connectAndJoin() (*proto.JoinResponse, error) {
 	}
 	resp, err := h.joinOrClose()
 	if err == nil {
+		h.node = r.node
 		return resp, nil
 	}
 	d := defaultNodeForHelp(r.v)
@@ -183,6 +220,7 @@ func (h *HelpMode) connectAndJoin() (*proto.JoinResponse, error) {
 		// 报按前缀找到的节点上的错误：码的首位说它属于那里。
 		return nil, err
 	}
+	h.node = d
 	return resp, nil
 }
 

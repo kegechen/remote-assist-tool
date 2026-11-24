@@ -230,6 +230,30 @@ func (c *Client) connectNodeLocked() error {
 	return nil
 }
 
+// bindAddr 让之后的 Connect 按地址所属的节点 n（dirManager.AddrNode 的结果）校验证书，用于自动模式 MCP 进程里带 server 的
+// connect（spec 6.1）。不是认列表里任一节点的证书：那样列表里任何一个运营者都能冒充别的节点的地址。
+//   - 地址是 n 在列表里的地址（listed）：只认 n 的指纹，严格比对、不查也不写指纹表，只用这个地址声明过的传输 t（同 dialNode）。
+//     用户的 --transport 与之对不上时返回错误，不悄悄换传输。
+//   - 是 n 的本机专用地址：n 的证书直接放行、不查也不写指纹表（节点按列表换了证书也连得上），别的证书照旧 TOFU。
+//   - n 为 nil：照旧 TOFU。
+func (c *Client) bindAddr(n *directory.Node, t nodeTarget, listed bool) error {
+	switch {
+	case n == nil:
+		return nil
+	case !listed:
+		c.trustListed(n.TLSFPs)
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mode, err := targetTransport(c.config.Transport, t)
+	if err != nil {
+		return err
+	}
+	c.node = &nodePin{fps: append([]string(nil), n.TLSFPs...), mode: mode}
+	return nil
+}
+
 // leaveNode 退出节点模式：之后的 Connect 连 addr，按配置走 TOFU 或 CA 校验（没有可用的节点列表时就是这样）。
 // 不在节点模式时什么都不改。
 func (c *Client) leaveNode(addr string) {

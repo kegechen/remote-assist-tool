@@ -20,10 +20,7 @@ var ErrCertNotAllowed = errors.New("relay certificate fingerprint is not in the 
 // 回调是传输无关的：TCP（crypto/tls）与 QUIC（quic-go）都会调用它，但 QUIC 把握手错误转成文本的
 // 传输层错误，errors.Is 认不出 ErrCertNotAllowed——调用方要可靠地知道「是证书不符」就用 onMismatch。
 func fpVerifier(allowed []string, onMismatch func(fp string)) func([][]byte, [][]*x509.Certificate) error {
-	want := make(map[string]struct{}, len(allowed))
-	for _, a := range allowed {
-		want[strings.ToLower(a)] = struct{}{}
-	}
+	want := fpSet(allowed)
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
 			return errors.New("relay 没有出示任何证书")
@@ -40,5 +37,28 @@ func fpVerifier(allowed []string, onMismatch func(fp string)) func([][]byte, [][
 			short = short[:16]
 		}
 		return fmt.Errorf("%w（出示的指纹 %s…）", ErrCertNotAllowed, short)
+	}
+}
+
+// fpSet 把指纹列表转成按小写查找的集合。空串留在里面也无妨：算出来的指纹不会是空串。
+func fpSet(fps []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(fps))
+	for _, a := range fps {
+		set[strings.ToLower(a)] = struct{}{}
+	}
+	return set
+}
+
+// listedOrPin 构造 VerifyPeerCertificate 回调：叶子证书的指纹在 listed 里（不分大小写）就放行，否则交给 pin（TOFU）。
+// 见 ClientTLSOptions.ListedFPs。
+func listedOrPin(listed []string, pin func([][]byte, [][]*x509.Certificate) error) func([][]byte, [][]*x509.Certificate) error {
+	want := fpSet(listed)
+	return func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
+		if len(rawCerts) > 0 {
+			if _, ok := want[CertFingerprint(rawCerts[0])]; ok {
+				return nil
+			}
+		}
+		return pin(rawCerts, chains)
 	}
 }

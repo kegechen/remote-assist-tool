@@ -74,7 +74,7 @@ func TestUpdateNotices(t *testing.T) {
 	info := proto.UpdateInfo{LatestVersion: "v1.1.0", DownloadURL: update.DefaultDownloadURL, ReleasePage: update.DefaultReleasePage}
 
 	// 本机与对端都落后：本机按 runtime 平台，对端按其身份串平台
-	self, peer := updateNotices(&proto.JoinResponse{Success: true, PeerVersion: "0.0.7", PeerHost: "u@pc uos arm64", UpdateInfo: info})
+	self, peer := updateNotices(&proto.JoinResponse{Success: true, PeerVersion: "0.0.7", PeerHost: "u@pc uos arm64", UpdateInfo: info}, nil)
 	if self == nil || !strings.Contains(self.URL, "remote-assist-cli-"+runtime.GOOS+"-"+runtime.GOARCH) {
 		t.Errorf("self notice: %+v", self)
 	}
@@ -83,14 +83,14 @@ func TestUpdateNotices(t *testing.T) {
 	}
 
 	// 旧 relay 不下发：都不提示
-	self, peer = updateNotices(&proto.JoinResponse{Success: true, PeerVersion: "0.0.7"})
+	self, peer = updateNotices(&proto.JoinResponse{Success: true, PeerVersion: "0.0.7"}, nil)
 	if self != nil || peer != nil {
 		t.Errorf("no update info should yield no notice: %+v %+v", self, peer)
 	}
 
 	// 都已是最新
 	version.Version = "v1.1.0"
-	self, peer = updateNotices(&proto.JoinResponse{Success: true, PeerVersion: "1.1.0", UpdateInfo: info})
+	self, peer = updateNotices(&proto.JoinResponse{Success: true, PeerVersion: "1.1.0", UpdateInfo: info}, nil)
 	if self != nil || peer != nil {
 		t.Errorf("up to date should yield no notice: %+v %+v", self, peer)
 	}

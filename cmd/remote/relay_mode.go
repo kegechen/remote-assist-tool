@@ -51,17 +51,24 @@ func upgradeRealHome() string {
 // shareRelay 是 share 连 relay 的方式（spec 6.1）。要在 fs.Parse 之后、还原升级隔离的 HOME 之前取：
 // 还原时会清掉记着原家目录的内部变量。
 type shareRelay struct {
-	auto     bool   // 自动模式：按节点列表选节点
-	hint     string // --relay-hint（升级前所在的节点），已补默认端口
+	auto bool // 自动模式：按节点列表选节点
+	// learn：显式模式（--standalone、--plain 除外）。只连 --server，但注册时带上列表位置、收下它转发的节点列表（spec 6.1）。
+	learn    bool
+	hint     string // --relay-hint（升级前所在的节点），已补默认端口；只有自动模式用
 	listHome string // 节点列表缓存所在的家目录；空串时用 os.UserHomeDir
 }
 
-// 显式模式返回零值：--relay-hint 和节点列表缓存都用不上。
+// --standalone、--plain 返回零值：连的不是列表里的节点（内嵌 relay、明文），什么都不学。显式模式用不上 --relay-hint。
 func newShareRelay(fs *flag.FlagSet, standalone, plain, upgradeSuccessor bool, hint string) shareRelay {
-	if !shareUsesNodeList(fs, standalone, plain) {
+	var r shareRelay
+	switch {
+	case shareUsesNodeList(fs, standalone, plain):
+		r = shareRelay{auto: true, hint: client.NormalizeServerAddr(strings.TrimSpace(hint))}
+	case !standalone && !plain:
+		r = shareRelay{learn: true}
+	default:
 		return shareRelay{}
 	}
-	r := shareRelay{auto: true, hint: client.NormalizeServerAddr(strings.TrimSpace(hint))}
 	if upgradeSuccessor {
 		r.listHome = upgradeRealHome()
 	}
@@ -85,12 +92,19 @@ func relaySTUN(auto bool, stun, server string) string {
 // nodeListUser 是 *client.ShareMode 里 apply 用到的那部分，测试拿假的替换它。
 type nodeListUser interface {
 	UseNodeList(hint, home string)
+	LearnNodeList(home string)
 }
 
+var _ nodeListUser = (*client.ShareMode)(nil)
+
 // apply 把自动模式接到 share 上。share 的 --server 此时是内置默认节点：没有能用的节点列表时连它。
+// 显式模式只让 share 学 relay 转发的列表。
 func (r shareRelay) apply(share nodeListUser) {
-	if r.auto {
+	switch {
+	case r.auto:
 		share.UseNodeList(r.hint, r.listHome)
+	case r.learn:
+		share.LearnNodeList(r.listHome)
 	}
 }
 
@@ -98,11 +112,14 @@ func (r shareRelay) apply(share nodeListUser) {
 // help 不会是升级继任者（通道内升级只起 share），节点列表缓存总在当前用户的家目录。
 type helpRelay struct {
 	auto bool
+	// learn：显式模式（--plain 除外）。只连指定的 relay，但加入时带上列表位置、收下它转发的节点列表（spec 6.1）。
+	learn bool
 }
 
-// newHelpRelay 要在 fs.Parse 之后调用。判定同 share（shareUsesNodeList），只是 help 没有 --standalone。
+// newHelpRelay 要在 fs.Parse 之后调用。判定同 share（newShareRelay），只是 help 没有 --standalone。
 func newHelpRelay(fs *flag.FlagSet, plain bool) helpRelay {
-	return helpRelay{auto: shareUsesNodeList(fs, false, plain)}
+	auto := shareUsesNodeList(fs, false, plain)
+	return helpRelay{auto: auto, learn: !auto && !plain}
 }
 
 // stun 同 shareRelay.stun：自动模式下不按内置默认节点推导，留空让 help 跟着实际连上的节点走（见 client.HelpMode.UseNodeList）。
@@ -130,6 +147,7 @@ func (r helpRelay) configure(cfg *client.Config) {
 // helpNodeListUser 是 *client.HelpMode 与 *client.HelpMCPBootstrap 里 apply 用到的那部分，测试拿假的替换它。
 type helpNodeListUser interface {
 	UseNodeList(home string)
+	LearnNodeList(home string)
 }
 
 var (
@@ -138,8 +156,12 @@ var (
 )
 
 // apply 把自动模式接到 help 上。help 的 --server 此时是内置默认节点：没有能用的节点列表、码找不到节点时连它。
+// 显式模式只让 help 学 relay 转发的列表。
 func (r helpRelay) apply(h helpNodeListUser) {
-	if r.auto {
+	switch {
+	case r.auto:
 		h.UseNodeList("")
+	case r.learn:
+		h.LearnNodeList("")
 	}
 }

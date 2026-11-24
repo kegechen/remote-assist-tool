@@ -62,6 +62,11 @@ type ShareMode struct {
 	// nodes 非 nil 时是自动模式（spec 6.3）：按节点列表选节点，没有能用的列表时连 config.ServerAddr。
 	// nil 时只连 config.ServerAddr（显式模式，或本程序没有内置根公钥），与没有节点列表时完全一样。
 	nodes *shareNodes
+	// learn 非 nil 时是显式模式学列表（LearnNodeList，spec 6.1、6.5）：照旧只连 config.ServerAddr，注册时带上列表位置、
+	// 收下 relay 转发的列表，记下本机专用地址。nodes 非 nil 时不用它。
+	learn *dirManager
+	// learnDraining：显式模式下指定的 relay 说过自己在排空、拒绝了带列表位置的注册，之后注册不再带位置，见 learnFailed。
+	learnDraining bool
 	// relayDraining：最近一次注册响应说当前节点在排空，等协助端时迁走（spec 6.3）。
 	relayDraining bool
 	// codePrefix、codeAddr 是 code 在哪个节点（前缀，不在列表节点上时为空）、哪个地址上注册的，codeFPs 是注册时那台
@@ -449,6 +454,13 @@ func (s *ShareMode) UseNodeList(hint, home string) {
 	}
 }
 
+// LearnNodeList 用于显式模式（--server、REMOTE_RELAY_SERVER）：照旧只连 config.ServerAddr，注册时带上列表位置、
+// 收下 relay 转发的列表，记下本机专用地址（spec 6.1、6.5）。不从 CF 取、不选节点。home 同 UseNodeList。
+// 本程序没有内置根公钥、拿不到家目录时什么都不学。要在 Run 之前调用。
+func (s *ShareMode) LearnNodeList(home string) {
+	s.learn = newOfflineDirManager(home, func(format string, args ...any) { s.printf(format+"\n", args...) })
+}
+
 // p2pSTUN 是这一轮 P2P 用的 STUN 服务器，UDP 中继也走它。自动模式下用户没给 --stun 时用当前 relay 主机的 3478：
 // UDP 中继只认在它那里注册过的会话，share 换到别的节点后还用默认节点的，打洞失败时就中继不了。
 func (s *ShareMode) p2pSTUN() string {
@@ -585,6 +597,8 @@ func (s *ShareMode) reconnectWithBackoff() {
 			} else {
 				s.nodes.failed(err)
 			}
+		} else if err != nil {
+			s.learnFailed(err)
 		}
 		if err == nil {
 			if attempt > 1 {
@@ -613,6 +627,32 @@ func (s *ShareMode) connect() error {
 		return s.nodes.connect(s.client)
 	}
 	return s.client.Connect()
+}
+
+// learnFailed 处理显式模式学列表时的注册失败：指定的 relay 正在排空，拒绝了带列表位置（声明了能力）的注册。
+// 显式模式只连这一台、无从改选，之后注册不再带位置，像旧客户端那样被接纳——与没有这个功能时一样。
+func (s *ShareMode) learnFailed(err error) {
+	var rej *registerRejected
+	if s.learn == nil || s.learnDraining || !errors.As(err, &rej) || rej.Code != proto.ErrCodeNodeDraining {
+		return
+	}
+	s.learnDraining = true
+	s.printf("[relay] 中转服务 %s 正在排空，不接受带节点列表的新注册；指定了中转服务时不改选，之后按不带节点列表的方式在它上面注册\n",
+		s.client.config.ServerAddr)
+}
+
+// declaringList 返回注册时带列表位置用的管理器，不带时为 nil：自动模式见 shareNodes.declaresList；显式模式学列表时带，
+// 指定的 relay 说过自己在排空后不带（见 learnFailed）。
+func (s *ShareMode) declaringList() *dirManager {
+	switch {
+	case s.nodes != nil:
+		if s.nodes.declaresList() {
+			return s.nodes.dm
+		}
+	case !s.learnDraining:
+		return s.learn
+	}
+	return nil
 }
 
 // errNodeMigrated 表示等协助端时已经连上了别的节点（排空迁移），要在新节点上重新注册。
@@ -680,10 +720,10 @@ func (s *ShareMode) register() error {
 		keepHelp = s.keepHelpTag()
 		req.KeepHelp = keepHelp
 	}
-	if s.nodes != nil && s.nodes.declaresList() {
+	if dm := s.declaringList(); dm != nil {
 		// 带上缓存的列表位置：relay 手里的列表更新时随响应下发；也是能力声明，relay 据此对排空、停用的节点回错误码。
-		// 没有列表时默认地址上的 relay 说过自己在排空就不带，见 shareNodes.failedOffList。
-		serial, keySerial := s.nodes.dm.Position()
+		// 没有列表时默认地址上的 relay 说过自己在排空就不带，见 shareNodes.failedOffList、learnFailed。
+		serial, keySerial := dm.Position()
 		req.DirectorySerial, req.DirectoryKeySerial = &serial, keySerial
 	}
 	if err := s.client.SendMessage(proto.MsgRegisterRequest, req); err != nil {
@@ -721,8 +761,11 @@ func (s *ShareMode) register() error {
 	if err := proto.DecodePayload(msg, &resp); err != nil {
 		return err
 	}
-	if s.nodes != nil {
+	switch {
+	case s.nodes != nil:
 		s.nodes.dm.Offer(resp.Directory, "relay "+s.client.config.ServerAddr)
+	case s.learn != nil:
+		s.learn.Learn(resp.Directory, s.client.config.ServerAddr, s.client.peerFingerprint())
 	}
 	s.relayDraining = resp.NodeStatus == directory.StatusDraining
 	prevCode := s.code
@@ -846,12 +889,13 @@ func (s *ShareMode) registrationClientID() (string, error) {
 // server 必须一起给：光有协助码，协助端并不知道该去哪台 relay 找它——而实际连的那台是
 // 「编译期默认值 → REMOTE_RELAY_SERVER → --server → 补默认端口 → --standalone 改写」
 // 一路算出来的，宿主程序无从推断（standalone 下更是跟命令行上写的完全不是一回事）。
+// 自动模式下还可能是按节点列表选的哪个节点；在列表节点上时写的是列表里的地址，见 publicAddr。
 func (s *ShareMode) writeCodeFile() {
 	payload := struct {
 		Code      string `json:"code"`
 		Server    string `json:"server"`
 		ExpiresAt int64  `json:"expiresAt"`
-	}{Code: s.code, Server: s.client.config.ServerAddr}
+	}{Code: s.code, Server: s.publicAddr()}
 	if !s.expiresAt.IsZero() {
 		payload.ExpiresAt = s.expiresAt.Unix() // 0 = 本进程存活期间一直有效
 	}
@@ -867,6 +911,15 @@ func (s *ShareMode) writeCodeFile() {
 			writeCodeFileTo(path, data)
 		}
 	}
+}
+
+// publicAddr 是给协助端用的中转服务地址（协助码文件里的 server）：在列表节点上时是列表里的地址（listedAddr，
+// 本机专用地址协助端多半连不上），否则是实际连的地址。协助信息里「中转服务」一行同此。
+func (s *ShareMode) publicAddr() string {
+	if n := s.nodes.currentNode(); n != nil {
+		return listedAddr(n, s.client.config.ServerAddr)
+	}
+	return s.client.config.ServerAddr
 }
 
 // writeCodeFileTo 原子写单个协助码文件（.tmp + rename，0600）。失败仅记日志。

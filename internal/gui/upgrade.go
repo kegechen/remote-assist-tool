@@ -644,13 +644,57 @@ func (s *Server) markConnectionLost(client *MCPClient) bool {
 
 // upgradeReconnectServer 是通道内升级后连 new share 用的 server 参数（written 是 new share 在 code 文件里写的地址）。
 // 用户连 old 时是自动模式（服务器栏留空、GUI 也没设 REMOTE_RELAY_SERVER，help 子进程按节点列表找节点，spec 6.1）
-// 就不带地址，仍按新码找节点：new share 写的是它实际连的地址，可能是对方机器上的本机专用地址，这边连不上；带上地址
-// 还会让这次连接变成显式、走 TOFU，节点按列表换过证书时，这边按地址记的指纹对不上。其余情况照旧连 written。
+// 就不带地址，仍按新码找节点：那样会先试这个节点的本机专用地址，written 是列表里的公开地址，这边不一定连得上。
+// 其余情况照旧连 written（new share 在列表节点上时写的是列表里的地址，不是它的本机专用地址）。
 func upgradeReconnectServer(oldServer, defaultServer, written string) string {
 	if oldServer == "" && defaultServer == "" {
 		return ""
 	}
 	return written
+}
+
+// upgradeRetryServer 是按 tried（upgradeReconnectServer 的结果）连 new share 失败（错误 err）后再试一次用的 server 参数，
+// used 是这次再试实际连的地址（server 为空时 help 子进程按 defaultServer 连），ok 为 false 表示不再试。
+// 显式模式下 new share 在列表节点上时写的是节点在列表里的公开地址（spec 6.7），这边不一定连得上——比如
+// 这边只能经内网地址连那个节点；连 old 时用的地址这边刚连通过，new share 多半还在同一台 relay 上，就按它再试。
+// 自动模式（tried 为空）、连 old 用的就是 tried（补上默认端口后比较）时不再试。只有连 relay 这一步网络不通
+// （relayDialFailed）才再试：加入、握手阶段超时说明已经连到了写下的地址，等结果超时不知道卡在哪一步；
+// 被 relay 封禁、协助码不对时换地址也没用，多连一次还会让 relay 多记一次失败。
+func upgradeRetryServer(oldServer, defaultServer, tried string, err error) (server, used string, ok bool) {
+	if tried == "" || err == nil || !relayDialFailed(err) {
+		return "", "", false
+	}
+	used = oldServer
+	if used == "" {
+		used = defaultServer // 服务器栏留空、GUI 设了 REMOTE_RELAY_SERVER：help 子进程按它连
+	}
+	if used == "" || sameServerAddr(used, tried) {
+		return "", "", false
+	}
+	return oldServer, used, true
+}
+
+// relayDialFailed 判断 help 的 connect 是不是在连 relay 这一步网络不通：连不上、被拒、超时、找不到主机。
+// help 把这一步的失败写成 relay connect failed（client.HelpMCPBootstrap），之后各步各有前缀。错误经 MCP 传来时
+// 只剩文本，只能按文本里的网络错误字样判断。证书、TLS 的错误也带这个前缀，但不算：那是连到了写下的地址、
+// 对方出示的证书不对（可能是中间人），换地址连上会把这个警告盖过去；地址是用户写的，可能碰巧带网络错误的字样，
+// 所以先排除证书、TLS 的字样。连上后被断开（EOF、被重置）也不算：说明那边有东西在听。
+func relayDialFailed(err error) bool {
+	low := strings.ToLower(err.Error())
+	if !strings.Contains(low, "relay connect failed") {
+		return false
+	}
+	for _, s := range []string{"certificate", "证书", "x509", "tls"} {
+		if strings.Contains(low, s) {
+			return false
+		}
+	}
+	for _, s := range []string{"refused", "timeout", "timed out", "deadline exceeded", "no such host", "unreachable"} {
+		if strings.Contains(low, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func connectToolArgs(code, server string, noAuth bool, minProto string) map[string]any {
@@ -946,9 +990,20 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.upgradeProgress("新 share 已就绪，正在切换通道")
 	// 新 share 就是本次刚装上的当前版本，按默认下限（不降级）连；回连 old 才沿用原来的放宽——
 	// 被升级的 old 很可能正是靠「兼容旧版」才连上的 0.0.x。
-	// 自动模式下按新码找节点，不带 new share 写的地址（见 upgradeReconnectServer）。
+	// 自动模式下按新码找节点，不带 new share 写的地址（见 upgradeReconnectServer）；显式模式连不上它写的地址时
+	// 按连 old 用的地址再试一次（见 upgradeRetryServer）。
 	newServer := upgradeReconnectServer(oldServer, defaultServer, newCode.Server)
 	newMeta, err := reconnectPeer(ctx, client, newCode.Code, newServer, false, "")
+	if retry, used, ok := upgradeRetryServer(oldServer, defaultServer, newServer, err); ok {
+		// 再试成功时第一次的错误只出现在这条提示里，要写全。
+		s.upgradeProgress("连不上新 share 写下的地址 " + newServer + "（" + err.Error() + "），改用连 old 时的地址 " + used + " 再试")
+		meta, retryErr := reconnectPeer(ctx, client, newCode.Code, retry, false, "")
+		if retryErr == nil {
+			newMeta, err, newServer = meta, nil, retry
+		} else {
+			err = fmt.Errorf("%w；改用连 old 时的地址 %s 再试也失败: %v", err, used, retryErr)
+		}
+	}
 	if err != nil {
 		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		_, reconnectErr := reconnectPeer(rollbackCtx, client, oldCode, oldServer, oldNoAuth, oldMinProto)

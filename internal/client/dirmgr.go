@@ -53,6 +53,8 @@ type dirManager struct {
 	// logf 输出面向用户的提示（一次一行，format 不带换行）。可能在后台 goroutine 里被并发调用。
 	logf  func(format string, args ...any)
 	every time.Duration // Run 的间隔
+	// explicit：显式模式用的管理器（newOfflineDirManager）。显式模式连的是指定的地址，提示里不说「按内置默认节点连接」。
+	explicit bool
 
 	mu       sync.Mutex
 	inflight *dirFetch // 正在进行的 CF 请求；nil 表示没有
@@ -85,6 +87,25 @@ type dirFetch struct {
 // 升级继任的 share 在和旧进程并存期间 HOME 指向隔离目录，要传隔离前的家目录：缓存里记着已接受的位置、
 // 吊销和本机专用地址，用一份空缓存就忘了它们（旧列表能回放），升级前所在的节点也认不出来。
 func newDirManager(home string, logf func(format string, args ...any)) *dirManager {
+	m := baseDirManager(home, logf)
+	if m != nil {
+		m.url = directoryURLFromEnv(logf)
+	}
+	return m
+}
+
+// newOfflineDirManager 返回显式模式学列表用的管理器（spec 6.1、6.5）：同 newDirManager，但不从 CF 取列表、
+// 不读 REMOTE_RELAY_DIRECTORY——显式模式只收连上的 relay 转发的列表。
+func newOfflineDirManager(home string, logf func(format string, args ...any)) *dirManager {
+	m := baseDirManager(home, logf)
+	if m != nil {
+		m.explicit = true
+	}
+	return m
+}
+
+// baseDirManager 是 newDirManager 与 newOfflineDirManager 共同的部分，不取 CF。拿不到主目录、本程序没有内置根公钥时返回 nil。
+func baseDirManager(home string, logf func(format string, args ...any)) *dirManager {
 	roots := directory.BuiltinRoots()
 	if !roots.Usable() {
 		return nil
@@ -98,7 +119,6 @@ func newDirManager(home string, logf func(format string, args ...any)) *dirManag
 	}
 	return &dirManager{
 		path:  filepath.Join(home, directoryCacheFile),
-		url:   directoryURLFromEnv(logf),
 		roots: roots,
 		http:  directory.NewHTTPClient(directoryFetchTimeout),
 		now:   time.Now,
@@ -215,6 +235,78 @@ func (m *dirManager) offer(raw []byte, source string) (*directory.Verified, erro
 	return v, nil
 }
 
+// Learn 处理显式模式的一次连接（spec 6.1、6.5）：先收下 relay 随响应转发的列表 raw（可为空），再看这条连接上 relay 出示的
+// 证书指纹 fp 是不是列表里某个节点的。是的话、连的地址 addr 又不是列表里的地址，就把 addr 记为它的本机专用地址，
+// 之后自动模式连它时先试。返回 fp 所属的节点；明文连接（fp 为空）、证书不在列表里、没有能用的列表时为 nil。
+// addr 是别的节点在列表里的地址时以列表为准：不记、也返回 nil（不当作连上了 fp 所属的节点），警告一次可能被劫持。
+// 走得到这里说明这次没按列表严格比对（显式模式，或还没有能用的列表），有了列表之后自动模式会按地址所属的节点拒绝它。
+// 不提示列表本身的状态（过期、失效）：显式模式不靠列表连接，「改用内置默认节点」之类的话不适用。
+func (m *dirManager) Learn(raw []byte, addr, fp string) *directory.Node {
+	if m == nil {
+		return nil
+	}
+	m.Offer(raw, "relay "+addr)
+	v, _, err := m.usable(m.now())
+	if err != nil {
+		return nil
+	}
+	n := v.NodeByFingerprint(fp)
+	if n == nil {
+		return nil
+	}
+	owner, _, listed := listedTarget(v, addr)
+	if !listed {
+		m.rememberLocalAddr(*n, addr)
+		return n
+	}
+	var other string
+	if owner.Prefix != n.Prefix {
+		other = n.Prefix
+	}
+	m.note("addr-owner:"+strings.ToLower(addr), other,
+		"[relay] 警告：%s 是节点 %s在列表里的地址，出示的却是节点 %s的证书，可能被劫持", addr, nodeLabel(*owner), nodeLabel(*n))
+	if other != "" {
+		return nil
+	}
+	return n
+}
+
+// AddrNode 找地址 addr 属于现在能用的列表里哪个节点（不论状态），自动模式 MCP 进程里带 server 的 connect 据此校验证书
+// （spec 6.1，见 Client.bindAddr）：是节点在列表里的地址时 listed 为 true，t 是这个地址声明过的传输；否则看是不是
+// 节点记下的本机专用地址。两者冲突时以列表为准（同 nodeByAddr）。都不是、没有能用的列表（含还没有缓存）时 n 为 nil。
+// 不提示列表的状态，同 Learn。
+func (m *dirManager) AddrNode(addr string) (n *directory.Node, t nodeTarget, listed bool) {
+	if m == nil {
+		return nil, nodeTarget{}, false
+	}
+	v, cache, err := m.usable(m.now())
+	if err != nil || v == nil {
+		return nil, nodeTarget{}, false
+	}
+	if n, t, ok := listedTarget(v, addr); ok {
+		return n, t, true
+	}
+	return localAddrNode(v, cache, addr), nodeTarget{}, false
+}
+
+// rememberLocalAddr 把 addr 记为节点 n 的本机专用地址，新记下（或改记）时按固定格式提示（spec 6.5）。
+// 不是合规的 host:port（directory.ValidAddr，与节点证书里的地址同一套规则）时不记。
+func (m *dirManager) rememberLocalAddr(n directory.Node, addr string) {
+	if directory.ValidAddr(addr) != nil {
+		return
+	}
+	var changed bool
+	err := directory.UpdateCache(m.path, func(c *directory.Cache) (bool, error) {
+		var err error
+		changed, err = c.SetLocalAddr(n.Prefix, addr)
+		return changed, err
+	})
+	m.cacheNote(err)
+	if err == nil && changed {
+		m.logf("[relay] 已记住 %s 为节点 %s的本机专用地址", addr, nodeLabel(n))
+	}
+}
+
 // DropLocalAddr 删掉节点 prefix 的本机专用地址 addr（spec 6.5：连不上一次就删），删了就按固定格式提示。
 // 按地址删：缓存里记的已不是 addr（别的进程改记了新地址）时不动，也不提示。缓存读写失败时只提示缓存的问题。
 func (m *dirManager) DropLocalAddr(prefix, addr string, cause error) {
@@ -303,16 +395,21 @@ func (m *dirManager) load() *directory.Cache {
 
 // cacheNote 提示缓存读写的问题；err 为 nil 表示没问题。错误里带着文件路径。
 func (m *dirManager) cacheNote(err error) {
+	// 自动模式读不了缓存就退回内置默认节点；显式模式本来就只连指定的地址，不说这句。
+	fallback := "，按内置默认节点连接"
+	if m.explicit {
+		fallback = ""
+	}
 	switch {
 	case err == nil:
 		m.note("cache", "", "")
 	case errors.Is(err, directory.ErrCacheNewer):
 		// 不能让人删：删掉会丢掉新版本记住的位置和吊销。
-		m.note("cache", "newer", "[relay] 节点列表缓存由更新版本的程序写入（%v），本程序不使用也不改动它，按内置默认节点连接。请升级到最新版本，不要删掉这个文件", err)
+		m.note("cache", "newer", "[relay] 节点列表缓存由更新版本的程序写入（%v），本程序不使用也不改动它%s。请升级到最新版本，不要删掉这个文件", err, fallback)
 	case errors.Is(err, directory.ErrCacheCorrupt):
-		m.note("cache", "corrupt", "[relay] 节点列表缓存已损坏（%v），本程序不使用也不改动它，按内置默认节点连接。删除这个文件即可重置", err)
+		m.note("cache", "corrupt", "[relay] 节点列表缓存已损坏（%v），本程序不使用也不改动它%s。删除这个文件即可重置", err, fallback)
 	default:
-		m.note("cache", "io", "[relay] 读写节点列表缓存失败（%v），按内置默认节点连接", err)
+		m.note("cache", "io", "[relay] 读写节点列表缓存失败（%v）%s", err, fallback)
 	}
 }
 

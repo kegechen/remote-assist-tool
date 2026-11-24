@@ -81,7 +81,8 @@ func TestUpgradeRealHome(t *testing.T) {
 	}
 }
 
-// share 启动时的 relay 设定：自动模式要带上 --relay-hint（补默认端口）和升级隔离前的家目录。
+// share 启动时的 relay 设定：自动模式要带上 --relay-hint（补默认端口）和升级隔离前的家目录。显式模式只学 relay 转发的
+// 节点列表（spec 6.1），缓存同样要用隔离前的家目录；--standalone、--plain 什么都不学。
 func TestNewShareRelay(t *testing.T) {
 	key, real := "HOME", "/home/real"
 	stash := upgradeOrigHomeEnv
@@ -115,8 +116,11 @@ func TestNewShareRelay(t *testing.T) {
 		{"--relay-hint 补默认端口", []string{"--relay-hint", "relay-w.example.test"}, false, shareRelay{auto: true, hint: "relay-w.example.test:8443"}},
 		{"--relay-hint 去掉首尾空白", []string{"--relay-hint", " relay-w.example.test:9443 "}, false, shareRelay{auto: true, hint: "relay-w.example.test:9443"}},
 		{"升级继任者用隔离前的家目录", []string{"--relay-hint", "relay-w.example.test:8443"}, true, shareRelay{auto: true, hint: "relay-w.example.test:8443", listHome: real}},
-		{"写了 --server 是显式模式", []string{"--server", "relay.example.test"}, true, shareRelay{}},
-		{"--standalone", []string{"--standalone"}, false, shareRelay{}},
+		{"写了 --server 是显式模式，只学列表", []string{"--server", "relay.example.test"}, false, shareRelay{learn: true}},
+		{"显式模式的升级继任者也用隔离前的家目录", []string{"--server", "relay.example.test", "--relay-hint", "relay-w.example.test"}, true, shareRelay{learn: true, listHome: real}},
+		{"--standalone", []string{"--standalone"}, true, shareRelay{}},
+		{"--plain", []string{"--plain"}, true, shareRelay{}},
+		{"--server 加 --plain", []string{"--server", "relay.example.test", "--plain"}, false, shareRelay{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs, standalone, plain, hint := parse(t, tc.args...)
@@ -150,43 +154,55 @@ func TestShareRelaySTUN(t *testing.T) {
 	}
 }
 
-type fakeNodeListUser struct{ calls [][2]string }
+type fakeNodeListUser struct {
+	calls  [][2]string
+	learns []string
+}
 
 func (f *fakeNodeListUser) UseNodeList(hint, home string) {
 	f.calls = append(f.calls, [2]string{hint, home})
 }
 
-// 自动模式才接上节点列表，显式模式下 share 只连 --server。
+func (f *fakeNodeListUser) LearnNodeList(home string) { f.learns = append(f.learns, home) }
+
+// 自动模式才接上节点列表；显式模式下 share 只连 --server，只学它转发的列表；--standalone、--plain 什么都不接。
 func TestShareRelayApply(t *testing.T) {
 	var auto fakeNodeListUser
 	shareRelay{auto: true, hint: "relay-w.example.test:8443", listHome: "/home/real"}.apply(&auto)
-	if want := [][2]string{{"relay-w.example.test:8443", "/home/real"}}; !reflect.DeepEqual(auto.calls, want) {
-		t.Fatalf("自动模式 UseNodeList 调用 = %v，想要 %v", auto.calls, want)
+	if want := [][2]string{{"relay-w.example.test:8443", "/home/real"}}; !reflect.DeepEqual(auto.calls, want) || len(auto.learns) != 0 {
+		t.Fatalf("自动模式 UseNodeList 调用 = %v（想要 %v），LearnNodeList 调用 = %q（想要没有）", auto.calls, want, auto.learns)
 	}
 	var explicit fakeNodeListUser
-	shareRelay{}.apply(&explicit)
-	if len(explicit.calls) != 0 {
-		t.Fatalf("显式模式不该调 UseNodeList，调了 %v", explicit.calls)
+	shareRelay{learn: true, listHome: "/home/real"}.apply(&explicit)
+	if want := []string{"/home/real"}; len(explicit.calls) != 0 || !reflect.DeepEqual(explicit.learns, want) {
+		t.Fatalf("显式模式 UseNodeList 调用 = %v（想要没有），LearnNodeList 调用 = %q（想要 %q）", explicit.calls, explicit.learns, want)
+	}
+	var none fakeNodeListUser
+	shareRelay{}.apply(&none)
+	if len(none.calls) != 0 || len(none.learns) != 0 {
+		t.Fatalf("--standalone、--plain 不该接节点列表，调了 %v、%q", none.calls, none.learns)
 	}
 }
 
 // help 的显式/自动判定（spec 6.1）：同 share，只是 help 没有 --standalone。--plain 只用于开发，节点都要 TLS，也按显式处理。
 func TestNewHelpRelay(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		env  string
-		want bool
+		name  string
+		args  []string
+		env   string
+		want  bool
+		learn bool // 显式模式只学 relay 转发的列表（spec 6.1），--plain 不学
 	}{
-		{"什么都没写", nil, "", true},
-		{"只给协助码", []string{"--code", "W234-5678-9ABC"}, "", true},
-		{"写了 --server", []string{"--server", "relay.example.test"}, "", false},
-		{"--server= 写法", []string{"--server=relay.example.test"}, "", false},
-		{"写的正是内置地址也算显式", []string{"--server", defaultRelayServerAddr}, "", false},
-		{"设了 REMOTE_RELAY_SERVER", nil, "relay.example.test:8443", false},
-		{"REMOTE_RELAY_SERVER 只有空白", nil, "  ", true},
-		{"--plain", []string{"--plain"}, "", false},
-		{"MCP 与其他参数", []string{"--mcp-stdio", "--no-auth", "--transport", "quic"}, "", true},
+		{"什么都没写", nil, "", true, false},
+		{"只给协助码", []string{"--code", "W234-5678-9ABC"}, "", true, false},
+		{"写了 --server", []string{"--server", "relay.example.test"}, "", false, true},
+		{"--server= 写法", []string{"--server=relay.example.test"}, "", false, true},
+		{"写的正是内置地址也算显式", []string{"--server", defaultRelayServerAddr}, "", false, true},
+		{"设了 REMOTE_RELAY_SERVER", nil, "relay.example.test:8443", false, true},
+		{"REMOTE_RELAY_SERVER 只有空白", nil, "  ", true, false},
+		{"--plain", []string{"--plain"}, "", false, false},
+		{"--server 加 --plain", []string{"--server", "relay.example.test", "--plain"}, "", false, false},
+		{"MCP 与其他参数", []string{"--mcp-stdio", "--no-auth", "--transport", "quic"}, "", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("REMOTE_RELAY_SERVER", tc.env)
@@ -200,7 +216,7 @@ func TestNewHelpRelay(t *testing.T) {
 			if err := fs.Parse(tc.args); err != nil {
 				t.Fatal(err)
 			}
-			if got, want := newHelpRelay(fs, *plain), (helpRelay{auto: tc.want}); got != want {
+			if got, want := newHelpRelay(fs, *plain), (helpRelay{auto: tc.want, learn: tc.learn}); got != want {
 				t.Fatalf("newHelpRelay = %+v，想要 %+v", got, want)
 			}
 		})
@@ -256,21 +272,28 @@ func TestHelpRelaySkipLANP2P(t *testing.T) {
 	}
 }
 
-type fakeHelpNodeListUser struct{ homes []string }
+type fakeHelpNodeListUser struct{ homes, learns []string }
 
-func (f *fakeHelpNodeListUser) UseNodeList(home string) { f.homes = append(f.homes, home) }
+func (f *fakeHelpNodeListUser) UseNodeList(home string)   { f.homes = append(f.homes, home) }
+func (f *fakeHelpNodeListUser) LearnNodeList(home string) { f.learns = append(f.learns, home) }
 
-// 自动模式才接上节点列表；help 不会是升级继任者（通道内升级只起 share），列表缓存用当前用户的家目录。显式模式下只连 --server。
+// 自动模式才接上节点列表；help 不会是升级继任者（通道内升级只起 share），列表缓存用当前用户的家目录。显式模式下只连 --server，
+// 只学它转发的列表；--plain 什么都不接。
 func TestHelpRelayApply(t *testing.T) {
 	var auto fakeHelpNodeListUser
 	helpRelay{auto: true}.apply(&auto)
-	if want := []string{""}; !reflect.DeepEqual(auto.homes, want) {
-		t.Fatalf("自动模式 UseNodeList 调用 = %q，想要 %q", auto.homes, want)
+	if want := []string{""}; !reflect.DeepEqual(auto.homes, want) || len(auto.learns) != 0 {
+		t.Fatalf("自动模式 UseNodeList 调用 = %q（想要 %q），LearnNodeList 调用 = %q（想要没有）", auto.homes, want, auto.learns)
 	}
 	var explicit fakeHelpNodeListUser
-	helpRelay{}.apply(&explicit)
-	if len(explicit.homes) != 0 {
-		t.Fatalf("显式模式不该调 UseNodeList，调了 %q", explicit.homes)
+	helpRelay{learn: true}.apply(&explicit)
+	if want := []string{""}; len(explicit.homes) != 0 || !reflect.DeepEqual(explicit.learns, want) {
+		t.Fatalf("显式模式 UseNodeList 调用 = %q（想要没有），LearnNodeList 调用 = %q（想要 %q）", explicit.homes, explicit.learns, want)
+	}
+	var none fakeHelpNodeListUser
+	helpRelay{}.apply(&none)
+	if len(none.homes) != 0 || len(none.learns) != 0 {
+		t.Fatalf("--plain 不该接节点列表，调了 %q、%q", none.homes, none.learns)
 	}
 }
 
