@@ -325,16 +325,22 @@ func closeLateNodes(results <-chan raceResult, pending int) {
 	}
 }
 
-// dial 拨节点 n（first 非空时最先试它，用于 --relay-hint），并处理途中失败的地址：连不上的本机专用地址
-// 从缓存删掉（spec 6.5），证书与列表不符的列表地址打警告（spec 6.3）。被 relay 封禁不算连不上：地址没坏，
-// 被封的是本机，删了的话解封后还得再用 --server 引导一次。可以在多个 goroutine 里同时调用。
+// dial 拨节点 n（first 非空时最先试它，用于 --relay-hint），见 dialListedNode。可以在多个 goroutine 里同时调用。
 func (sn *shareNodes) dial(ctx context.Context, n directory.Node, first string, cache *directory.Cache, v *directory.Verified) (*nodeConn, error) {
+	return dialListedNode(ctx, sn.dm, sn.transport, sn.logf, n, first, cache, v)
+}
+
+// dialListedNode 拨列表里的节点 n（first 非空时最先试它），并处理途中失败的地址：连不上的本机专用地址
+// 从缓存删掉（spec 6.5），证书与列表不符的列表地址打警告（spec 6.3）。被 relay 封禁不算连不上：地址没坏，
+// 被封的是本机，删了的话解封后还得再用 --server 引导一次。share 与 help 共用。
+func dialListedNode(ctx context.Context, dm *dirManager, transport string, logf func(format string, args ...any),
+	n directory.Node, first string, cache *directory.Cache, v *directory.Verified) (*nodeConn, error) {
 	local := cache.LocalAddr(v, n.Prefix)
 	dialFirst := local
 	if first != "" {
 		dialFirst = first
 	}
-	r, err := dialNode(ctx, n, dialFirst, sn.transport, "")
+	r, err := dialNode(ctx, n, dialFirst, transport, "")
 	var failed []addrFailure
 	var de *nodeDialError
 	if err == nil {
@@ -348,9 +354,9 @@ func (sn *shareNodes) dial(ctx context.Context, n directory.Node, first string, 
 		case errors.Is(f.Err, proto.ErrBlocked):
 			// 封禁由调用方报给用户（「访问受限」），这里什么都不删。
 		case local != "" && f.Addr == local:
-			sn.dm.DropLocalAddr(n.Prefix, local, f.Err)
+			dm.DropLocalAddr(n.Prefix, local, f.Err)
 		case errors.As(f.Err, &mm):
-			sn.logf("[relay] 警告：节点 %s 的地址 %s 出示的证书与节点列表不符（指纹 %s…），可能被劫持，已跳过", nodeLabel(n), f.Addr, shortFP(mm.FP))
+			logf("[relay] 警告：节点 %s 的地址 %s 出示的证书与节点列表不符（指纹 %s…），可能被劫持，已跳过", nodeLabel(n), f.Addr, shortFP(mm.FP))
 		}
 	}
 	return r, err

@@ -27,16 +27,21 @@ const maxCandidates = 8
 // v 为 nil、首位是多字节字符（code[:1] 只是半个字符）都不用单独判断：NodeByPrefix 对 nil 安全，
 // 而节点前缀只会是码字符集里的单个 ASCII 字符，半个字符找不到。
 func routeNodeForCode(v *directory.Verified, code string) *directory.Node {
-	code = normalizeCode(code)
-	if code == "" || code == proto.NoAuthCode {
+	if !codeRoutable(code) {
 		return nil
 	}
-	code = strings.ToUpper(code)
+	code = strings.ToUpper(normalizeCode(code))
 	n := v.NodeByPrefix(code[:1])
 	if n == nil || n.Status == directory.StatusDisabled {
 		return nil
 	}
 	return n
+}
+
+// codeRoutable 报告 code 能不能按首位找节点：规范化后非空，且不是 --no-auth 的固定码。
+func codeRoutable(code string) bool {
+	code = normalizeCode(code)
+	return code != "" && code != proto.NoAuthCode
 }
 
 // eligibleForShare 报告节点能不能接收新的 share 注册：启用且权重大于 0。

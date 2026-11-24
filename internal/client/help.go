@@ -26,6 +26,10 @@ type HelpMode struct {
 	listenAddr string
 	mcpStdio   bool
 	minProto   string // 可接受的最低工具协议版本，空串视作 proto.DefaultMinProto
+
+	// nodes 非 nil 表示自动模式（UseNodeList）：按协助码首位找节点。defaultAddr 是没有能用的列表时连的地址。
+	nodes       *helpNodes
+	defaultAddr string
 }
 
 // NewHelpMode 创建协助模式
@@ -89,6 +93,11 @@ func isJoinRejected(err error) bool {
 // 由 share 判断这次加入的是不是正在和它跑 P2P 的那个协助端（见 proto.P2PResumeProof）。
 func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinResponse, error) {
 	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary(), SupportsUpdateNotice: true, SupportsCanonicalCode: true, ResumeProof: proof}
+	if h.nodes != nil {
+		// 自动模式带上缓存的列表位置：relay 手里的列表更新时随加入成功的响应下发。
+		serial, keySerial := h.nodes.dm.Position()
+		req.DirectorySerial, req.DirectoryKeySerial = &serial, keySerial
+	}
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return nil, err
 	}
@@ -109,6 +118,9 @@ func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinRespon
 	}
 	if !resp.Success {
 		return nil, joinFailureError(resp.Error)
+	}
+	if h.nodes != nil {
+		h.nodes.dm.Offer(resp.Directory, "relay "+h.client.serverAddr())
 	}
 	h.adoptCanonicalCode(resp.Code)
 	h.client.setRelaySTUN(resp.STUNServers)
@@ -146,15 +158,11 @@ func updateNotices(resp *proto.JoinResponse) (self, peer *update.Notice) {
 
 // Run 运行协助模式
 func (h *HelpMode) Run() error {
-	if err := h.client.Connect(); err != nil {
-		return err
-	}
-	defer h.client.Close()
-
-	resp, err := h.join()
+	resp, err := h.connectAndJoin()
 	if err != nil {
 		return err
 	}
+	defer h.client.Close()
 
 	{
 		// mcp-stdio 模式下所有 user-facing 输出走 stderr，避免污染 MCP JSON-RPC 帧流
@@ -213,9 +221,12 @@ func (h *HelpMode) Run() error {
 	}
 }
 
+// newHelpP2PManager 建 help 端的 P2P manager。变量以便测试看到传进去的 STUN 地址。
+var newHelpP2PManager = p2p.NewP2PManager
+
 // negotiateP2P 尝试 P2P 直连协商
 func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTunnel, error) {
-	mgr := p2p.NewP2PManager(mode, h.client.config.STUNServer, h.client.config.BindIP)
+	mgr := newHelpP2PManager(mode, h.p2pSTUN(), h.client.config.BindIP)
 	mgr.SetAuthCode(h.code)
 	mgr.SetSTUNCandidates(h.client.relaySTUNServers())
 	mgr.SetRelayConn(h.client)

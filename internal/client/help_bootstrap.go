@@ -72,6 +72,8 @@ func (r *peerAddrRelay) attach(mgr shareP2PManager) {
 // 装载 bridge，之后所有调用透传到真实工具。
 type HelpMCPBootstrap struct {
 	cfg *Config
+	// nodes 非 nil 表示自动模式（UseNodeList）：不带 server 的 connect 按协助码找节点（spec 6.4），各次 connect 共用。
+	nodes *helpNodes
 
 	connectMu    sync.Mutex // 串行化 connect，避免并发调用互相拆连接
 	mu           sync.Mutex
@@ -305,15 +307,14 @@ type connectTarget struct {
 	Server   string
 	NoAuth   bool
 	MinProto string
+	// Auto 表示按节点列表找 relay（自动模式下 connect 没带 server）。连上之前不知道会连哪台，Server 为空；
+	// 活动会话里的 Server 是路由后实际连上的地址（spec 6.4 第 5 条）。
+	Auto bool
 }
 
 // lastTarget 把缓存的上一次成功参数按 connectWith 的规则归一化成目标，用于判断
 // 本次调用是否是同一个意图。调用方需持有 b.mu。
 func (b *HelpMCPBootstrap) lastTarget() connectTarget {
-	server := b.cfg.ServerAddr
-	if b.lastServer != "" {
-		server = b.lastServer
-	}
 	code := b.lastCode
 	if b.lastNoAuth && code == "" {
 		code = proto.NoAuthCode
@@ -323,15 +324,37 @@ func (b *HelpMCPBootstrap) lastTarget() connectTarget {
 		minProto = b.lastMinProto
 	}
 	minProto, _ = proto.NormalizeMinProto(minProto)
-	return connectTarget{Code: normalizeCode(code), Server: NormalizeServerAddr(server), NoAuth: b.lastNoAuth, MinProto: minProto}
+	t := connectTarget{Code: normalizeCode(code), NoAuth: b.lastNoAuth, MinProto: minProto, Auto: b.autoServer(b.lastServer)}
+	if !t.Auto {
+		server := b.cfg.ServerAddr
+		if b.lastServer != "" {
+			server = b.lastServer
+		}
+		t.Server = NormalizeServerAddr(server)
+	}
+	return t
 }
 
-// sameEndpoint 报告两次 connect 是否指向同一个对端会话（忽略协议下限）。
+// autoServer 报告 connect 的 server 参数（空串表示没带）是否意味着按节点列表找 relay。
+func (b *HelpMCPBootstrap) autoServer(server string) bool {
+	return b.nodes != nil && server == ""
+}
+
+// sameEndpoint 报告 o（这次 connect 的目标）与 t（活动会话）是否指向同一个对端会话（忽略协议下限）。
 // 码按大小写不敏感比较：小写 connect 成功后（help 端已采纳规范码）换成 share
 // 屏幕上的原样大写码重连，是同一意图，不应拆掉健康会话重新握手。存量码集里不
 // 存在仅大小写不同的两个码，不会把不同码误判成同一意图。
+//
+// 这次是按列表找（o.Auto）时不比地址，连上之前不知道会连哪台，码决定了节点；但活动会话得也是按列表找的，
+// 显式连的那台可能不是列表里的节点。这次指定了地址时，与活动会话实际连着的地址比（含路由后的）。
 func (t connectTarget) sameEndpoint(o connectTarget) bool {
-	return strings.EqualFold(t.Code, o.Code) && t.Server == o.Server && t.NoAuth == o.NoAuth
+	if !strings.EqualFold(t.Code, o.Code) || t.NoAuth != o.NoAuth {
+		return false
+	}
+	if o.Auto {
+		return t.Auto
+	}
+	return t.Server == o.Server
 }
 
 func (b *HelpMCPBootstrap) doConnect(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
@@ -407,6 +430,10 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 		Server:   effectiveCfg.ServerAddr,
 		NoAuth:   a.NoAuth,
 		MinProto: effectiveMinProto,
+		Auto:     b.autoServer(a.Server),
+	}
+	if target.Auto {
+		target.Server = "" // 连上之后才知道，见 connectTarget.Auto
 	}
 
 	b.mu.Lock()
@@ -453,17 +480,17 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	}
 
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
-	if err := h.client.Connect(); err != nil {
-		if errors.Is(err, proto.ErrBlocked) {
-			return nil, blockedConnectError()
-		}
-		return nil, fmt.Errorf("relay connect failed: %w", err)
+	if target.Auto {
+		h.useNodes(b.nodes)
 	}
-	resp, err := h.join()
+	resp, err := h.connectAndJoin()
 	if err != nil {
-		h.client.Close()
-		if errors.Is(err, proto.ErrBlocked) {
+		var ce *relayConnectError
+		switch {
+		case errors.Is(err, proto.ErrBlocked):
 			return nil, blockedConnectError()
+		case errors.As(err, &ce):
+			return nil, fmt.Errorf("relay connect failed: %w", ce.err)
 		}
 		// join 失败已经有面向用户的明确文案（含「已有协助端」的可识别错误），
 		// 不再包一层 "join failed"，否则会出现 "join failed: join failed: ..." 的嵌套。
@@ -472,6 +499,9 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 		}
 		return nil, fmt.Errorf("join failed: %w", err)
 	}
+	// 自动模式下 h 已连到按码找到的节点：记下实际地址，结果和幂等判断都用它（spec 6.4 第 5 条）。
+	// effectiveCfg 就是 h.client.config，下面用到的地址都是这个。
+	target.Server = h.client.serverAddr()
 	fmt.Fprintf(os.Stderr, "MCP: 已连接中转服务 %s\n", relayDesc(&effectiveCfg))
 	if resp.PeerHost != "" {
 		fmt.Fprintf(os.Stderr, "MCP: 对端标识 %s\n", resp.PeerHost)
@@ -515,7 +545,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	result := connectResult{
 		Connected:    true,
 		SessionID:    resp.SessionID,
-		Server:       effectiveCfg.ServerAddr,
+		Server:       target.Server,
 		PeerVersion:  resp.PeerVersion,
 		PeerHost:     resp.PeerHost,
 		HelpVersion:  version.Info(),
@@ -552,8 +582,8 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	p2pMode := p2p.ParseP2PMode(effectiveCfg.P2PMode)
 	// 私网/loopback relay（standalone / 同 LAN）下 relay 已直连、P2P 多余，且 standalone
 	// 不启 STUN 必然打洞超时；auto 模式自动跳过，省掉后台徒劳重试。
-	if p2pMode == p2p.P2PModeAuto && b.isLANServer(effectiveCfg.ServerAddr) {
-		fmt.Fprintf(os.Stderr, "MCP: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（如需强制用 --p2p required）\n", effectiveCfg.ServerAddr)
+	if p2pMode == p2p.P2PModeAuto && b.isLANServer(target.Server) {
+		fmt.Fprintf(os.Stderr, "MCP: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（如需强制用 --p2p required）\n", target.Server)
 		p2pMode = p2p.P2PModeDisabled
 	}
 	// upgradeDone 报告后台升级的最终结果，仅 --p2p required 会去等它。
@@ -640,9 +670,9 @@ func (b *HelpMCPBootstrap) upgradeToP2P(l *helpLink, cfg *Config, sessionID stri
 	// 的设计相悖。
 	var mgr shareP2PManager
 	if b.newP2PManager != nil {
-		mgr = b.newP2PManager(mode, cfg.STUNServer, cfg.BindIP)
+		mgr = b.newP2PManager(mode, h.p2pSTUN(), cfg.BindIP)
 	} else {
-		mgr = p2p.NewP2PManager(mode, cfg.STUNServer, cfg.BindIP)
+		mgr = newHelpP2PManager(mode, h.p2pSTUN(), cfg.BindIP)
 	}
 	mgr.SetAuthCode(h.code)
 	mgr.SetSTUNCandidates(h.client.relaySTUNServers())
