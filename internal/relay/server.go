@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/remote-assist/tool/internal/crypto"
@@ -20,6 +22,7 @@ import (
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/ratelimit"
+	"github.com/remote-assist/tool/internal/relay/blocklist"
 )
 
 // 服务端加固默认值（防资源耗尽型 DoS / slowloris / 超大消息）
@@ -101,6 +104,10 @@ const (
 	controlBurstPerConn = 5
 	controlRateGlobal   = 1000
 	controlBurstGlobal  = 2000
+
+	// tlsHandshakeTimeout 显式 TLS 握手的超时。握手失败要单独计入黑名单（tls_handshake），
+	// 不能再像以前那样混在读循环的 Read error 里；超时给足慢链路余量。
+	tlsHandshakeTimeout = 30 * time.Second
 )
 
 // 限流器 idle 参数
@@ -137,6 +144,12 @@ type Config struct {
 	// 仅用于无法恢复真实源 IP 的 SNAT 部署；per-connection 与 global 限制始终生效。
 	DisableSourceIPLimits bool
 	Limits                Limits
+	// Blocklist 内置 IP 黑名单（nil = 停用）。DisableSourceIPLimits 时强制停用：源 IP
+	// 不可信，封一个等于封全部。
+	Blocklist *blocklist.List
+	// BlocklistVerifyAfter 配对持续多久后才把两端记为"成功加入"（授予 7 天握手类计分豁免）。
+	// 零值 = 10 分钟。只在测试里调小。
+	BlocklistVerifyAfter time.Duration
 	// Update 随注册/加入响应下发的新版本软提示；LatestVersion 为空时不下发。
 	Update                 proto.UpdateInfo
 	UpdateInfoFile         string
@@ -163,6 +176,10 @@ func ValidateAdvertiseSTUN(servers []string) error {
 	}
 	return nil
 }
+
+// defaultBlocklistVerifyAfter 配对持续这么久才算"成功客户端"：扫描器拿自己注册的码 join
+// 自己可以立刻成功，但要持续占着一个会话 10 分钟的成本高得多。
+const defaultBlocklistVerifyAfter = 10 * time.Minute
 
 // Server 中转服务器
 type Server struct {
@@ -195,6 +212,7 @@ type Server struct {
 	toolLimiterPerConn       *ratelimit.KeyedLimiter // per-connection 工具通道限流（KiB/s）
 	toolLimiterGlobal        *ratelimit.Bucket       // 全局工具通道限流（KiB/s）
 	logSampleCtr             uint64                  // TCP 高频拒绝日志采样计数
+	blockedSampleCtr         uint64                  // 黑名单拒绝日志独立采样，不污染限流拒绝计数
 	p2pSampleCtr             uint64                  // P2P 协商信息独立采样，避免污染拒绝计数
 	toolThrottleSampleCtr    uint64                  // 工具通道节流独立采样：节流是背压不是拒绝，同样不该污染拒绝计数
 	limits                   Limits
@@ -205,7 +223,14 @@ type Server struct {
 	updateInfoFileMu         sync.Mutex
 	updateInfoFileState      updateInfoFileState
 	// reuse 复用令牌签名器（持有证明），NewServer 装配后只读。
-	reuse *reuseSigner
+	reuse                *reuseSigner
+	blocklist            *blocklist.List
+	blocklistVerifyAfter time.Duration
+	verifyMu             sync.Mutex
+	pendingVerify        map[string]*pendingVerify // sessionID -> 待验证配对
+	verifyByConn         map[string]string         // 连接 ID -> 其参与的待验证会话
+	listenAddr           atomic.Value              // net.Addr，accept 循环开始前写入
+	blockedNotice        chan struct{}             // 给被封 TCP 连接回 alert 的协程名额，见 noticeBlocked
 }
 
 // NewServer 创建服务器
@@ -265,6 +290,14 @@ func NewServer(cfg *Config) (*Server, error) {
 		updateInfoFile:           cfg.UpdateInfoFile,
 		updateInfoPollInterval:   cfg.UpdateInfoPollInterval,
 		updateInfoBase:           baseUpdate,
+		blocklist:                cfg.Blocklist,
+		blocklistVerifyAfter:     cfg.BlocklistVerifyAfter,
+		pendingVerify:            make(map[string]*pendingVerify),
+		verifyByConn:             make(map[string]string),
+		blockedNotice:            make(chan struct{}, blockedNoticeMax),
+	}
+	if srv.blocklistVerifyAfter <= 0 {
+		srv.blocklistVerifyAfter = defaultBlocklistVerifyAfter
 	}
 	srv.updateInfoValue.Store(baseUpdate)
 	if srv.updateInfoFile != "" {
@@ -283,6 +316,15 @@ func NewServer(cfg *Config) (*Server, error) {
 	srv.sessions.sticky = !cfg.LegacyCodeExpiry
 	srv.sessions.maxAge = cfg.CodeMaxAge
 	srv.reuse = signer
+	if cfg.Blocklist != nil {
+		if cfg.DisableSourceIPLimits {
+			// SNAT/负载均衡后所有连接看起来都来自 LB，按源 IP 封禁等于封全部。
+			log.Printf("WARNING: IP blocklist disabled: source IP is not trusted (--trust-source-ip=false)")
+			srv.blocklist = nil
+		} else {
+			cfg.Blocklist.SetOnManualBan(srv.closeConnsFromIP)
+		}
+	}
 	return srv, nil
 }
 
@@ -347,6 +389,7 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 		go s.serveQUIC(ctx, qln)
 	}
 
+	s.listenAddr.Store(listener.Addr())
 	log.Printf("Server starting on %s", s.config.ListenAddr)
 	log.Printf("Relay limits: %s", s.limits.JSON())
 	go s.cleanupLoop(ctx)
@@ -382,8 +425,14 @@ func (s *Server) StartWithContextReady(ctx context.Context, onReady func()) erro
 }
 
 // dispatchConn 处理 TCP Accept 到的连接。QUIC 的对应入口是 acceptQUICConn：两者占连接
-// 名额的时机不同（QUIC 要先占名额再等流），之后都汇入 serveConn。
+// 名额的时机不同（QUIC 要先占名额再等流），但黑名单、连接名额一样不少，之后都汇入 serveConn。
 func (s *Server) dispatchConn(conn net.Conn) {
+	// 黑名单准入：在任何握手/读取之前同步查表（O(1) 读锁），被封交给 rejectBlocked
+	// （TLS 端口回 access_denied alert，明文端口直接关闭）。
+	if s.blocklist != nil && !s.blocklist.CheckAccept(remoteHost(conn)) {
+		s.rejectBlocked(conn)
+		return
+	}
 	go s.handleConn(conn)
 }
 
@@ -393,6 +442,251 @@ func (s *Server) QUICAddr() net.Addr {
 		return a
 	}
 	return nil
+}
+
+// remoteHost 取连接对端 IP（去端口）。
+func remoteHost(conn net.Conn) string {
+	addr := conn.RemoteAddr().String()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
+}
+
+// rejectBlocked 拒绝被黑名单拦下的 TCP 连接。故意不打 "New connection" 日志（否则又会喂给
+// fail2ban 之类按日志行数封禁的规则），拒绝日志独立采样。TLS 端口上回「访问受限」alert 的
+// 活交给 noticeBlocked 在后台做，accept 循环不等；接不了的立即静默关闭。
+func (s *Server) rejectBlocked(conn net.Conn) {
+	s.recordBlocked(remoteHost(conn))
+	if !s.noticeBlocked(conn) {
+		_ = conn.Close()
+	}
+}
+
+// recordBlocked 记一次黑名单拒绝（采样日志），TCP 与 QUIC 共用。
+func (s *Server) recordBlocked(host string) {
+	n := atomic.AddUint64(&s.blockedSampleCtr, 1)
+	if sampleHit(n, s.limits.RejectAuditSampleEvery) {
+		log.Printf("Connection rejected from %s: IP is blocklisted (blocked_sample_total=%d, sample_every=%d)", host, n, s.limits.RejectAuditSampleEvery)
+	}
+}
+
+// flagViolation 向黑名单上报一次异常行为（各类事件的分值见 blocklist.Kind 与 kindWeight）。
+func (s *Server) flagViolation(client *ClientConn, kind blocklist.Kind, detail string) {
+	if s.blocklist == nil || client == nil {
+		return
+	}
+	ip := client.remoteIP
+	if ip == "" {
+		ip = clientHost(client)
+	}
+	s.flagViolationIP(ip, kind, detail)
+}
+
+func (s *Server) flagViolationIP(ip string, kind blocklist.Kind, detail string) {
+	if s.blocklist == nil {
+		return
+	}
+	if s.blocklist.RecordViolation(ip, kind, detail) {
+		log.Printf("IP %s auto-banned by blocklist (last violation: %s/%s)", ip, kind, detail)
+	}
+}
+
+// observeClient 记录一次成功注册/加入，供识别该 IP 背后是不是自己人。
+//
+// verified：配对（help 持有效协助码加入 share）持续了 blocklistVerifyAfter 且两端不在同一个键下，
+// 见 scheduleVerifyPairing。注册不需要任何凭据，仅注册或刚加入的观察只做识别展示，不授予计分豁免。
+func (s *Server) observeClient(client *ClientConn, role string, verified bool) {
+	if s.blocklist == nil || client == nil {
+		return
+	}
+	ip := client.remoteIP
+	if ip == "" {
+		ip = clientHost(client)
+	}
+	s.blocklist.ObserveClient(ip, blocklist.ClientInfo{Role: role, Version: client.Version, Host: client.Host, ClientID: client.ClientID, Verified: verified})
+}
+
+// scheduleVerifyPairing 配对持续 blocklistVerifyAfter 后，若仍是同一对连接，把两端记为成功客户端
+// （授予"近期成功加入"豁免、判定显示已配对）。
+//
+// 自配对不授予：share 与 help 在同一个键（IPv4 地址 / IPv6 /64）下时，扫描器用自己注册的码加入自己
+// 就能两端都"成功"，白嫖 7 天豁免。正常协助两端几乎总在不同出口；同一出口下的真实用户仍可通过
+// 白名单放行。
+func (s *Server) scheduleVerifyPairing(sessionID string, share, help *ClientConn) {
+	if s.blocklist == nil || share == nil || help == nil {
+		return
+	}
+	shareIP, helpIP := clientIP(share), clientIP(help)
+	shareKey, err1 := blocklist.KeyOf(shareIP)
+	helpKey, err2 := blocklist.KeyOf(helpIP)
+	if err1 != nil || err2 != nil || shareKey == helpKey {
+		s.cancelVerifyPairing(sessionID) // 换成了自配对的 help：旧的待验证也作废
+		return
+	}
+	// 闭包只捕获值，不持有 *ClientConn：连接断开后其 TLS 缓冲、发送通道不被计时器延长寿命。
+	shareInfo := blocklist.ClientInfo{Role: connStateShare, Version: share.Version, Host: share.Host, ClientID: share.ClientID, Verified: true}
+	helpInfo := blocklist.ClientInfo{Role: connStateHelp, Version: help.Version, Host: help.Host, ClientID: help.ClientID, Verified: true}
+	shareID, helpID := share.ID, help.ID
+	pv := &pendingVerify{shareID: shareID, helpID: helpID}
+	pv.timer = time.AfterFunc(s.blocklistVerifyAfter, func() {
+		s.verifyMu.Lock()
+		current := s.pendingVerify[sessionID] == pv
+		if current {
+			s.removePendingLocked(sessionID, pv)
+		}
+		s.verifyMu.Unlock()
+		if !current || !s.sessions.IsPaired(sessionID, shareID, helpID) {
+			return // 已被取代/取消，或配对已结束、换了对端
+		}
+		s.blocklist.ObserveClient(helpIP, helpInfo)
+		s.blocklist.ObserveClient(shareIP, shareInfo)
+	})
+	// 同一会话只保留一个待验证计时器：换 help 时停掉旧的。
+	s.verifyMu.Lock()
+	if old := s.pendingVerify[sessionID]; old != nil {
+		old.timer.Stop()
+		s.removePendingLocked(sessionID, old)
+	}
+	s.pendingVerify[sessionID] = pv
+	s.verifyByConn[shareID] = sessionID
+	s.verifyByConn[helpID] = sessionID
+	s.verifyMu.Unlock()
+}
+
+// pendingVerify 一个会话待验证的配对。
+type pendingVerify struct {
+	timer           *time.Timer
+	shareID, helpID string
+}
+
+func (s *Server) removePendingLocked(sessionID string, pv *pendingVerify) {
+	delete(s.pendingVerify, sessionID)
+	for _, id := range []string{pv.shareID, pv.helpID} {
+		if s.verifyByConn[id] == sessionID {
+			delete(s.verifyByConn, id)
+		}
+	}
+}
+
+func (s *Server) cancelVerifyPairing(sessionID string) {
+	s.verifyMu.Lock()
+	defer s.verifyMu.Unlock()
+	if pv := s.pendingVerify[sessionID]; pv != nil {
+		pv.timer.Stop()
+		s.removePendingLocked(sessionID, pv)
+	}
+}
+
+// cancelVerifyForConn 连接断开时停掉它参与的待验证计时器（配对已不可能持续）。
+func (s *Server) cancelVerifyForConn(connID string) {
+	s.verifyMu.Lock()
+	sessionID, ok := s.verifyByConn[connID]
+	s.verifyMu.Unlock()
+	if ok {
+		s.cancelVerifyPairing(sessionID)
+	}
+}
+
+// pendingVerifyCount 待验证计时器数（测试与观测用）。
+func (s *Server) pendingVerifyCount() int {
+	s.verifyMu.Lock()
+	defer s.verifyMu.Unlock()
+	return len(s.pendingVerify)
+}
+
+func clientIP(c *ClientConn) string {
+	if c.remoteIP != "" {
+		return c.remoteIP
+	}
+	return clientHost(c)
+}
+
+// closeConnsFromIP 手动封禁时断开该键（IPv4 地址或 IPv6 /64）下的所有现有连接
+// （自动封禁不调用）。
+func (s *Server) closeConnsFromIP(ip string) {
+	s.clientsMu.RLock()
+	var victims []*ClientConn
+	for _, c := range s.clients {
+		if key, err := blocklist.KeyOf(c.remoteIP); err == nil && key == ip {
+			victims = append(victims, c)
+		}
+	}
+	s.clientsMu.RUnlock()
+	for _, c := range victims {
+		if c.Conn != nil {
+			_ = c.Conn.Close()
+		}
+	}
+	if len(victims) > 0 {
+		log.Printf("Closed %d live connection(s) from manually banned IP %s", len(victims), ip)
+	}
+}
+
+// classifyHandshakeErr 把握手错误分成"真垃圾"（计分）与"对端中止"（只记事件），并给出稳定 detail。
+//
+// 从严原则：只有对端发来非 TLS 数据或畸形 TLS 记录/消息才算垃圾（白名单匹配，见 tlsGarbageMarkers）。
+// 对端主动发 alert（证书过期、换证书、TOFU 指纹不匹配、客户端时钟错）、EOF（TCP 健康检查、连上就断）、
+// 超时、连接重置、本端因手动封禁关闭连接，以及合法但不兼容的 TLS 客户端（版本/套件/ALPN 不匹配）
+// 和其他未识别的错误，都可能是正常客户端，一律只记事件不计分——误伤正常用户正是本功能要避免的。
+func classifyHandshakeErr(err error) (blocklist.Kind, string) {
+	var ne net.Error
+	var rhe tls.RecordHeaderError
+	msg := err.Error()
+	switch {
+	case errors.As(err, &rhe):
+		return blocklist.KindTLSGarbage, "not_tls"
+	case isTLSGarbage(msg):
+		return blocklist.KindTLSGarbage, "bad_handshake"
+	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+		return blocklist.KindTLSAborted, "eof"
+	case errors.Is(err, net.ErrClosed):
+		return blocklist.KindTLSAborted, "closed"
+	case isRemoteAlert(err, msg):
+		return blocklist.KindTLSAborted, "alert"
+	case errors.As(err, &ne) && ne.Timeout():
+		return blocklist.KindTLSAborted, "timeout"
+	case errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EPIPE) ||
+		strings.Contains(msg, "connection reset") || strings.Contains(msg, "forcibly closed"):
+		return blocklist.KindTLSAborted, "reset"
+	default:
+		return blocklist.KindTLSAborted, "other"
+	}
+}
+
+// tlsGarbageMarkers crypto/tls 对畸形记录/消息给出的错误文本（不导出类型，只能按文本匹配）。
+var tlsGarbageMarkers = []string{
+	"tls: oversized record",
+	"tls: unsupported SSLv2 handshake",
+	"tls: unexpected message",
+	"tls: error decoding message",
+	"tls: bad record MAC",
+	"tls: record overflow",
+	"tls: handshake message of length",
+}
+
+func isTLSGarbage(msg string) bool {
+	for _, m := range tlsGarbageMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// isRemoteAlert 判断是否对端发来的 TLS alert。crypto/tls 把收到的 alert 包成
+// net.OpError{Op: "remote error"}，Error() 形如 "remote error: tls: bad certificate"。
+func isRemoteAlert(err error, msg string) bool {
+	var oe *net.OpError
+	if errors.As(err, &oe) && oe.Op == "remote error" {
+		return true
+	}
+	var ae tls.AlertError
+	if errors.As(err, &ae) {
+		return true
+	}
+	return strings.HasPrefix(msg, "remote error: tls:")
 }
 
 // acquireConnSlot 连接准入：未超限则占一个名额并返回 true；超限返回 false，调用方应关闭连接。
@@ -544,25 +838,36 @@ func (s *Server) releaseConnSlot(ip string) {
 // handleConn 处理连接
 func (s *Server) handleConn(conn net.Conn) {
 	clientIP := conn.RemoteAddr().String()
+	host, ok := s.admitConn(clientIP)
+	if !ok {
+		conn.Close()
+		return
+	}
+	defer s.releaseConnSlot(host)
+	s.serveConn(conn, clientIP, host)
+}
 
-	// 连接数准入：按源 IP 限流，超限直接拒绝，防资源耗尽型 DoS
+// admitConn 连接数准入：按源 IP 限流，超限拒绝（防资源耗尽型 DoS）。成功时返回 host，
+// 调用方负责 releaseConnSlot(host)；失败时已记日志，调用方只需关连接。
+func (s *Server) admitConn(clientIP string) (string, bool) {
 	host, _, err := net.SplitHostPort(clientIP)
 	if err != nil {
 		host = clientIP
 	}
 	if !s.acquireConnSlot(host) {
 		log.Printf("Connection rejected from %s: too many connections", clientIP)
-		conn.Close()
-		return
+		return host, false
 	}
-	defer s.releaseConnSlot(host)
-	s.serveConn(conn, clientIP)
+	return host, true
 }
 
 // serveConn 处理一条已占到连接名额的连接（调用方负责释放名额）。QUIC 在等流之前就
 // 占名额，所以与 TCP 在这里汇合，而不是在 handleConn。
-func (s *Server) serveConn(conn net.Conn, clientIP string) {
+func (s *Server) serveConn(conn net.Conn, clientIP, host string) {
 	clientID := generateClientID()
+	if s.blocklist != nil {
+		s.blocklist.ObserveConnect(host)
+	}
 
 	// Enable TCP KeepAlive to detect dead connections
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -578,14 +883,25 @@ func (s *Server) serveConn(conn net.Conn, clientIP string) {
 	wrapped := &connWrapper{Conn: conn}
 
 	client := &ClientConn{
-		ID:   clientID,
-		Conn: wrapped,
-		Send: make(chan []byte, 100),
+		ID:       clientID,
+		Conn:     wrapped,
+		Send:     make(chan []byte, 100),
+		remoteIP: host,
 	}
 
 	// 先登记再打日志：撞键时 registerClient 会换一个 ID，日志里必须是最终生效的那个，
 	// 否则运维拿着日志里的 ID 在 byConnID 里根本查不到这条连接。
 	clientID = s.registerClient(client)
+
+	// 关闭手动封禁的竞态窗口：accept 处查表之后、登记进 clients 之前若被手动封禁，
+	// closeConnsFromIP 扫不到这条连接，这里登记后再查一次。
+	if s.blocklist != nil && s.blocklist.IsBanned(host) {
+		s.clientsMu.Lock()
+		delete(s.clients, clientID)
+		s.clientsMu.Unlock()
+		conn.Close()
+		return
+	}
 
 	log.Printf("New connection from %s (client_id: %s, version: pending)", clientIP, clientID)
 	logger.LogConnection(clientIP, clientID, true, "客户端已连接")
@@ -594,6 +910,7 @@ func (s *Server) serveConn(conn net.Conn, clientIP string) {
 		s.clientsMu.Lock()
 		delete(s.clients, clientID)
 		s.clientsMu.Unlock()
+		s.cancelVerifyForConn(clientID)
 		result := s.sessions.DisconnectClient(clientID)
 		if result != nil {
 			// 断连时主动失效旧 UDP relay entry（SessionManager 已解锁）。
@@ -612,12 +929,27 @@ func (s *Server) serveConn(conn net.Conn, clientIP string) {
 	// （relay sendMsg = json.Marshal+'\n'；client = json.Encoder.Encode）；禁止 MarshalIndent。
 	// 限制单条消息大小（maxMessageSize）并对每次读设空闲超时（readIdleTimeout），
 	// 挡住超大消息 OOM 与 slowloris 僵尸连接。
+	// 显式 TLS 握手：失败单独计入黑名单（扫描器往 TLS 端口发明文、连上就断都落在这里）。
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		_ = tlsConn.SetDeadline(time.Now().Add(tlsHandshakeTimeout))
+		if err := tlsConn.Handshake(); err != nil {
+			kind, detail := classifyHandshakeErr(err)
+			s.flagViolationIP(host, kind, detail)
+			s.logSampled("TLS handshake failed from %s: %s/%s", clientIP, kind, detail)
+			return
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+	}
+
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxMessageSize)
 	for {
 		conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
+				if errors.Is(err, bufio.ErrTooLong) {
+					s.flagViolation(client, blocklist.KindProtoDecode, "oversize")
+				}
 				log.Printf("Read error from %s: %v", clientID, err)
 			}
 			return
@@ -628,6 +960,7 @@ func (s *Server) serveConn(conn net.Conn, clientIP string) {
 		}
 		var msg proto.Message
 		if err := json.Unmarshal(line, &msg); err != nil {
+			s.flagViolation(client, blocklist.KindProtoDecode, "bad_json")
 			log.Printf("Invalid message from %s: %v", clientID, err)
 			return
 		}
@@ -644,11 +977,13 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 	case proto.MsgRegisterRequest:
 		// register 只能在 new 状态执行一次
 		if client.Type != connStateNew {
+			s.flagViolation(client, blocklist.KindProtoState, "register_after_"+client.Type)
 			log.Printf("Protocol error: register after %s from %s", client.Type, client.ID)
 			return true
 		}
 		var req proto.RegisterRequest
 		if err := proto.DecodePayload(msg, &req); err != nil {
+			s.flagViolation(client, blocklist.KindProtoDecode, "register_payload")
 			// register payload 解码失败立即关闭
 			log.Printf("Malformed register payload from %s: PROTO_DECODE", client.ID)
 			return true
@@ -667,11 +1002,13 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 	case proto.MsgJoinRequest:
 		// join 只能在 new 状态执行一次
 		if client.Type != connStateNew {
+			s.flagViolation(client, blocklist.KindProtoState, "join_after_"+client.Type)
 			log.Printf("Protocol error: join after %s from %s", client.Type, client.ID)
 			return true
 		}
 		var req proto.JoinRequest
 		if err := proto.DecodePayload(msg, &req); err != nil {
+			s.flagViolation(client, blocklist.KindProtoDecode, "join_payload")
 			// 畸形 payload 不走 rejectJoin：按状态机直接关闭连接。
 			log.Printf("Malformed join payload from %s: PROTO_DECODE", client.ID)
 			return true
@@ -685,6 +1022,11 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		proto.MsgToolStream, proto.MsgToolCancel:
 		// 业务消息必须在注册后(share 或 help)
 		if client.Type == connStateNew {
+			// 老客户端（0.0.7 等）断线重连时会先发几次心跳再注册：心跳无害，只关连接不计分，
+			// 否则同一 NAT 后面的几台老客户端一次重连就能把整个出口 IP 封掉。
+			if msg.Type != proto.MsgHeartbeat {
+				s.flagViolation(client, blocklist.KindProtoState, "before_register")
+			}
 			log.Printf("Protocol error: %s before register/join from %s", msg.Type, client.ID)
 			return true
 		}
@@ -730,6 +1072,10 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 			s.forwardToPeer(client, msg)
 		}
 	default:
+		// 已完成注册/加入的连接发来未知类型，多半是新版客户端连旧 relay（前向兼容），不计分。
+		if client.Type == connStateNew {
+			s.flagViolation(client, blocklist.KindUnknownMessage, sanitizePeerString(string(msg.Type)))
+		}
 		log.Printf("Unknown message type: %s", msg.Type)
 		return true
 	}
@@ -872,6 +1218,7 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	if !s.sessions.MarkShareReady(sessionID, client.ID) {
 		return true
 	}
+	s.observeClient(client, connStateShare, false)
 
 	if reuseResult != nil && reuseResult.OldHelp != nil && reuseResult.OldHelp.Conn != nil {
 		// 现有 Help 客户端无法在已建立的 relay/P2P 流程中处理换代通知。
@@ -941,6 +1288,8 @@ func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeCon
 	// 只有真正 Join 成功才清零失败计数并进入 help 角色。
 	client.joinFailures = 0
 	client.Type = connStateHelp
+	s.observeClient(client, connStateHelp, false)
+	s.scheduleVerifyPairing(joinResult.SessionID, joinResult.Share, client)
 
 	// JoinResponse 附带 share 端版本与身份串（已在 JoinSession 内快照，无竞态）
 	resp := &proto.JoinResponse{
@@ -976,6 +1325,12 @@ func (s *Server) rejectJoin(client *ClientConn, code, reason string, _ bool) (cl
 // 状态的场景（例如同源地址重复加入）；其余调用方一律走 rejectJoin。
 func (s *Server) rejectJoinWithMessage(client *ClientConn, code, reason, publicErr string) (closeConn bool) {
 	client.joinFailures++
+	// 只有协助码本身不对才计分；限流拒绝、has_helper、activate_failed 都不是对端的异常行为。
+	switch reason {
+	case "code_invalid", "code_expired", "not_found":
+		client.realJoinFailures++
+		s.flagViolation(client, blocklist.KindJoinFailed, reason)
+	}
 
 	n := atomic.AddUint64(&s.rejectSampleCtr, 1)
 	if sampleHit(n, s.limits.RejectAuditSampleEvery) {
@@ -1000,7 +1355,11 @@ func (s *Server) rejectJoinWithMessage(client *ClientConn, code, reason, publicE
 	msg, _ := proto.NewMessage(proto.MsgJoinResponse, resp)
 	sendMsg(client, msg)
 
-	return client.joinFailures >= s.limits.MaxJoinFailures
+	closeConn = client.joinFailures >= s.limits.MaxJoinFailures
+	if closeConn && client.realJoinFailures > 0 {
+		s.flagViolation(client, blocklist.KindJoinFailuresExceeded, fmt.Sprintf("%d/%d", client.realJoinFailures, client.joinFailures))
+	}
+	return closeConn
 }
 
 // joinRejectReason 把内部 Join 错误映射为审计用的稳定 reason 枚举，绝不外泄给客户端。
@@ -1136,6 +1495,9 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if s.blocklist != nil {
+				s.blocklist.Sweep()
+			}
 			expired := s.sessions.CleanupExpired()
 			for _, id := range expired {
 				// 过期清理时主动失效对应 UDP relay entry。
@@ -1172,6 +1534,17 @@ func (s *Server) registerClient(client *ClientConn) string {
 		log.Printf("Client ID collision on %s, regenerating", client.ID)
 		client.ID = generateClientID()
 	}
+}
+
+// Blocklist 返回生效的黑名单；停用（未配置或源 IP 不可信）时为 nil。
+func (s *Server) Blocklist() *blocklist.List {
+	return s.blocklist
+}
+
+// Addr 返回实际监听地址（监听建立前为 nil），供 ":0" 随机端口的测试使用。
+func (s *Server) Addr() net.Addr {
+	addr, _ := s.listenAddr.Load().(net.Addr)
+	return addr
 }
 
 // connWrapper 包装net.Conn

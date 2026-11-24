@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/quictransport"
 )
 
@@ -77,17 +78,24 @@ func (s *Server) serveQUIC(ctx context.Context, ln *quicListener) {
 	}
 }
 
-// acceptQUICConn 先按源 IP 占连接名额，再等客户端开流——不能等开流后再占：握手完成而
-// 不开流的连接同样占着 goroutine 和连接状态，否则单个 IP 能开任意多条，挤满 quic-go
-// 有限的 Accept 队列，挡住正常客户端。之后与 TCP 一样进 serveConn。
+// acceptQUICConn 先查黑名单、按源 IP 占连接名额，再等客户端开流——不能等开流后再占：
+// 握手完成而不开流的连接同样占着 goroutine 和连接状态，否则单个 IP 能开任意多条，挤满
+// quic-go 有限的 Accept 队列，挡住正常客户端。之后与 TCP 一样进 serveConn。
+//
+// 黑名单查在握手之后：quic-go 的 Accept 只交出握完手的连接，查不到更早。源地址已经过
+// Retry 校验，被封 IP 至多换来一次握手开销。关闭原因带上「访问受限」：老客户端直接打印
+// 错误也能看到，新客户端据此识别为被封。
 func (s *Server) acceptQUICConn(ctx context.Context, qc *quic.Conn) {
 	clientIP := qc.RemoteAddr().String()
-	host, _, err := net.SplitHostPort(clientIP)
-	if err != nil {
-		host = clientIP
+	if s.blocklist != nil {
+		if bh, _, err := net.SplitHostPort(clientIP); err == nil && !s.blocklist.CheckAccept(bh) {
+			_ = qc.CloseWithError(0, proto.BlockedMessage)
+			s.recordBlocked(bh)
+			return
+		}
 	}
-	if !s.acquireConnSlot(host) {
-		log.Printf("Connection rejected from %s: too many connections", clientIP)
+	host, ok := s.admitConn(clientIP)
+	if !ok {
 		_ = qc.CloseWithError(0, "too many connections")
 		return
 	}
@@ -100,5 +108,5 @@ func (s *Server) acceptQUICConn(ctx context.Context, qc *quic.Conn) {
 		_ = qc.CloseWithError(0, "no stream")
 		return
 	}
-	s.serveConn(quictransport.NewConn(qc, stream), clientIP)
+	s.serveConn(quictransport.NewConn(qc, stream), clientIP, host)
 }

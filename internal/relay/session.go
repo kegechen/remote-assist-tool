@@ -71,6 +71,9 @@ type ClientConn struct {
 	// joinFailures 本连接累计的 Join 失败次数（含限流拒绝）。仅由该连接的读循环 goroutine
 	// 单线程访问，无需加锁。达到 maxJoinFailures 即关闭连接；一次成功 Join 后清零。
 	joinFailures int
+	// realJoinFailures 只计"协助码无效/过期/不存在"这类真失败（不含限流拒绝），用于黑名单计分。
+	realJoinFailures int
+	remoteIP         string
 }
 
 // TunnelSession 隧道会话
@@ -586,6 +589,15 @@ func (sm *SessionManager) ActivateDataPlane(sessionID, expectedShareID, expected
 	}
 	session.dataPlaneReady = true
 	return true
+}
+
+// IsPaired 报告会话当前是否仍由这一对连接配对（未关闭、share 与 help 未换、help 无待定断连）。
+func (sm *SessionManager) IsPaired(sessionID, shareID, helpID string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	session, ok := sm.sessions[sessionID]
+	return ok && !session.closed && session.Share != nil && session.Help != nil &&
+		session.Share.ID == shareID && session.Help.ID == helpID && session.pendingHelpID == ""
 }
 
 // IsActiveDataSession 报告某会话的数据面（UDP relay）当前是否就绪，供 STUN relay 层做准入校验。

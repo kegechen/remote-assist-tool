@@ -29,6 +29,7 @@ Windows 版本的 relay 同时支持前台模式和原生 Windows 服务模式�
 | 服务配置 | `C:\ProgramData\RemoteAssistRelay\config.json` |
 | 自动证书 | `C:\ProgramData\RemoteAssistRelay\certs` |
 | 审计日志 | `C:\ProgramData\RemoteAssistRelay\logs\audit.jsonl` |
+| IP 黑名单 | `C:\ProgramData\RemoteAssistRelay\blocklist.json`（封禁记录在同目录的 `blocklist-records.json`） |
 | 服务账户 | `NT AUTHORITY\LocalService` |
 | 启动方式 | 自动（延迟启动） |
 | 故障恢复 | 5 秒、30 秒、60 秒后依次重启；24 小时无故障后清零 |
@@ -52,9 +53,13 @@ Windows 版本的 relay 同时支持前台模式和原生 Windows 服务模式�
   "plain": false,
   "certs_dir": "C:\\ProgramData\\RemoteAssistRelay\\certs",
   "trust_source_ip": true,
-  "no_auth": false
+  "no_auth": false,
+  "blocklist_enabled": true,
+  "blocklist_db": "C:\\ProgramData\\RemoteAssistRelay\\blocklist.json"
 }
 ```
+
+`blocklist_enabled` / `blocklist_db` 对应 relay 的 `--blocklist-enabled` / `--blocklist-db`（见 README 的「IP 黑名单」）。旧版本生成的 `config.json` 没有这两项时沿用上面的默认值，即升级后黑名单默认开启；`blocklist_db` 置空为纯内存模式。新安装生成的配置带有这两个字段，旧版 relay.exe 不认识它们，回滚到旧版本前先删掉。
 
 可选字段包括 `cert`、`key`、`stun`、`advertise_stun` 和 `limits_file`。`advertise_stun` 是逗号分隔的 `host:port`（单播 IPv4 或域名，最多 4 个；回环、IPv6 字面量、localhost 等客户端会丢弃的值启动时直接报错），本机 UDP 3478 对外不通时用它让客户端改用别处的 STUN。旧版 relay.exe 不认识这个字段，配置加载会因未知字段失败：回滚到旧版本前先删掉它。修改配置后需要重启服务：
 

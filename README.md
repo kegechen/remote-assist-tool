@@ -282,6 +282,38 @@ New clients advertise support for the structured notice and render it cleanly. C
 
 For how the relay determines source IPs, the full rate-limit parameters, the rationale for the defaults, public STUN behavior, and deployment monitoring, see the [Relay Source IP, Rate Limiting and Monitoring Guide](docs/RELAY_LIMITS.md) (Chinese).
 
+#### IP blocklist
+
+The relay has a built-in IP blocklist that is **on by default** and needs no configuration. It scores abnormal behavior only; normal connections, reconnects and rate-limit rejections never count:
+
+| Abnormal behavior | Points |
+|------|------|
+| Non-TLS data or a malformed TLS record sent to the TLS port | 1 |
+| Frame is not valid JSON, register/join payload fails to decode, or a line is too long | 2 |
+| Protocol state violation (registering twice, business messages before registering) | 2 |
+| Unknown message type before registering/joining | 1 |
+| Join fails because the assist code is wrong, expired or has no session | 1 |
+| A connection is closed for too many failed joins | 5 |
+
+Reaching 20 points within 10 minutes triggers an automatic ban: 1 hour the first time, doubling on each repeat up to 24 hours; the repeat count resets after 7 days without a new ban. IPv4 is tracked per address, IPv6 per /64. An automatic ban does not drop existing connections, it only rejects new ones; newer clients that are rejected show "访问受限，请联系管理员。" ("Access restricted, please contact the administrator."). Everyone behind the same egress IP is rejected together, so add shared egress addresses such as an office NAT to the allow list.
+
+| Option | Default | Description |
+|------|--------|------|
+| `--blocklist-enabled` | `true` | Master switch; forced off with `--trust-source-ip=false` (the source IP cannot be trusted, so banning one address would ban everyone) |
+| `--blocklist-db` | `~/.remote_assist_relay_default_blocklist.json` | Ban list file (mode 0600), so bans survive restarts; a record of each ban is kept in the sibling `*-records.json` (e.g. `blocklist.json` → `blocklist-records.json`). Pass it explicitly empty (`--blocklist-db=`) for memory-only mode. Give each instance its own file when running several relays on one host |
+| `--blocklist-allow` | empty | Allow list: comma-separated IPs or CIDRs (e.g. `203.0.113.7,198.51.100.0/24,2001:db8::/48`); matching sources are never scored or rejected, and existing bans inside the range are lifted at startup. At most 256 entries, `/0` is rejected. Changes take effect after a relay restart |
+| `--blocklist-threshold` | `20` | Points within the window that trigger an automatic ban |
+| `--blocklist-window` | `10m` | Sliding scoring window |
+| `--blocklist-ban-base` | `1h` | First automatic ban duration, doubled on each repeat |
+| `--blocklist-ban-max` | `24h` | Maximum automatic ban duration |
+| `--blocklist-offense-decay` | `168h` | Reset the repeat count after this long without a new ban |
+| `--blocklist-unban-grace` | `24h` | No automatic ban for this long after an unban |
+| `--blocklist-max-tracked` | `4096` | Maximum number of sources tracked in memory (64–8192) |
+
+Duration options must be at least `1m`. Bans, expirations and allow-list releases are written to the `--audit` log (events `ip_banned`, `ip_ban_expired`, `ip_unbanned`, …, with IP, duration, points and actor); the start, end and trigger of every ban are also kept in the records file.
+
+To undo a wrong ban, add the address to `--blocklist-allow` and restart the relay: the ban is lifted at startup and audited with actor `config`. A restart disconnects online shares, which reconnect on their own and get a new assist code unless `--state-dir` is set. The Windows service keeps the ban list at `C:\ProgramData\RemoteAssistRelay\blocklist.json` by default; adjust it with `blocklist_enabled` and `blocklist_db` in `config.json`.
+
 On Windows, double-clicking a relay with no arguments opens a service management menu. You can also install and manage the native Windows service with non-interactive commands:
 
 ```powershell

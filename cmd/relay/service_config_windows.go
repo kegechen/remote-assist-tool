@@ -25,20 +25,21 @@ const (
 )
 
 type windowsServicePaths struct {
-	installDir string
-	executable string
-	dataDir    string
-	configFile string
-	certsDir   string
-	auditFile  string
+	installDir    string
+	executable    string
+	dataDir       string
+	configFile    string
+	certsDir      string
+	auditFile     string
+	blocklistFile string
 }
 
 type windowsServiceConfig struct {
-	ListenAddr     string `json:"listen"`
-	CertFile       string `json:"cert,omitempty"`
-	KeyFile        string `json:"key,omitempty"`
-	CodeTTL        string `json:"ttl"`
-	CodeLength     int    `json:"length"`
+	ListenAddr string `json:"listen"`
+	CertFile   string `json:"cert,omitempty"`
+	KeyFile    string `json:"key,omitempty"`
+	CodeTTL    string `json:"ttl"`
+	CodeLength int    `json:"length"`
 	// CodeMaxAge 码的绝对寿命上限（即使 share 一直在线也到期，复用不重置计时）。默认 "24h"；
 	// 空串=不传该旗标，沿用 relay 默认值（24h）；"0" 显式关闭上限（泄露的码将一直有效，不推荐）。
 	CodeMaxAge string `json:"code_max_age,omitempty"`
@@ -46,21 +47,25 @@ type windowsServiceConfig struct {
 	// 后原 share 仍能取回原协助码；置空则密钥只在内存，重启后所有 share 换新码。
 	StateDir string `json:"state_dir,omitempty"`
 	// LegacyCodeExpiry 恢复旧的硬 TTL 过期行为（不支持跨重连固定协助码）。
-	LegacyCodeExpiry bool `json:"legacy_code_expiry,omitempty"`
-	AuditLog       string `json:"audit"`
-	Plain          bool   `json:"plain"`
-	CertsDir       string `json:"certs_dir"`
-	STUNAddr       string `json:"stun,omitempty"`
-	QUICAddr       string `json:"quic_listen,omitempty"`
-	TrustSourceIP  bool   `json:"trust_source_ip"`
-	LimitsFile     string `json:"limits_file,omitempty"`
-	NoAuth         bool   `json:"no_auth"`
-	LatestVersion  string `json:"latest_version,omitempty"`
-	DownloadURL    string `json:"download_url,omitempty"`
-	ReleasePage    string `json:"release_page,omitempty"`
-	UpdateInfoFile string `json:"update_info_file,omitempty"`
+	LegacyCodeExpiry bool   `json:"legacy_code_expiry,omitempty"`
+	AuditLog         string `json:"audit"`
+	Plain            bool   `json:"plain"`
+	CertsDir         string `json:"certs_dir"`
+	STUNAddr         string `json:"stun,omitempty"`
+	QUICAddr         string `json:"quic_listen,omitempty"`
+	TrustSourceIP    bool   `json:"trust_source_ip"`
+	LimitsFile       string `json:"limits_file,omitempty"`
+	NoAuth           bool   `json:"no_auth"`
+	LatestVersion    string `json:"latest_version,omitempty"`
+	DownloadURL      string `json:"download_url,omitempty"`
+	ReleasePage      string `json:"release_page,omitempty"`
+	UpdateInfoFile   string `json:"update_info_file,omitempty"`
 	// AdvertiseSTUN 逗号分隔的 host:port，对应 --advertise-stun。
 	AdvertiseSTUN string `json:"advertise_stun,omitempty"`
+	// BlocklistEnabled / BlocklistDB 对应 --blocklist-enabled / --blocklist-db。旧配置里没有这两项时
+	// 沿用默认值（开启、数据目录下的 blocklist.json）；blocklist_db 置空 = 纯内存。
+	BlocklistEnabled bool   `json:"blocklist_enabled"`
+	BlocklistDB      string `json:"blocklist_db"`
 }
 
 func defaultWindowsServicePaths() (windowsServicePaths, error) {
@@ -75,12 +80,13 @@ func defaultWindowsServicePaths() (windowsServicePaths, error) {
 	installDir := filepath.Join(programFiles, "RemoteAssistRelay")
 	dataDir := filepath.Join(programData, "RemoteAssistRelay")
 	return windowsServicePaths{
-		installDir: installDir,
-		executable: filepath.Join(installDir, "relay.exe"),
-		dataDir:    dataDir,
-		configFile: filepath.Join(dataDir, "config.json"),
-		certsDir:   filepath.Join(dataDir, "certs"),
-		auditFile:  filepath.Join(dataDir, "logs", "audit.jsonl"),
+		installDir:    installDir,
+		executable:    filepath.Join(installDir, "relay.exe"),
+		dataDir:       dataDir,
+		configFile:    filepath.Join(dataDir, "config.json"),
+		certsDir:      filepath.Join(dataDir, "certs"),
+		auditFile:     filepath.Join(dataDir, "logs", "audit.jsonl"),
+		blocklistFile: filepath.Join(dataDir, "blocklist.json"),
 	}, nil
 }
 
@@ -92,15 +98,17 @@ func defaultWindowsServiceConfig(paths windowsServicePaths) windowsServiceConfig
 		updateInfoFile = filepath.Join(filepath.Dir(paths.configFile), "update-info.json")
 	}
 	return windowsServiceConfig{
-		ListenAddr:     ":8443",
-		CodeTTL:        "30m",
-		CodeLength:     12,
-		CodeMaxAge:     "24h",
-		StateDir:       stateDirFor(paths),
-		AuditLog:       paths.auditFile,
-		CertsDir:       paths.certsDir,
-		TrustSourceIP:  true,
-		UpdateInfoFile: updateInfoFile,
+		ListenAddr:       ":8443",
+		CodeTTL:          "30m",
+		CodeLength:       12,
+		CodeMaxAge:       "24h",
+		StateDir:         stateDirFor(paths),
+		AuditLog:         paths.auditFile,
+		CertsDir:         paths.certsDir,
+		TrustSourceIP:    true,
+		UpdateInfoFile:   updateInfoFile,
+		BlocklistEnabled: true,
+		BlocklistDB:      paths.blocklistFile,
 	}
 }
 
@@ -183,8 +191,9 @@ func (cfg windowsServiceConfig) validate() error {
 		"audit":            cfg.AuditLog,
 		"certs_dir":        cfg.CertsDir,
 		"limits_file":      cfg.LimitsFile,
-			"state_dir":        cfg.StateDir,
+		"state_dir":        cfg.StateDir,
 		"update_info_file": cfg.UpdateInfoFile,
+		"blocklist_db":     cfg.BlocklistDB,
 	}
 	for name, path := range paths {
 		if path != "" && !filepath.IsAbs(path) {
@@ -202,6 +211,8 @@ func (cfg windowsServiceConfig) relayArgs() []string {
 		"--audit", cfg.AuditLog,
 		"--certs-dir", cfg.CertsDir,
 		"--trust-source-ip=" + strconv.FormatBool(cfg.TrustSourceIP),
+		"--blocklist-enabled=" + strconv.FormatBool(cfg.BlocklistEnabled),
+		"--blocklist-db", cfg.BlocklistDB,
 	}
 	if cfg.CertFile != "" {
 		args = append(args, "--cert", cfg.CertFile, "--key", cfg.KeyFile)

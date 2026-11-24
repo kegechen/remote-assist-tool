@@ -64,11 +64,33 @@ func TestWindowsServiceConfigDefaultsAndStrictDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.TrustSourceIP || cfg.AuditLog != paths.auditFile || cfg.CertsDir != paths.certsDir {
+	if !cfg.TrustSourceIP || cfg.AuditLog != paths.auditFile || cfg.CertsDir != paths.certsDir ||
+		!cfg.BlocklistEnabled || cfg.BlocklistDB != paths.blocklistFile ||
+		paths.blocklistFile != filepath.Join(paths.dataDir, "blocklist.json") {
 		t.Fatalf("unexpected service defaults: %+v", cfg)
 	}
 	if cfg.UpdateInfoFile != filepath.Join(paths.dataDir, "update-info.json") {
 		t.Fatalf("unexpected update info file default: %q", cfg.UpdateInfoFile)
+	}
+
+	// 旧版本写出的 config.json 没有 blocklist 字段：加载后沿用默认（开启、数据目录下的文件）。
+	legacy := filepath.Join(root, "legacy.json")
+	if err := os.WriteFile(legacy, []byte(`{"listen":":8443","ttl":"30m","length":10,"trust_source_ip":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old, err := loadWindowsServiceConfig(legacy, defaultWindowsServiceConfig(paths))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !old.BlocklistEnabled || old.BlocklistDB != paths.blocklistFile {
+		t.Fatalf("legacy config should keep blocklist defaults: enabled=%v db=%q", old.BlocklistEnabled, old.BlocklistDB)
+	}
+	relativeDB := filepath.Join(root, "relative-blocklist.json")
+	if err := os.WriteFile(relativeDB, []byte(`{"blocklist_db":"blocklist.json"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadWindowsServiceConfig(relativeDB, defaultWindowsServiceConfig(paths)); err == nil || !strings.Contains(err.Error(), "blocklist_db") {
+		t.Fatalf("relative blocklist_db accepted: %v", err)
 	}
 
 	unknown := filepath.Join(root, "unknown.json")
@@ -156,13 +178,20 @@ func TestWindowsServiceConfigRelayArgsRoundTrip(t *testing.T) {
 		CertsDir:      `C:\ProgramData\RemoteAssistRelay\certs`,
 		TrustSourceIP: false,
 		STUNAddr:      ":3478",
+		BlocklistDB:   `C:\ProgramData\RemoteAssistRelay\blocklist-b.json`,
 	}
 	opts, err := parseRelayOptions(cfg.relayArgs(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.listenAddr != cfg.ListenAddr || opts.codeTTL != time.Hour || opts.codeLength != 12 || opts.trustSourceIP {
+	if opts.listenAddr != cfg.ListenAddr || opts.codeTTL != time.Hour || opts.codeLength != 12 || opts.trustSourceIP ||
+		opts.blocklistEnabled || opts.blocklistDB != cfg.BlocklistDB {
 		t.Fatalf("round trip mismatch: %+v", opts)
+	}
+	cfg.BlocklistEnabled = true
+	cfg.BlocklistDB = ""
+	if opts, err := parseRelayOptions(cfg.relayArgs(), io.Discard); err != nil || !opts.blocklistEnabled || opts.blocklistDB != "" {
+		t.Fatalf("blocklist round trip (enabled, memory only): %v enabled=%v db=%q", err, opts.blocklistEnabled, opts.blocklistDB)
 	}
 }
 

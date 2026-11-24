@@ -282,6 +282,38 @@ MCP server 名建议用 `remote-debug`。
 
 Relay 的来源 IP 判断、完整限流参数、默认值依据、公共 STUN 行为和部署监控方法见 [Relay 来源 IP、限流与监控指南](docs/RELAY_LIMITS.md)。
 
+#### IP 黑名单
+
+relay 内置 IP 黑名单，**默认开启**，不需要额外配置；它只按异常行为计分，正常连接、重连和各类限流拒绝都不计分：
+
+| 异常行为 | 分值 |
+|------|------|
+| 往 TLS 端口发非 TLS 数据或畸形 TLS 记录 | 1 |
+| 帧不是合法 JSON、register/join 解码失败、单行超长 | 2 |
+| 协议状态违规（重复注册、注册前发业务消息） | 2 |
+| 尚未注册/加入就发未知消息类型 | 1 |
+| 协助码错误、过期或会话不存在导致 join 失败 | 1 |
+| 单条连接 join 失败次数超限被断开 | 5 |
+
+10 分钟内累计满 20 分即自动封禁：首次 1 小时，再犯依次翻倍，最长 24 小时；7 天没有再被封则次数清零。IPv4 按单个地址计，IPv6 按 /64 计。自动封禁不断开已有连接，只拒绝新连接；被拒的新版客户端会提示「访问受限，请联系管理员。」。同一出口 IP 下的其他用户也会一起被拒，所以办公网出口这类共享 IP 建议加入放行名单。
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `--blocklist-enabled` | `true` | 总开关；`--trust-source-ip=false` 时强制关闭（源 IP 不可信，封一个等于封全部） |
+| `--blocklist-db` | `~/.remote_assist_relay_default_blocklist.json` | 封禁名单文件（权限 0600），重启后封禁仍然有效；每次封禁的记录写在同目录的 `*-records.json`（如 `blocklist.json` 对应 `blocklist-records.json`）。显式传空（`--blocklist-db=`）为纯内存模式。同一台机器跑多个 relay 时给每个实例指定不同文件 |
+| `--blocklist-allow` | 空 | 放行名单：逗号分隔的 IP 或 CIDR（如 `203.0.113.7,198.51.100.0/24,2001:db8::/48`），命中的来源不计分、不被拒绝；启动时自动解除范围内已有的封禁。最多 256 条，不接受 `/0`。修改后需重启 relay |
+| `--blocklist-threshold` | `20` | 窗口内触发自动封禁的分值 |
+| `--blocklist-window` | `10m` | 计分滑动窗口 |
+| `--blocklist-ban-base` | `1h` | 首次自动封禁时长，再犯翻倍 |
+| `--blocklist-ban-max` | `24h` | 自动封禁时长上限 |
+| `--blocklist-offense-decay` | `168h` | 多久没有再被封就清零再犯次数 |
+| `--blocklist-unban-grace` | `24h` | 解除封禁后多长时间内不再自动封禁 |
+| `--blocklist-max-tracked` | `4096` | 内存中跟踪的来源上限（64–8192） |
+
+时长类参数都不能小于 `1m`。封禁、到期解除、放行解除都会写入 `--audit` 审计日志（事件 `ip_banned`、`ip_ban_expired`、`ip_unbanned` 等，含 IP、时长、分值和操作人）；每次封禁的起止时间和触发原因另存于封禁记录文件。
+
+误封时把该地址加入 `--blocklist-allow` 后重启 relay：启动时会解除它的封禁并写审计日志（操作人记为 `config`）。注意重启会让在线的 share 断开重连，未设置 `--state-dir` 时它们会换新协助码。Windows 服务的封禁名单默认在 `C:\ProgramData\RemoteAssistRelay\blocklist.json`，可在 `config.json` 中用 `blocklist_enabled`、`blocklist_db` 调整。
+
 Windows 下直接双击无参数的 relay 会打开服务管理菜单。也可以使用非交互命令安装和管理原生 Windows 服务：
 
 ```powershell

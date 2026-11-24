@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,4 +279,24 @@ func TestQUICListenerCloseReleasesUDPPort(t *testing.T) {
 		t.Fatalf("关闭 QUIC 监听后 UDP 端口 %s 仍被占用: %v", addr, err)
 	}
 	pc.Close()
+}
+
+// 黑名单对 QUIC 同样生效：被封 IP 的 QUIC 连接在接入时（占名额、等流之前）就被拒，
+// 与 TCP 一样记一次黑名单拒绝。serveConn 里登记后的 IsBanned 只是兜底，不记拒绝。
+func TestQUICRejectsBlocklistedIP(t *testing.T) {
+	bl := newTestBlocklist(t)
+	if _, err := bl.Ban("127.0.0.1", time.Hour, false, "admin", "测试"); err != nil {
+		t.Fatal(err)
+	}
+	srv, addr := startQUICRelay(t, func(c *Config) { c.Blocklist = bl })
+
+	c := dialQUIC(t, addr)
+	c.send(t, proto.MsgRegisterRequest, &proto.RegisterRequest{Version: "v1.1.0"})
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if line, err := c.r.ReadBytes('\n'); err == nil {
+		t.Fatalf("被封 IP 的 QUIC 连接应被关闭，却收到 %s", line)
+	}
+	if n := atomic.LoadUint64(&srv.blockedSampleCtr); n == 0 {
+		t.Fatal("QUIC 接入时应按黑名单拒绝并记录，而不是靠登记后的兜底检查")
+	}
 }

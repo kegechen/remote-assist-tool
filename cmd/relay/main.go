@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/remote-assist/tool/internal/crypto"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/relay"
+	"github.com/remote-assist/tool/internal/relay/blocklist"
 	"github.com/remote-assist/tool/internal/update"
 	"github.com/remote-assist/tool/internal/version"
 )
@@ -50,6 +52,18 @@ type relayOptions struct {
 	releasePage    string
 	updateInfoFile string
 	advertiseSTUN  []string
+
+	blocklistEnabled      bool
+	blocklistDB           string
+	blocklistThreshold    int
+	blocklistWindow       time.Duration
+	blocklistBanBase      time.Duration
+	blocklistBanMax       time.Duration
+	blocklistOffenseDecay time.Duration
+	blocklistUnbanGrace   time.Duration
+	blocklistMaxTracked   int
+	blocklistAllowSpec    string         // --blocklist-allow 原文
+	blocklistAllow        []netip.Prefix // 解析后的放行范围，空 = 不放行任何地址
 }
 
 func main() {
@@ -113,6 +127,22 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		return err
 	}
 
+	bl, blRecords := openBlocklist(opts)
+	if blRecords != nil {
+		// 先注册、后执行：名单关闭（最后一次写盘）之后才关记录。
+		defer func() {
+			if err := blRecords.Close(); err != nil {
+				log.Printf("blocklist records close failed: %v", err)
+			}
+		}()
+	}
+	if bl != nil {
+		defer func() {
+			if err := bl.Close(); err != nil {
+				log.Printf("blocklist close failed: %v", err)
+			}
+		}()
+	}
 	cfg := &relay.Config{
 		ListenAddr:            opts.listenAddr,
 		TLSCertFile:           opts.certFile,
@@ -132,6 +162,7 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		Update:                updateInfo,
 		UpdateInfoFile:        opts.updateInfoFile,
 		AdvertiseSTUN:         opts.advertiseSTUN,
+		Blocklist:             bl,
 	}
 
 	if opts.noAuth {
@@ -174,6 +205,15 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 		downloadURL:   update.DefaultDownloadURL,
 		releasePage:   update.DefaultReleasePage,
 	}
+	bd := blocklist.DefaultConfig()
+	opts.blocklistEnabled = true
+	opts.blocklistThreshold = bd.Threshold
+	opts.blocklistWindow = bd.Window
+	opts.blocklistBanBase = bd.BanBase
+	opts.blocklistBanMax = bd.BanMax
+	opts.blocklistOffenseDecay = bd.OffenseDecay
+	opts.blocklistUnbanGrace = bd.UnbanGrace
+	opts.blocklistMaxTracked = bd.MaxTracked
 
 	fs := flag.NewFlagSet("relay", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -201,6 +241,16 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	fs.StringVar(&opts.releasePage, "release-page", opts.releasePage, "Fallback download page (https; {version} expanded) when a client's platform is unknown or has no released asset")
 	fs.StringVar(&opts.updateInfoFile, "update-info-file", "", "JSON upgrade announcement file to reload without restarting the relay")
 	advertiseSTUN := fs.String("advertise-stun", "", "Comma-separated STUN servers (host:port, at most 4) sent to new clients for public-address discovery; use when this host's --stun port is unreachable from outside")
+	fs.BoolVar(&opts.blocklistEnabled, "blocklist-enabled", opts.blocklistEnabled, "Enable the built-in IP blocklist (auto-ban on abnormal behavior; forced off with --trust-source-ip=false)")
+	fs.StringVar(&opts.blocklistDB, "blocklist-db", "", "Blocklist JSON file (default ~/.remote_assist_relay_default_blocklist.json; empty = memory only)")
+	fs.IntVar(&opts.blocklistThreshold, "blocklist-threshold", opts.blocklistThreshold, "Violation points within the window that trigger an auto-ban")
+	fs.DurationVar(&opts.blocklistWindow, "blocklist-window", opts.blocklistWindow, "Sliding window for violation points")
+	fs.DurationVar(&opts.blocklistBanBase, "blocklist-ban-base", opts.blocklistBanBase, "First auto-ban duration (doubles on repeat offenses)")
+	fs.DurationVar(&opts.blocklistBanMax, "blocklist-ban-max", opts.blocklistBanMax, "Maximum auto-ban duration")
+	fs.DurationVar(&opts.blocklistOffenseDecay, "blocklist-offense-decay", opts.blocklistOffenseDecay, "Reset the repeat-offense count after this long without a new auto-ban")
+	fs.DurationVar(&opts.blocklistUnbanGrace, "blocklist-unban-grace", opts.blocklistUnbanGrace, "After a manual unban, suppress auto-ban for this long")
+	fs.IntVar(&opts.blocklistMaxTracked, "blocklist-max-tracked", opts.blocklistMaxTracked, "Maximum number of tracked IPs kept in memory")
+	fs.StringVar(&opts.blocklistAllowSpec, "blocklist-allow", "", "Comma-separated IPs or CIDRs that are never auto-banned, rejected or manually banned (e.g. your office NAT); bans already on file inside the range are lifted at startup")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Remote Assist Relay Server %s\n\n", version.Info())
 		fmt.Fprintf(stderr, "Usage:\n  %s run [options]\n  %s [options]\n\nOptions:\n", os.Args[0], os.Args[0])
@@ -209,6 +259,15 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	}
 	if err := fs.Parse(args); err != nil {
 		return relayOptions{}, err
+	}
+	blocklistDBSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "blocklist-db" {
+			blocklistDBSet = true
+		}
+	})
+	if !blocklistDBSet {
+		opts.blocklistDB = defaultBlocklistDB(defaultBlocklistInstance)
 	}
 	if fs.NArg() != 0 {
 		return relayOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
@@ -232,6 +291,15 @@ func parseRelayOptions(args []string, stderr io.Writer) (relayOptions, error) {
 	if (opts.certFile == "") != (opts.keyFile == "") {
 		return relayOptions{}, fmt.Errorf("cert and key must be specified together")
 	}
+	if err := validateBlocklistOptions(opts); err != nil {
+		return relayOptions{}, err
+	}
+	// 放行名单写错要立刻失败，即使黑名单被关闭：之后再打开时才发现配置有误更糟。
+	allow, err := blocklist.ParseStaticAllow(opts.blocklistAllowSpec)
+	if err != nil {
+		return relayOptions{}, err
+	}
+	opts.blocklistAllow = allow
 	return opts, nil
 }
 
@@ -264,6 +332,104 @@ func resolveUpdateInfo(opts relayOptions) (proto.UpdateInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// minBlocklistMaxTracked --blocklist-max-tracked 的下限。
+const minBlocklistMaxTracked = 64
+
+func validateBlocklistOptions(opts relayOptions) error {
+	if opts.blocklistThreshold < 1 {
+		return fmt.Errorf("blocklist-threshold must be at least 1")
+	}
+	// 跟踪上限过小会让扫描器的分值在达到阈值前就被淘汰。
+	if opts.blocklistMaxTracked < minBlocklistMaxTracked {
+		return fmt.Errorf("blocklist-max-tracked must be at least %d", minBlocklistMaxTracked)
+	}
+	// 上限保证持久化文件在加载上限之内（见 blocklist.MaxTrackedLimit）。
+	if opts.blocklistMaxTracked > blocklist.MaxTrackedLimit {
+		return fmt.Errorf("blocklist-max-tracked must be at most %d", blocklist.MaxTrackedLimit)
+	}
+	// 时长至少 1 分钟：更短的窗口/封禁没有实际意义，多半是单位写错。
+	for name, d := range map[string]time.Duration{
+		"blocklist-window":        opts.blocklistWindow,
+		"blocklist-ban-base":      opts.blocklistBanBase,
+		"blocklist-ban-max":       opts.blocklistBanMax,
+		"blocklist-offense-decay": opts.blocklistOffenseDecay,
+		"blocklist-unban-grace":   opts.blocklistUnbanGrace,
+	} {
+		if d < time.Minute {
+			return fmt.Errorf("%s must be at least 1m", name)
+		}
+	}
+	if opts.blocklistBanMax < opts.blocklistBanBase {
+		return fmt.Errorf("blocklist-ban-max must not be shorter than blocklist-ban-base")
+	}
+	return nil
+}
+
+// defaultBlocklistInstance 默认黑名单文件名里的实例名。同一台机器跑多个 relay 时，
+// 用 --blocklist-db 给每个实例指定不同的文件。
+const defaultBlocklistInstance = "default"
+
+// defaultBlocklistDB 放在用户主目录下、按实例名区分，避免多实例共用一个文件。
+func defaultBlocklistDB(instance string) string {
+	name := ".remote_assist_relay_" + instance + "_blocklist.json"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return name
+	}
+	return filepath.Join(home, name)
+}
+
+func blocklistConfigFromOptions(opts relayOptions) blocklist.Config {
+	return blocklist.Config{
+		Path:         opts.blocklistDB,
+		Threshold:    opts.blocklistThreshold,
+		Window:       opts.blocklistWindow,
+		BanBase:      opts.blocklistBanBase,
+		BanMax:       opts.blocklistBanMax,
+		OffenseDecay: opts.blocklistOffenseDecay,
+		UnbanGrace:   opts.blocklistUnbanGrace,
+		MaxTracked:   opts.blocklistMaxTracked,
+		StaticAllow:  opts.blocklistAllow,
+		Now:          time.Now,
+	}
+}
+
+// openBlocklist 按配置创建黑名单及其封禁记录（记录文件由 --blocklist-db 派生：blocklist.json →
+// blocklist-records.json）。停用时都返回 nil。持久化打开失败不阻止 relay 启动：黑名单以纯内存模式运行，
+// 原文件保持不动；记录同理，且不影响名单本体。
+func openBlocklist(opts relayOptions) (*blocklist.List, *blocklist.Records) {
+	if !opts.blocklistEnabled {
+		log.Printf("IP blocklist disabled by --blocklist-enabled=false")
+		return nil, nil
+	}
+	if !opts.trustSourceIP {
+		log.Printf("WARNING: IP blocklist disabled: source IP is not trusted (--trust-source-ip=false)")
+		return nil, nil
+	}
+	// 先加载记录，再加载名单（Open 里对账）。
+	recPath := blocklist.SiblingPath(opts.blocklistDB, "records")
+	recs, err := blocklist.OpenRecords(blocklist.RecordsConfig{Path: recPath, Now: time.Now})
+	if err != nil {
+		log.Printf("ERROR: blocklist records unavailable (%v); ban records are kept in memory only and the file is left untouched", err)
+	}
+	cfg := blocklistConfigFromOptions(opts)
+	cfg.Records = recs
+	bl, err := blocklist.Open(cfg)
+	if err != nil {
+		log.Printf("ERROR: blocklist persistence unavailable (%v); running in memory-only mode, bans will not survive restart", err)
+	} else if !bl.Persistent() {
+		log.Printf("WARNING: blocklist running in memory-only mode (--blocklist-db is empty)")
+	} else if recs.Persistent() {
+		log.Printf("IP blocklist enabled (file: %s, records: %s)", opts.blocklistDB, recPath)
+	} else {
+		log.Printf("IP blocklist enabled (file: %s, records: in memory only)", opts.blocklistDB)
+	}
+	if n := len(opts.blocklistAllow); n > 0 {
+		log.Printf("IP blocklist: %d --blocklist-allow entr(ies) are never banned or rejected", n)
+	}
+	return bl, recs
 }
 
 func configureTLS(cfg *relay.Config, opts relayOptions) error {
