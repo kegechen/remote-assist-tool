@@ -1484,7 +1484,7 @@ async function deskStart(forceLoading){
   let ema=0,pema=-1,level=0,lastStart=0,inflight=[],fail=null,lastStat=0,still=0;
   const have={seq:0,key:'',at:0};
   // sharp：画面静止后升到高画质（增量帧很小，高画质几乎不增加带宽）；链路变差(level>0)或手动选画质时关闭
-  let sharp=false,longPoll=false,samples=0,lastWait=0;
+  let sharp=false,sharpWarmup=false,longPoll=false,samples=0,lastWait=0;
   const params=()=>{
     const wSel=+$('#deskW').value,qSel=+$('#deskQ').value;
     let w=wSel,q=qSel;
@@ -1498,7 +1498,10 @@ async function deskStart(forceLoading){
   const qSel_=()=>!!+$('#deskQ').value;
   const issue=()=>{lastStart=performance.now();const ctl=new AbortController();pollCtl=ctl;const onAc=()=>ctl.abort();ac.signal.addEventListener('abort',onAc,{once:true});inflight.push(deskFetch(params(),ctl.signal).finally(()=>ac.signal.removeEventListener('abort',onAc)))};
   // 参数切换时中止在途长轮询：否则新参数要等旧请求（最长 DESK_WAIT_MS）返回后才生效。
-  const abortPoll=()=>{if(pollCtl)pollCtl.abort()};
+  // api() 会吞掉异常、把 abort resolve 成 {ok:false,error:"AbortError…"}，所以这里只置标志，
+  // 由循环在 !r.ok 处识别并 continue（catch AbortError 分支永远走不到，已删除）。
+  let pollAborted=false;
+  const abortPoll=()=>{if(pollCtl){pollAborted=true;pollCtl.abort()}};
   const pollCtrls=['#deskDisp','#deskW','#deskQ','#deskFps'].map(sel=>{const el=$(sel);if(el)el.addEventListener('change',abortPoll);return el}).filter(Boolean);
   const sleep=ms=>new Promise(res=>setTimeout(res,ms));
   while(my===desk.loopId&&connected&&activeTab==='desk'){
@@ -1516,18 +1519,15 @@ async function deskStart(forceLoading){
       const gap=interval/depth-(performance.now()-lastStart);
       if(gap<=0){issue();continue}
       if(!inflight.length){await sleep(gap);if(my!==desk.loopId)break;continue}
-      let first;
-      try{first=await Promise.race([inflight[0],sleep(gap).then(()=>null)])}catch(e){if(my!==desk.loopId)break;if(e&&e.name==='AbortError')continue;throw e}
+      const first=await Promise.race([inflight[0],sleep(gap).then(()=>null)]);
       if(my!==desk.loopId)break;
       if(first===null)continue;
     }
     if(!inflight.length)break;
-    let item;
-    try{item=await inflight.shift()}catch(e){if(my!==desk.loopId)break;if(e&&e.name==='AbortError')continue;throw e}
-    const {r,t0,t1,key}=item;
+    const {r,t0,t1,key}=await inflight.shift();
     if(my!==desk.loopId)break;
     const rtt=Math.round(t1-t0);
-    if(!r.ok){fail=deskErrText(r.error);break}
+    if(!r.ok){if(pollAborted){pollAborted=false;continue}fail=deskErrText(r.error);break}
     let d;try{d=deskSanitize(parseMCP(r.result))}catch(e){fail='解析帧失败';break}
     if(d&&d.bad){fail=d.bad;break}
     let unchanged=!!(d&&d.unchanged&&!d.data&&have.seq);
@@ -1547,12 +1547,14 @@ async function deskStart(forceLoading){
       if(ema>900)level=2;else if(ema>400)level=Math.max(level,1);else if(ema<150)level=0;
       else if(ema<300&&level===2)level=1;
     }else{ema=net;level=0}
-    if(level>0||qSel_()){sharp=false}
+    if(level>0||qSel_()){sharp=false;sharpWarmup=false}
     // 调试出口：仅地址带 ?dbg=1 时记录最近 200 帧的往返/处理/网络/ema/档位/在途数到 window.__deskDbg；平时不产生任何对象
     if(DESK_DBG){(window.__deskDbg=window.__deskDbg||[]).push({t:Math.round(performance.now()),rtt,proc,net,ema:Math.round(ema),level,inflight:inflight.length,un:unchanged,delta:!!d.delta,kb:Math.round((d.data?d.data.length*0.75:0)/1024)});if(window.__deskDbg.length>200)window.__deskDbg.shift()}
-    if(unchanged){still++;if(still>=4&&level===0&&!qSel_())sharp=true}
+    if(unchanged){still++;if(still>=4&&level===0&&!qSel_()&&!sharp){sharp=true;sharpWarmup=true}}
     else{
-      sharp=false; // 画面恢复变化：从 q95 退回自动档，避免后续变化帧一直按高画质发送
+      // 画面恢复变化：从 q95 退回自动档；但切到 q95 本身会改变请求 key 并返回一帧“新画面”，
+      // 这一帧不算内容变化（sharpWarmup），否则会与静止升档形成来回振荡。
+      if(sharpWarmup)sharpWarmup=false;else sharp=false;
       still=0;
       try{
         const u=deskB64ToBytes(d.data);
