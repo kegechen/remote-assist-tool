@@ -52,3 +52,35 @@ func TestJoinSameSourceExistingHelperGetsExplicitError(t *testing.T) {
 		t.Fatalf("异源加入不应泄露会话状态，期望 \"join failed\"，实际 %q", respOther.Error)
 	}
 }
+
+// TestJoinBusyErrorDisabledWhenSourceIPUntrusted 验证 --trust-source-ip=false
+// （DisableSourceIPLimits）时，同源重复加入仍返回统一 "join failed"，不暴露占用状态。
+func TestJoinBusyErrorDisabledWhenSourceIPUntrusted(t *testing.T) {
+	cfg := &Config{CodeTTL: 5 * time.Minute, CodeLength: 10, NoAuth: false, LegacyCodeExpiry: true, DisableSourceIPLimits: true}
+	srv, _ := NewServer(cfg)
+
+	const code = "BUSY000002"
+	share := &ClientConn{ID: "share-busy2", Conn: &capturingConn{remoteAddr: "10.21.0.1:5000"}}
+	sess, err := srv.sessions.CreateSession(code, share, 30*time.Minute, "cid-share2", "10.21.0.1", 100, 1000)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	first := &ClientConn{ID: "help-first2", Conn: &capturingConn{remoteAddr: "10.21.0.9:5100"}}
+	if _, err := srv.sessions.JoinSession(code, first); err != nil {
+		t.Fatalf("JoinSession: %v", err)
+	}
+	if !srv.sessions.ActivateDataPlane(sess.ID, share.ID, first.ID) {
+		t.Fatal("ActivateDataPlane 失败")
+	}
+
+	sameConn := &capturingConn{remoteAddr: "10.21.0.9:5200"}
+	same := &ClientConn{ID: "help-again2", Conn: sameConn}
+	srv.handleJoin(same, proto.JoinRequest{Code: code})
+	resp := parseLastJoinResponse(t, &sameConn.buf)
+	if resp.Success {
+		t.Fatal("同源重复加入不应成功")
+	}
+	if resp.Error != "join failed" {
+		t.Fatalf("来源地址不可信时必须返回统一 \"join failed\"，实际 %q", resp.Error)
+	}
+}
