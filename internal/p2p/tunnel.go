@@ -19,6 +19,19 @@ const (
 	pktTypeData      = 0x01
 	pktTypeAck       = 0x02
 	pktTypeKeepalive = 0x03
+	// pktTypeClose 主动关闭通知：一端 Close 时发给对端，对端据此立刻关隧道，
+	// 不必干等 peerTimeout（60s，按 30s 读超时轮询，实际 60–90s）才发现。
+	//
+	// 向后兼容：旧版 recvLoop 对不认识的类型只在 switch 里落空——包够 5 字节就照常刷新
+	// lastRecvTime，等同一个保活包，不会出错；新版收到旧版的关闭则仍靠 peerTimeout。
+	//
+	// 没有认证，与数据/ACK 包同级：能伪造它的人（须冒用对端的 IP:端口，或在 UDP 中继
+	// 模式下是会话成员地址）同样能注入数据包搅乱序号，后果也一样——P2P 断开、工具流量
+	// 回落中转，会话本身不受影响。
+	pktTypeClose = 0x04
+	// closeNotifyCopies 关闭通知连发的份数。UDP 不保证送达、关闭后也不再重传，
+	// 多发两份把「对端还得等 60s」的概率压到很低。
+	closeNotifyCopies = 3
 
 	maxPacketSize     = 1400
 	keepaliveInterval = 10 * time.Second
@@ -310,8 +323,21 @@ func (t *UDPTunnel) Write(b []byte) (int, error) {
 	return totalWritten, nil
 }
 
-// Close closes the tunnel
+// Close 关闭隧道，并通知对端（见 pktTypeClose）。
 func (t *UDPTunnel) Close() error {
+	return t.close(true)
+}
+
+// Closed 报告隧道是否已关闭（本端关闭、对端通知关闭或判定对端超时）。
+func (t *UDPTunnel) Closed() bool {
+	t.closeMutex.Lock()
+	defer t.closeMutex.Unlock()
+	return t.closed
+}
+
+// close notify=false 用于「对端已经通知过我们关闭」：再回一份通知没有意义。
+// peerTimeout 判死时仍要通知——那往往是单向不通，对端也许还收得到。
+func (t *UDPTunnel) close(notify bool) error {
 	t.closeMutex.Lock()
 	defer t.closeMutex.Unlock()
 
@@ -319,6 +345,15 @@ func (t *UDPTunnel) Close() error {
 		return nil
 	}
 	t.closed = true
+	if notify {
+		var pkt [5]byte
+		pkt[0] = pktTypeClose
+		for i := 0; i < closeNotifyCopies; i++ {
+			if err := t.sendPacket(pkt[:]); err != nil {
+				break // socket 已坏，再发也是白发
+			}
+		}
+	}
 	close(t.stopCh)
 	// 唤醒可能阻塞在发送窗口流控里的 Write，令其返回 EOF
 	t.sendWinMu.Lock()
@@ -378,6 +413,11 @@ func (t *UDPTunnel) recvLoop() {
 		switch pktType {
 		case pktTypeKeepalive:
 			// ignore
+
+		case pktTypeClose:
+			log.Printf("P2P: peer closed the tunnel")
+			t.close(false)
+			return
 
 		case pktTypeAck:
 			// Remove from send window - packet was received by peer
