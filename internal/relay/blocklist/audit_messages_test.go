@@ -1,6 +1,6 @@
 package blocklist
 
-// 封禁相关审计事件的 message 要自成一句：控制台 / 服务日志只打 "[级别] 事件: message"，不带 details，
+// 封禁相关审计事件的 message 要自成一句：终端输出 / 服务日志只打 "[级别] 事件: message"，不带 details，
 // 所以 IP、时长、第几次、操作人必须写进 message，运维只看日志就能知道封了谁、为什么、封多久、怎么结束的。
 
 import (

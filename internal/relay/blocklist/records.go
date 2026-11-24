@@ -81,7 +81,7 @@ type RecordClient struct {
 	Host    string `json:"host"`
 }
 
-// Record 一次封禁。字段名是控制台 API 的契约。
+// Record 一次封禁。字段名即记录文件的 JSON 格式，改名会破坏兼容。
 type Record struct {
 	ID      int64         `json:"id"`     // 单调递增，持久化，兼作分页游标
 	Target  string        `json:"target"` // ip | device

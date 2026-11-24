@@ -131,7 +131,7 @@ func TestRegisterOnlyDoesNotGrantExemption(t *testing.T) {
 	}
 }
 
-// S2：仅注册（未认证）的客户端，控制台判定不得说成"正常客户端"，并注明身份串为自报。
+// S2：仅注册（未认证）的客户端，判定提示不得说成"正常客户端"，并注明身份串为自报。
 func TestVerdictDistinguishesRegisterOnly(t *testing.T) {
 	clk := newFakeClock()
 	l := openMem(t, clk)
@@ -185,7 +185,7 @@ func TestLoadTrimsToCurrentCaps(t *testing.T) {
 	l2 := openAt(t, cfg)
 	defer l2.Close()
 	if !hit(l2, "198.51.100.200", KindProtoDecode, 10) {
-		t.Fatalf("缩小上限重启后新扫描器不再被跟踪：tracked=%d untracked=%d", l2.Query(Filter{Status: "tracked"}).Tracked, l2.Query(Filter{}).Untracked)
+		t.Fatalf("缩小上限重启后新扫描器不再被跟踪：tracked=%d untracked=%d", trackedCount(l2), l2.untracked.Load())
 	}
 }
 

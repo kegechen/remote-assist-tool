@@ -1746,7 +1746,7 @@ func TestSiblingPath(t *testing.T) {
 	}
 }
 
-// 记录文件的 JSON 字段名是控制台 API 的契约。
+// 记录文件的 JSON 字段名是对外格式，改名会破坏兼容。
 func TestRecordJSONFields(t *testing.T) {
 	rec := Record{ID: 1, Target: TargetIP, Key: "198.51.100.1", Reason: "auto", Actor: "auto", Note: "n",
 		Trigger: []TriggerItem{{Kind: "join_failed", Detail: "code_invalid", Count: 1, Points: 1}}, TriggerPartial: true,

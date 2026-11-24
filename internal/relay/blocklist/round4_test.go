@@ -33,7 +33,7 @@ func TestBidiAndFormatCharsStripped(t *testing.T) {
 		}
 	}
 	if d.VerdictSelf == "" || !strings.Contains(d.Verdict, d.VerdictSelf) {
-		t.Fatalf("判定应单独给出自报片段供前端 <bdi> 隔离: %q / %q", d.Verdict, d.VerdictSelf)
+		t.Fatalf("判定应单独给出自报片段，供显示时隔离: %q / %q", d.Verdict, d.VerdictSelf)
 	}
 	if d.Clients[0].Host != "财务部-张三" || d.Clients[0].Version != "v1.2" {
 		t.Fatalf("剔除后的值不对: %q %q", d.Clients[0].Host, d.Clients[0].Version)

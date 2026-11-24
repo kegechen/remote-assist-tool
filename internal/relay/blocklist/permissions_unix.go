@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-// validatePrivateFile 拒绝 group/other 可访问的文件（同 analytics 的约束）。
+// validatePrivateFile 拒绝 group/other 可访问的文件。
 func validatePrivateFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {

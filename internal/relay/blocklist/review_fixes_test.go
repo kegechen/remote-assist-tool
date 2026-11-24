@@ -45,7 +45,7 @@ func TestOffenseMemoryDoesNotStarveScoring(t *testing.T) {
 	if !banned {
 		t.Fatal("受保护的递增记忆把计分条目挤掉了：扫描器 40 次违规仍未被封")
 	}
-	if n := l.Query(Filter{Status: "tracked"}).Tracked; n > 3*100 {
+	if n := trackedCount(l); n > 3*100 {
 		t.Fatalf("跟踪条目数 %d 超过硬上限", n)
 	}
 }
@@ -76,6 +76,9 @@ func TestEvictedAutoBanClearsOffenses(t *testing.T) {
 func TestCheckAcceptThroughputUnderChurn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("规模测试")
+	}
+	if raceEnabled {
+		t.Skip("度量型用例：吞吐阈值按不开 -race 的速度定")
 	}
 	clk := newFakeClock()
 	l, err := Open(testConfig(clk))
@@ -331,7 +334,7 @@ func TestIPv6RotationBounded(t *testing.T) {
 	for i := 0; i < 20000; i++ {
 		l.RecordViolation(fmt.Sprintf("2001:db8:%x:%x::1", i>>16, i&0xffff), KindTLSGarbage, "not_tls")
 	}
-	if n := l.Query(Filter{Status: "tracked"}).Tracked; n > 1000 {
+	if n := trackedCount(l); n > 1000 {
 		t.Fatalf("跨 /64 洪峰后主表 %d 条，超过 MaxTracked", n)
 	}
 	banned := false

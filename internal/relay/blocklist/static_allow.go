@@ -2,7 +2,7 @@ package blocklist
 
 // 启动参数 --blocklist-allow：写死的放行名单（IP 或 CIDR）。
 //
-// 没有控制台的部署者没有运行时的白名单入口，最常见的需求是「别把我们自己的出口 / 公司 NAT 封了」。
+// 没有运行时管理入口时，部署者最常见的需求是「别把我们自己的出口 / 公司 NAT 封了」。
 // 命中的来源：永远不计分、不被 accept 拒绝（即使名单文件里还留着它的旧封禁），也不能被手动封禁。
 // 设备 ID（dev-…）条目等按设备封禁落地后再支持。
 
@@ -122,7 +122,7 @@ func (l *List) staticCovers(key string) bool {
 
 // releaseStaticAllowed 启动时解除名单文件里已有的、完全落在放行范围内的封禁（自动或手动），
 // 封禁记录以人工解禁结束、操作人为 StaticAllowActor。放行名单是运维显式写下的意图，
-// 优先于文件里残留的旧封禁；否则这些封禁在控制台和记录里显示「封禁中」，实际却被 accept 放行，对不上。
+// 优先于文件里残留的旧封禁；否则这些封禁在名单和封禁记录里显示「封禁中」，实际却被 accept 放行，对不上。
 func (l *List) releaseStaticAllowed() {
 	if len(l.cfg.StaticAllow) == 0 {
 		return

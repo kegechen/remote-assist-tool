@@ -451,13 +451,13 @@ func TestEvictionKeepsProtectedEntries(t *testing.T) {
 		clk.Advance(time.Second)
 		l.ObserveConnect("10.0.0." + itoa(i))
 	}
-	all := l.Query(Filter{Status: "tracked", Limit: 1000}).Entries
+	all := trackedIPs(l)
 	if len(all) > 12 {
 		t.Fatalf("可淘汰条目应 ≤ 10（另有 2 个钉住条目），got %d", len(all))
 	}
 	seen := map[string]bool{}
-	for _, e := range all {
-		seen[e.IP] = true
+	for _, ip := range all {
+		seen[ip] = true
 	}
 	if !seen["192.0.2.1"] || !seen["192.0.2.2"] {
 		t.Fatal("封禁和白名单条目不得被淘汰")
@@ -526,8 +526,8 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if g.Status != "grace" || g.History[len(g.History)-1].Actor != "alice" {
 		t.Fatalf("宽限期/历史未保留: %+v", g)
 	}
-	for _, en := range l2.Query(Filter{Status: "tracked"}).Entries {
-		if en.IP == "198.51.100.63" {
+	for _, ip := range trackedIPs(l2) {
+		if ip == "198.51.100.63" {
 			t.Fatal("普通观察条目不应持久化")
 		}
 	}
@@ -572,66 +572,6 @@ func TestPersistenceLockAndCorruptFile(t *testing.T) {
 	data, _ := os.ReadFile(cfg.Path)
 	if string(data) != "{not json" {
 		t.Fatal("损坏文件不得被覆盖")
-	}
-}
-
-func TestQueryFiltersAndPaging(t *testing.T) {
-	clk := newFakeClock()
-	l := openMem(t, clk)
-	hit(l, "198.51.100.80", KindProtoDecode, 10)
-	if _, err := l.Ban("198.51.100.81", time.Hour, false, "a", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := l.Allow("198.51.100.82", 0, true, "a", ""); err != nil {
-		t.Fatal(err)
-	}
-	hit(l, "198.51.100.83", KindJoinFailed, 1)
-	l.ObserveConnect("198.51.100.84")
-	count := func(f Filter) int { return len(l.Query(f).Entries) }
-	if n := count(Filter{Status: "banned"}); n != 2 {
-		t.Errorf("banned=%d", n)
-	}
-	if n := count(Filter{Status: "banned", Reason: "auto"}); n != 1 {
-		t.Errorf("banned auto=%d", n)
-	}
-	if n := count(Filter{Status: "banned", Reason: "manual"}); n != 1 {
-		t.Errorf("banned manual=%d", n)
-	}
-	if n := count(Filter{Status: "allowlisted"}); n != 1 {
-		t.Errorf("allowlisted=%d", n)
-	}
-	if n := count(Filter{Status: "suspect"}); n != 1 {
-		t.Errorf("suspect=%d", n)
-	}
-	// all 不含从无违规、无处置的普通连接条目；tracked 含全部
-	if n := count(Filter{Status: "all"}); n != 4 {
-		t.Errorf("all=%d", n)
-	}
-	if n := count(Filter{Status: "tracked"}); n != 5 {
-		t.Errorf("tracked=%d", n)
-	}
-	// 服务端分页：Total 是过滤后的总数，Offset/Limit 只截取一页。
-	p1 := l.Query(Filter{Status: "all", Limit: 2})
-	p2 := l.Query(Filter{Status: "all", Offset: 2, Limit: 2})
-	p3 := l.Query(Filter{Status: "all", Offset: 4, Limit: 2})
-	if len(p1.Entries) != 2 || p1.Total != 4 || len(p2.Entries) != 2 || len(p3.Entries) != 0 || p3.Total != 4 {
-		t.Errorf("分页不对: p1=%d/%d p2=%d p3=%d", len(p1.Entries), p1.Total, len(p2.Entries), len(p3.Entries))
-	}
-	seen := map[string]bool{}
-	for _, e := range append(p1.Entries, p2.Entries...) {
-		if seen[e.IP] {
-			t.Errorf("分页重复返回 %s", e.IP)
-		}
-		seen[e.IP] = true
-	}
-	if l.Query(Filter{Status: "all", Limit: 100000}).Limit != MaxPageLimit {
-		t.Errorf("limit 应被限制为 %d", MaxPageLimit)
-	}
-	// 列表只返回摘要：事件数而非事件明细。
-	for _, e := range p1.Entries {
-		if e.IP == "198.51.100.80" && (e.EventCount != 10 || e.Verdict == "") {
-			t.Errorf("摘要字段不对: %+v", e)
-		}
 	}
 }
 
@@ -682,7 +622,7 @@ func TestAutoBanCap(t *testing.T) {
 		clk.Advance(time.Second)
 		hit(l, "10.1.0."+itoa(i), KindProtoDecode, 10)
 	}
-	auto := l.Query(Filter{Status: "banned", Reason: "auto"}).Entries
+	auto := autoBannedIPs(l)
 	if len(auto) != 2 {
 		t.Fatalf("自动封禁应被限制为 MaxAutoBans（默认 = MaxTracked = 2）条，got %d", len(auto))
 	}

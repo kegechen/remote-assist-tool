@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -293,11 +295,24 @@ func runPropertySeed(t *testing.T, seed int64, steps int) {
 }
 
 // 随机化属性测试：注入时钟，随机执行违规/连接/客户端/手动封禁解禁/加白移白/Sweep/推进时间/
-// 持久化关闭重开，每步校验结构一致性与业务不变量。-short 下少量种子，完整模式多种子。
+// 持久化关闭重开，每步校验结构一致性与业务不变量。
+//
+// 默认 8 个种子（每个 4000 步）：CI 对每个包限时 120s（race 步骤 180s），40 个种子要两分多钟。
+// -short 与 -race 下再减少。改动黑名单核心时用 RAT_BLOCKLIST_PROPERTY_SEEDS=40 跑满。
 func TestBlocklistProperties(t *testing.T) {
-	seeds, steps := 40, 4000
-	if testing.Short() {
+	seeds, steps := 8, 4000
+	switch {
+	case testing.Short():
 		seeds, steps = 6, 1500
+	case raceEnabled:
+		seeds, steps = 3, 1500
+	}
+	if v := os.Getenv("RAT_BLOCKLIST_PROPERTY_SEEDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			t.Fatalf("RAT_BLOCKLIST_PROPERTY_SEEDS=%q 不是正整数", v)
+		}
+		seeds = n
 	}
 	for s := 0; s < seeds; s++ {
 		seed := int64(1000 + s)

@@ -1402,7 +1402,7 @@ type HistoryView struct {
 	Detail string `json:"detail"`
 }
 
-// EntryView 是单个键的完整只读快照，供 Web 控制台展示。
+// EntryView 是单个键的完整只读快照（含客户端、事件与处置历史），由 Detail 返回。
 type EntryView struct {
 	IP          string        `json:"ip"` // IPv4 地址或 IPv6 /64 前缀
 	Status      string        `json:"status"`
@@ -1424,19 +1424,7 @@ type EntryView struct {
 	VerdictSelf string        `json:"verdict_self_report,omitempty"` // Verdict 中客户端自报的片段
 }
 
-// ConfigView 生效配置（秒）。
-type ConfigView struct {
-	Threshold     int   `json:"threshold"`
-	WindowSec     int64 `json:"window_seconds"`
-	BanBaseSec    int64 `json:"ban_base_seconds"`
-	BanMaxSec     int64 `json:"ban_max_seconds"`
-	DecaySec      int64 `json:"offense_decay_seconds"`
-	UnbanGraceSec int64 `json:"unban_grace_seconds"`
-	MaxTracked    int   `json:"max_tracked"`
-	MaxAutoBans   int   `json:"max_auto_bans"`
-}
-
-// SummaryView 是列表页的单行摘要：不含客户端/事件/历史明细，明细按需走 Detail。
+// SummaryView 是单个键的摘要：不含客户端/事件/历史明细（明细见 EntryView）。
 type SummaryView struct {
 	IP          string     `json:"ip"`
 	Status      string     `json:"status"` // banned | allowlisted | grace | suspect | seen
@@ -1455,85 +1443,6 @@ type SummaryView struct {
 	LastEvent   *EventView `json:"last_event,omitempty"`
 	Verdict     string     `json:"verdict"`
 	VerdictSelf string     `json:"verdict_self_report,omitempty"` // Verdict 中客户端自报的片段
-}
-
-// Page 是 Query 的结果：服务端过滤 + 分页。
-type Page struct {
-	Persistent bool          `json:"persistent"`
-	Config     ConfigView    `json:"config"`
-	Tracked    int           `json:"tracked"`   // 主表条目数
-	Untracked  uint64        `json:"untracked"` // 主表满时未能跟踪的事件累计数
-	Total      int           `json:"total"`     // 过滤后的条目数（分页前）
-	Offset     int           `json:"offset"`    // 同 Start（兼容按 offset 翻页的调用方）
-	Start      int           `json:"start"`     // 本页第一条在当前完整排序结果里的下标（0 起）
-	Limit      int           `json:"limit"`
-	NextCursor string        `json:"next_cursor"` // 本页最后一条的排序键；下一页传 cursor=它、dir=next
-	PrevCursor string        `json:"prev_cursor"` // 本页第一条的排序键；上一页传 cursor=它、dir=prev
-	HasNext    bool          `json:"has_next"`
-	HasPrev    bool          `json:"has_prev"`
-	Entries    []SummaryView `json:"entries"`
-	Now        int64         `json:"now"`
-
-	Sort        string `json:"sort"`                   // 本次生效的排序方式
-	Order       string `json:"order"`                  // 本次生效的方向
-	CursorReset bool   `json:"cursor_reset,omitempty"` // 游标与本次排序/筛选不一致，已忽略并从第一页返回
-}
-
-// 分页参数：列表接口单页最多返回 MaxPageLimit 条摘要。
-const (
-	DefaultPageLimit = 50
-	MaxPageLimit     = 200
-)
-
-// Filter 选择要返回的条目。Status：banned | allowlisted | grace | suspect | all（默认，
-// 有封禁/白名单/宽限期/分值/事件/历史之一）| tracked（全部跟踪条目）。
-// Reason：auto | manual，仅匹配有封禁的条目。
-//
-// 翻页：Cursor 为空时按 Offset 取页；Cursor 非空时按排序键取页（keyset）——Dir=next 取严格排在
-// 游标之后的 Limit 条，Dir=prev 取严格排在游标之前的最后 Limit 条。条目的名次会因处置或新的连接
-// 而变化，按 offset 翻页会跳过或重复条目；按排序键翻页不受其他条目名次变化的影响。
-type Filter struct {
-	Status string
-	Reason string
-	Offset int
-	Limit  int
-	Cursor string // 不透明游标（来自 Page.NextCursor / PrevCursor）
-	Dir    string // next | prev
-	Kind   string // 触发原因：自动封禁时命中的事件类型（Kind 常量之一），仅匹配有封禁的条目
-	Search string // 子串搜索（不区分大小写）：键(IP/网段)、客户端主机名、版本、封禁/白名单备注
-	Sort   string // status（默认）| last_seen | banned_at | expires | points
-	Order  string // desc（默认）| asc
-}
-
-func (l *List) configView() ConfigView {
-	return ConfigView{
-		Threshold:     l.cfg.Threshold,
-		WindowSec:     int64(l.cfg.Window / time.Second),
-		BanBaseSec:    int64(l.cfg.BanBase / time.Second),
-		BanMaxSec:     int64(l.cfg.BanMax / time.Second),
-		DecaySec:      int64(l.cfg.OffenseDecay / time.Second),
-		UnbanGraceSec: int64(l.cfg.UnbanGrace / time.Second),
-		MaxTracked:    l.cfg.MaxTracked,
-		MaxAutoBans:   l.cfg.MaxAutoBans,
-	}
-}
-
-var statusRank = map[string]int{"banned": 0, "allowlisted": 1, "grace": 2, "suspect": 3, "seen": 4}
-
-// quickStatus 只看最后一次命中判断"正在计分"，O(1)（命中按时间追加）。
-func quickStatus(e *entry, now, cutoff int64) string {
-	switch {
-	case e.Ban.active(now):
-		return "banned"
-	case e.Allow.active(now):
-		return "allowlisted"
-	case e.GraceUntil > now:
-		return "grace"
-	case len(e.hits) > 0 && e.hits[len(e.hits)-1].ts > cutoff:
-		return "suspect"
-	default:
-		return "seen"
-	}
 }
 
 // Detail 返回单个键（IPv4 地址、IPv6 地址或 /64 前缀）的完整视图。非法或未跟踪返回 false。
@@ -1680,7 +1589,7 @@ func clientDesc(c *clientRec) string {
 // 注册不需要任何凭据，版本/身份串也是客户端自报、可随意伪造（如"财务部-张三-PC"）：只有成功加入
 // （持有效协助码）或完成过配对的客户端才算"成功客户端"；仅注册的只如实标注为未认证。
 //
-// 返回值 self 是判定文本里客户端自报的那一段（原样包含在 text 中），前端用 <bdi> 隔离渲染，
+// 返回值 self 是判定文本里客户端自报的那一段（原样包含在 text 中），显示时单独隔离这一段，
 // 即使自报串里含有未被剔除的方向性字符，也不会影响警示文字的显示方向。
 func verdict(clients []clientRec, events []eventRec) (text, self string) {
 	if v := latestClient(clients, true); v != nil {
@@ -1750,7 +1659,7 @@ func reasonText(reason string) string {
 	return "自动"
 }
 
-// cleanNote 剔除控制字符并截断，备注来自 Web 表单。
+// cleanNote 剔除控制字符并截断，备注来自操作人输入。
 func cleanNote(s string) string {
 	return truncate(strings.TrimSpace(cleanText(s)), maxNoteLen)
 }

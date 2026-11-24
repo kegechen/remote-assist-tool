@@ -46,8 +46,8 @@ func newScaleList(tb testing.TB) *List {
 	return l
 }
 
-// TestScaleTiming 带宽松计时断言的规模测试：accept 查表必须是微秒级，列表接口单页
-// 必须远低于人眼可感知的延迟。阈值留了 10 倍以上余量，避免慢机器上误报。
+// TestScaleTiming 带宽松计时断言的规模测试：accept 查表必须是微秒级。阈值留了 10 倍以上余量，
+// 避免慢机器上误报。
 func TestScaleTiming(t *testing.T) {
 	if testing.Short() {
 		t.Skip("规模测试")
@@ -66,27 +66,11 @@ func TestScaleTiming(t *testing.T) {
 	}
 
 	start = time.Now()
-	p := l.Query(Filter{Status: "all", Limit: DefaultPageLimit})
-	queryAll := time.Since(start)
-	if p.Total != scaleTracked || len(p.Entries) != DefaultPageLimit {
-		t.Fatalf("Query all total=%d entries=%d", p.Total, len(p.Entries))
-	}
-	start = time.Now()
-	p = l.Query(Filter{Status: "banned", Limit: MaxPageLimit})
-	queryBanned := time.Since(start)
-	if p.Total != scaleBanned || len(p.Entries) != MaxPageLimit {
-		t.Fatalf("Query banned total=%d entries=%d", p.Total, len(p.Entries))
-	}
-	start = time.Now()
 	if _, ok := l.Detail(scaleIP(42)); !ok {
 		t.Fatal("Detail 失败")
 	}
 	detail := time.Since(start)
-	t.Logf("规模 %d 跟踪 / %d 封禁：CheckAccept 平均 %s；Query(all, 50) %s；Query(banned, 200) %s；Detail %s",
-		scaleTracked, scaleBanned, perAccept, queryAll, queryBanned, detail)
-	if queryAll > 200*time.Millisecond || queryBanned > 200*time.Millisecond {
-		t.Fatalf("列表查询过慢: all=%s banned=%s", queryAll, queryBanned)
-	}
+	t.Logf("规模 %d 跟踪 / %d 封禁：CheckAccept 平均 %s；Detail %s", scaleTracked, scaleBanned, perAccept, detail)
 }
 
 func BenchmarkCheckAcceptMiss(b *testing.B) {
@@ -130,26 +114,6 @@ func BenchmarkRecordViolation(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		l.RecordViolation(scaleIP(scaleBanned+scaleAllowed+i%5000), KindTLSGarbage, "eof")
-	}
-}
-
-func BenchmarkQueryAllPage(b *testing.B) {
-	l := newScaleList(b)
-	defer l.Close()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		l.Query(Filter{Status: "all", Limit: DefaultPageLimit})
-	}
-}
-
-func BenchmarkQueryBannedPage(b *testing.B) {
-	l := newScaleList(b)
-	defer l.Close()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		l.Query(Filter{Status: "banned", Limit: DefaultPageLimit})
 	}
 }
 

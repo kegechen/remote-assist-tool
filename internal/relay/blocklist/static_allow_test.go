@@ -2,7 +2,7 @@ package blocklist
 
 // --blocklist-allow：启动参数里写死的放行名单（IP 或 CIDR）。命中的来源永远不计分、不被拒绝，
 // 也不能被手动封禁；启动时名单文件里已有的、完全落在放行范围内的封禁会被解除。
-// 没有控制台的部署者靠它兜住「自己的出口 / 公司 NAT 被误封」。
+// 没有运行时管理入口的部署者靠它兜住「自己的出口 / 公司 NAT 被误封」。
 
 import (
 	"errors"
@@ -124,7 +124,7 @@ func TestStaticAllowDoesNotTrackViolations(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		l.RecordViolation(fmt.Sprintf("203.0.113.%d", i), KindJoinFailed, "x")
 	}
-	if n := l.Query(Filter{}).Tracked; n != 0 {
+	if n := trackedCount(l); n != 0 {
 		t.Fatalf("放行范围内的违规不应建条目，实际 %d 条", n)
 	}
 }

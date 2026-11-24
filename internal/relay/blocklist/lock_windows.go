@@ -10,7 +10,7 @@ import (
 )
 
 // fileLock 是进程级独占锁，防止两个 relay 实例同时写同一个黑名单文件。
-// 实现与 analytics 包的锁一致（LockFileEx），但不等待：锁被占用立即失败。
+// 用 LockFileEx 加排他锁，但不等待：锁被占用立即失败。
 type fileLock struct{ file *os.File }
 
 func acquireFileLock(path string) (*fileLock, error) {
