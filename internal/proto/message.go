@@ -28,6 +28,13 @@ const (
 	MsgToolResp     MessageType = "tool_resp"
 	MsgToolStream   MessageType = "tool_stream"
 	MsgToolCancel   MessageType = "tool_cancel"
+
+	// MsgP2PResumeAck share 接受续会话后经 P2P 隧道回给 help 的确认（载荷 P2PResumeAck）。
+	//
+	// 只能在 P2P 隧道上发，绝不能发给 relay：relay 对不认识的消息类型一律断开连接
+	// （handleMessage 的 default 分支），旧 relay 都是如此。旧版 help 的 P2P 读循环
+	// 收到它只会忽略。
+	MsgP2PResumeAck MessageType = "p2p_resume_ack"
 )
 
 // Message 协议消息
@@ -52,6 +59,11 @@ type RegisterRequest struct {
 	ReuseToken string `json:"reuse_token,omitempty"`
 	// SupportsStickyCode 表示客户端理解 RegisterResponse.CodeSticky 且 expires_at==0 的"无到期"语义。
 	SupportsStickyCode bool `json:"supports_sticky_code,omitempty"`
+	// KeepHelp share 重连时声明：它和协助端之间的 P2P 直连在自己掉线期间一直通着，值是那个
+	// 协助端连接的标识（SessionReady.HelpTag）。relay 复用会话时若该协助端仍在线、没换人，就保留
+	// 配对、不再让它重新加入（RegisterResponse.HelpKept）。旧 share 不发、旧 relay 忽略，都回到
+	// 「踢掉协助端、要求重新加入」的旧行为。
+	KeepHelp string `json:"keep_help,omitempty"`
 }
 
 // RegisterResponse 注册响应
@@ -68,6 +80,9 @@ type RegisterResponse struct {
 	// STUNServers relay 建议的 STUN 服务器（host:port，--advertise-stun）；新版客户端把它们
 	// 加入公网地址发现的竞速候选。旧 relay 不发、旧客户端忽略。
 	STUNServers []string `json:"stun_servers,omitempty"`
+	// HelpKept 只回应 RegisterRequest.KeepHelp：relay 保留了原协助端的配对，会话照旧可用，
+	// 不会再有 SessionReady。旧 relay 不发，share 按「等协助端重新加入」处理。
+	HelpKept bool `json:"help_kept,omitempty"`
 }
 
 // UpdateInfo relay 下发的新版本软提示（旧 relay 不发、旧客户端忽略）。只用于提示，
@@ -91,6 +106,10 @@ type JoinRequest struct {
 	// 并回规范码；未声明（旧 help 用自己输入的码派生密钥，relay 不能代做）保持精确
 	// 比对。旧 relay 忽略本字段。
 	SupportsCanonicalCode bool `json:"supports_canonical_code,omitempty"`
+	// ResumeProof 只在「P2P 隧道还通着、help 重新加入 relay」时携带，证明自己就是正和
+	// share 跑 P2P 的那个协助端（见 resume.go）。relay 原样放进 SessionReady.ResumeProof
+	// 转给 share。旧 relay 忽略本字段，share 收不到证明，会按换人处理。
+	ResumeProof *P2PResumeProof `json:"resume_proof,omitempty"`
 }
 
 // JoinResponse 加入响应
@@ -123,6 +142,12 @@ type SessionReady struct {
 	SessionID   string `json:"session_id"`
 	PeerVersion string `json:"peer_version,omitempty"`
 	PeerHost    string `json:"peer_host,omitempty"` // help 端身份串（同 JoinRequest.Host；旧 relay 不发）
+	// ResumeProof relay 透传的 JoinRequest.ResumeProof。share 据此判断加入的是否为原协助端，
+	// 是则保留仍在工作的 P2P 隧道。旧 relay 不发；没有或校验不过都按新协助端处理。
+	ResumeProof *P2PResumeProof `json:"resume_proof,omitempty"`
+	// HelpTag relay 给这次加入的协助端连接的标识，只用于 share 重连时回传（RegisterRequest.KeepHelp），
+	// 让 relay 确认在线的仍是 share 与之跑着 P2P 的那个协助端连接。旧 relay 不发。
+	HelpTag string `json:"help_tag,omitempty"`
 }
 
 // ErrorMessage 错误消息
@@ -134,8 +159,10 @@ type ErrorMessage struct {
 // ErrorMessage.Code 里对两端都有语义的几个值。收发两侧原先各写各的字符串字面量，
 // 改一处漏一处就退化成「只打日志」的静默失联，因此收拢到协议包里。
 const (
-	// ErrCodePeerDisconnected 对端已断开：发给 help 时指 share 掉线，发给 share 时
-	// 指 help 掉线且已过去抖窗口。两侧收到后都应视为当前会话结束。
+	// ErrCodePeerDisconnected 对端到 relay 的连接已断开：发给 help 时指 share 掉线，发给
+	// share 时指 help 掉线且已过去抖窗口。两侧之间没有仍通的 P2P 直连时，收到即视为当前会话
+	// 结束；有的话先保留直连，等对端重新接入 relay（见 RegisterRequest.KeepHelp、
+	// JoinRequest.ResumeProof）。
 	ErrCodePeerDisconnected = "PEER_DISCONNECTED"
 	// ErrCodePeerReconnected share 换了新连接（热升级 / 重注册），旧 help 必须重新 Join。
 	// relay 发完这条会立刻关掉旧 help 的连接。

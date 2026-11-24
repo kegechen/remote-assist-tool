@@ -998,6 +998,9 @@ func (s *Server) handleMessage(client *ClientConn, msg *proto.Message) (closeCon
 		client.supportsStickyCode = req.SupportsStickyCode
 		client.requestCode = req.RequestCode
 		client.reuseToken = req.ReuseToken
+		if len(req.KeepHelp) <= maxKeepHelpLen {
+			client.keepHelp = req.KeepHelp
+		}
 		return s.handleRegister(client)
 	case proto.MsgJoinRequest:
 		// join 只能在 new 状态执行一次
@@ -1211,6 +1214,7 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 		ReuseToken:  reuseTok,
 		UpdateInfo:  s.updateInfo(),
 		STUNServers: s.config.AdvertiseSTUN,
+		HelpKept:    reuseResult != nil && reuseResult.KeptHelp != nil,
 	}
 
 	msg, _ := proto.NewMessage(proto.MsgRegisterResponse, resp)
@@ -1220,6 +1224,12 @@ func (s *Server) handleRegister(client *ClientConn) (closeConn bool) {
 	}
 	s.observeClient(client, connStateShare, false)
 
+	if reuseResult != nil && reuseResult.KeptHelp != nil {
+		// 配对原样保留：share 与协助端之间的 P2P 直连一直通着，协助端什么都不用做。
+		// 数据面（UDP 中继）不重新激活：保留下来的只有直连，这一对不会再走 UDP 中继。
+		log.Printf("Kept helper in session %s across share reconnect (P2P alive)", sessionID)
+		s.scheduleVerifyPairing(sessionID, client, reuseResult.KeptHelp)
+	}
 	if reuseResult != nil && reuseResult.OldHelp != nil && reuseResult.OldHelp.Conn != nil {
 		// 现有 Help 客户端无法在已建立的 relay/P2P 流程中处理换代通知。
 		// 注册响应发布后再要求其重新 Join，避免 SessionReady 抢在 RegisterResponse 前到达。
@@ -1258,6 +1268,11 @@ func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeCon
 		return s.rejectJoin(client, code, "rate_limited_global", true)
 	}
 
+	// 标识必须在 JoinSession 把连接发布进会话之前写好：发布之后 share 的重注册会在 sm.mu
+	// 下读它。同一连接重试 join 时沿用第一次生成的。
+	if client.helpTag == "" {
+		client.helpTag = randomToken(idRandomBytes)
+	}
 	joinResult, err := s.sessions.JoinSession(code, client)
 	if err != nil {
 		// 已有协助端时，若新加入者与现有协助端来自同一来源地址（典型场景：本机 webui
@@ -1305,7 +1320,13 @@ func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeCon
 	sendMsg(client, msg)
 
 	// SessionReady 附带 help 端版本与身份串
-	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, &proto.SessionReady{SessionID: joinResult.SessionID, PeerVersion: client.Version, PeerHost: s.legacyShareSessionReadyHost(joinResult.Share, client.Version, client.Host)})
+	ready := &proto.SessionReady{SessionID: joinResult.SessionID, PeerVersion: client.Version, PeerHost: s.legacyShareSessionReadyHost(joinResult.Share, client.Version, client.Host), HelpTag: client.helpTag}
+	// 续会话证明原样透传给 share，由它用会话密钥校验（relay 没有、也不该有这把密钥）。
+	// relay 只挡畸形/超长的值；不合格就不转，share 会按新协助端处理，join 本身照常成功。
+	if req.ResumeProof.WellFormed() {
+		ready.ResumeProof = req.ResumeProof
+	}
+	readyMsg, _ := proto.NewMessage(proto.MsgSessionReady, ready)
 	sendMsg(joinResult.Share, readyMsg)
 
 	logger.LogSessionEstablished(joinResult.SessionID, code, client.ID, joinResult.ShareID)

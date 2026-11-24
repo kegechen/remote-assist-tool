@@ -74,6 +74,13 @@ type ClientConn struct {
 	// realJoinFailures 只计"协助码无效/过期/不存在"这类真失败（不含限流拒绝），用于黑名单计分。
 	realJoinFailures int
 	remoteIP         string
+
+	// keepHelp register 首帧写入：share 声明 P2P 直连在它掉线期间一直通着的那个协助端连接
+	// （proto.RegisterRequest.KeepHelp，即对方的 helpTag），复用会话时据此保留配对。
+	keepHelp string
+	// helpTag 协助端连接的标识，join 时生成（发布进会话之前），随 SessionReady.HelpTag 发给
+	// share。单独随机生成而不复用连接 ID：连接 ID 是 relay 内部的路由键，不外发。
+	helpTag string
 }
 
 // TunnelSession 隧道会话
@@ -345,6 +352,9 @@ type ReuseSessionResult struct {
 	ReportedExpiry time.Time
 	OldShare       *ClientConn
 	OldHelp        *ClientConn
+	// KeptHelp 非 nil 时配对被保留了下来（见 keepHelpLocked），此时 OldHelp 为 nil：
+	// 不要通知它重新加入。
+	KeptHelp *ClientConn
 
 	// Conflict 为 true 时（此时 ok=false）表示同 ClientID 的另一个进程正在线且两边在
 	// 互踢：会话未做任何改动，调用方应拒绝新来者，且【不得】另建会话。
@@ -397,28 +407,35 @@ func (sm *SessionManager) reuseSessionByClientID(clientID string, newShare *Clie
 		}
 	}
 
+	keep := keepHelpLocked(session, newShare)
 	result := &ReuseSessionResult{
 		SessionID: session.ID,
 		Code:      session.Code,
 		ExpiresAt: session.ExpiresAt,
 		CreatedAt: session.CreatedAt,
 		OldShare:  session.Share,
-		OldHelp:   session.Help,
+	}
+	if keep {
+		result.KeptHelp = session.Help
+	} else {
+		result.OldHelp = session.Help
 	}
 	result.ReportedExpiry = sm.stickyExpiryLocked(session, supportsSticky, sm.reconnectGrace)
 
 	if session.Share != nil {
 		delete(sm.byConnID, session.Share.ID)
 	}
-	if session.Help != nil {
-		delete(sm.byConnID, session.Help.ID)
+	if !keep {
+		if session.Help != nil {
+			delete(sm.byConnID, session.Help.ID)
+		}
+		if session.helpDisconnectTimer != nil {
+			session.helpDisconnectTimer.Stop()
+			session.helpDisconnectTimer = nil
+		}
+		session.Help = nil
+		session.pendingHelpID = ""
 	}
-	if session.helpDisconnectTimer != nil {
-		session.helpDisconnectTimer.Stop()
-		session.helpDisconnectTimer = nil
-	}
-	session.Help = nil
-	session.pendingHelpID = ""
 	session.Share = newShare
 	// 端点地址是上一代连接通过 STUN/PeerAddrAdvertise 发布的身份凭据，不能跨
 	// 网络复用到新 Share。否则旧端点可以在新会话重新激活前抢先注册 UDP relay。
@@ -433,6 +450,25 @@ func (sm *SessionManager) reuseSessionByClientID(clientID string, newShare *Clie
 	sm.byConnID[newShare.ID] = session
 
 	return result, true
+}
+
+// maxKeepHelpLen RegisterRequest.KeepHelp 的长度上限。合法值是 helpTag（26 个字符），
+// 超长的当作没声明，不存进连接状态。
+const maxKeepHelpLen = 64
+
+// keepHelpLocked share 重连复用会话时，是否保留现有的协助端配对。调用方须持 sm.mu。
+//
+// 只在 share 明确声明了「我和这个协助端连接之间的 P2P 直连一直通着」（keepHelp 等于它
+// 收到的 SessionReady.HelpTag），且这个协助端连接仍在线（没在断连去抖中）、没被别人替换时
+// 才保留。此时踢掉它没有任何好处：工具调用正走着 P2P，它重新加入还得再证明一遍身份。
+//
+// 必须核对是哪一个连接，不能只看「有协助端在线」：share 掉线前后可能已经换了人（新协助端
+// 在旧的断连去抖窗口内加入，而那条 SessionReady 没送到 share），这时 share 的直连属于旧
+// 协助端，保留配对就成了把新协助端配给一条它不知道的隧道。
+func keepHelpLocked(session *TunnelSession, newShare *ClientConn) bool {
+	help := session.Help
+	return newShare.keepHelp != "" && help != nil && session.pendingHelpID == "" &&
+		help.helpTag == newShare.keepHelp
 }
 
 func conflictResult(session *TunnelSession) *ReuseSessionResult {
