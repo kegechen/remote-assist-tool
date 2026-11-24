@@ -127,17 +127,17 @@ func NewHelpMCPBootstrap(cfg *Config) *HelpMCPBootstrap {
 	return &HelpMCPBootstrap{cfg: cfg}
 }
 
-// errw 返回 connect 提示的去处，见 stderr。
+// errw 返回 connect 提示的去处，见 stderr；没换的时候是 stderr，有日志文件时再写一份进去（spec 6.8）。
 func (b *HelpMCPBootstrap) errw() io.Writer {
 	if b.stderr != nil {
 		return b.stderr
 	}
-	return os.Stderr
+	return stderrLog()
 }
 
 // Run 阻塞跑 MCP stdio server，直到 stdin EOF
 func (b *HelpMCPBootstrap) Run(ctx context.Context) error {
-	fmt.Fprintln(os.Stderr, "MCP stdio 模式（bootstrap）：等待 AI agent 通过 connect 工具提供协助码")
+	fmt.Fprintln(stderrLog(), "MCP stdio 模式（bootstrap）：等待 AI agent 通过 connect 工具提供协助码")
 	srv := mcp.NewServer(b)
 	return srv.Serve(ctx, os.Stdin, os.Stdout)
 }
@@ -265,7 +265,7 @@ func transferLoop(ctx context.Context, name string, args json.RawMessage,
 			return nil, aerr
 		}
 		cur = next
-		fmt.Fprintf(os.Stderr, "[%s] 隧道断开→已自动重连，第 %d 次续传...\n", name, attempt+1)
+		fmt.Fprintf(stderrLog(), "[%s] 隧道断开→已自动重连，第 %d 次续传...\n", name, attempt+1)
 	}
 }
 
@@ -415,7 +415,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 		if a.Code == "" {
 			a.Code = proto.NoAuthCode
 		}
-		fmt.Fprintln(os.Stderr, "WARNING: NO-AUTH mode — connecting without authentication. Only safe on trusted private LANs.")
+		fmt.Fprintln(stderrLog(), "WARNING: NO-AUTH mode — connecting without authentication. Only safe on trusted private LANs.")
 	}
 	if a.Code == "" {
 		return nil, fmt.Errorf("code required (or set no_auth=true for trusted LANs)")
@@ -625,7 +625,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	// 私网/loopback relay（standalone / 同 LAN）下 relay 已直连、P2P 多余，且 standalone
 	// 不启 STUN 必然打洞超时；auto 模式自动跳过，省掉后台徒劳重试。
 	if p2pMode == p2p.P2PModeAuto && b.isLANServer(target.Server) {
-		fmt.Fprintf(os.Stderr, "MCP: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（如需强制用 --p2p required）\n", target.Server)
+		fmt.Fprintf(stderrLog(), "MCP: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（如需强制用 --p2p required）\n", target.Server)
 		p2pMode = p2p.P2PModeDisabled
 	}
 	// upgradeDone 报告后台升级的最终结果，仅 --p2p required 会去等它。
@@ -654,7 +654,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 				"其打洞包不带认证、本端一律拒绝，P2P 无法建立。请升级对端；" +
 				"本端以 --p2p required 启动，不接受中转，这是启动参数、会话中无法更改，请如实告知用户由其决定")
 		}
-		fmt.Fprintln(os.Stderr, "MCP: 对端为旧版本（工具协议 v1），P2P 直连不可用，全程使用中转")
+		fmt.Fprintln(stderrLog(), "MCP: 对端为旧版本（工具协议 v1），P2P 直连不可用，全程使用中转")
 	}
 	if p2pMode != p2p.P2PModeDisabled && !sess.Legacy() {
 		go b.upgradeToP2P(link, &effectiveCfg, resp.SessionID, p2pMode, upgradeDone)
@@ -705,7 +705,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(l *helpLink, cfg *Config, sessionID stri
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "MCP: 后台尝试 P2P 直连...")
+	fmt.Fprintln(stderrLog(), "MCP: 后台尝试 P2P 直连...")
 
 	// manager 在这里启动而不是在 connect 主路径上：Start 内含同步 STUN 竞速发现（UDP 被封
 	// 时要等满约 4 秒的时限），放主路径会让 connect 干等，与「连接立即可用、P2P 后台升级」
@@ -746,7 +746,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(l *helpLink, cfg *Config, sessionID stri
 		if result.Err != nil {
 			log.Printf("MCP P2P negotiation failed, staying on relay: %v", result.Err)
 		}
-		fmt.Fprintln(os.Stderr, "MCP: P2P 未建立，继续使用中转（不影响使用）")
+		fmt.Fprintln(stderrLog(), "MCP: P2P 未建立，继续使用中转（不影响使用）")
 		mgr.Close()
 		notify(false)
 		return
@@ -764,7 +764,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(l *helpLink, cfg *Config, sessionID stri
 	if err := pc.ProbeBidirectional(p2pProbeTimeout); err != nil {
 		// 最典型的场景：打洞只单向通（我收得到对方，对方收不到我）。隧道看似建成，
 		// 实际发出去的包对端永远收不到 —— 必须原地放弃，留在 relay。
-		fmt.Fprintf(os.Stderr, "MCP: P2P 双向探活未通过（%v），继续使用中转\n", err)
+		fmt.Fprintf(stderrLog(), "MCP: P2P 双向探活未通过（%v），继续使用中转\n", err)
 		result.Tunnel.Close()
 		mgr.Close()
 		notify(false)
@@ -788,7 +788,7 @@ func (b *HelpMCPBootstrap) upgradeToP2P(l *helpLink, cfg *Config, sessionID stri
 	// （key 由 code+双方 nonce 派生，与传输通道无关），不必在 P2P 上再握一次手，
 	// 也就不存在新旧 key 的解密竞态。
 	bridge.SwapConn(pc, sess)
-	fmt.Fprintln(os.Stderr, "MCP: 已切换到 "+result.Tunnel.Describe())
+	fmt.Fprintln(stderrLog(), "MCP: 已切换到 "+result.Tunnel.Describe())
 
 	b.mu.Lock()
 	if b.bridge == bridge {
@@ -867,7 +867,7 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 		teardown(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", cause))
 		return
 	}
-	fmt.Fprintf(os.Stderr, "MCP: P2P 隧道中断（%v），正在切回中转...\n", cause)
+	fmt.Fprintf(stderrLog(), "MCP: P2P 隧道中断（%v），正在切回中转...\n", cause)
 
 	// 排空可能残留的陈旧 Ack，否则会被当成本次握手的应答，派生出错误的 key。
 	select {
@@ -918,7 +918,7 @@ func (b *HelpMCPBootstrap) downgradeToRelay(
 			b.activeResult.P2PPath = ""
 		}
 		b.mu.Unlock()
-		fmt.Fprintln(os.Stderr, "MCP: 已切回中转模式，连接继续可用")
+		fmt.Fprintln(stderrLog(), "MCP: 已切回中转模式，连接继续可用")
 	}
 	return
 }
@@ -1007,7 +1007,7 @@ func progressLoop(op, path string, done *atomic.Int64, total int64, stop <-chan 
 	}
 }
 
-// logTransferProgress 输出一行传输进度到 stderr。
+// logTransferProgress 输出一行传输进度到 stderr。只上终端、不写日志文件：路径是被协助机器上的（spec 6.8）。
 func logTransferProgress(op, path string, done, total int64) {
 	const mib = 1 << 20
 	if total > 0 {

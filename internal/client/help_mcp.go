@@ -247,7 +247,7 @@ func (h *HelpMode) sessionFromAck(ack proto.HelloAck, hello proto.Hello) (proto.
 		return proto.Session{}, err
 	}
 	if version == proto.ToolProtocolVersionV1 {
-		fmt.Fprintf(os.Stderr, "[警告] %s\n", v1CompatWarning)
+		fmt.Fprintf(stderrLog(), "[警告] %s\n", v1CompatWarning)
 	}
 	return proto.Session{
 		Key:     proto.DeriveSessionKey(h.code, ack.NonceB64, hello.NonceB64, version),

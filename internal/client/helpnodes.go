@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 
 	"github.com/remote-assist/tool/internal/directory"
@@ -156,8 +155,8 @@ func (b *HelpMCPBootstrap) LearnNodeList(home string) {
 	b.learn = newOfflineDirManager(home, helpLogf)
 }
 
-// helpLogf 是 help 列表提示的去处：stderr（MCP 的 stdout 是协议通道）。
-func helpLogf(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+// helpLogf 是 help 列表提示的去处：stderr（MCP 的 stdout 是协议通道），有日志文件时再写一份进去（spec 6.8）。
+func helpLogf(format string, args ...any) { fmt.Fprintf(stderrLog(), format+"\n", args...) }
 
 // newHelpNodesAt 建 help 用的列表状态，提示打到 stderr。
 func newHelpNodesAt(home, transport string) *helpNodes {

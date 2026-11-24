@@ -769,6 +769,7 @@ func (s *ShareMode) register() error {
 	}
 	s.relayDraining = resp.NodeStatus == directory.StatusDraining
 	prevCode := s.code
+	redactCode(resp.Code) // 先登记，下面的协助信息块、换码提示写进日志文件时才换得掉（spec 6.8）
 	if prevCode != "" && prevCode != resp.Code {
 		// 码换了，旧协助端已经无法用原码重新加入；跨重连保留下来的 P2P 隧道也到此为止，
 		// 不能让它凭旧码的会话继续持有工具权限。

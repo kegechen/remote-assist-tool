@@ -141,6 +141,7 @@ func runShare(args []string) {
 	codeFileMirror := fs.String("code-file-mirror", "", "Internal (make-before-break upgrade): additionally mirror the assist code JSON here, so a prior --code-file path keeps refreshing after an in-channel upgrade")
 	relayHint := fs.String("relay-hint", "", "Internal (in-channel upgrade): the relay the previous share was on; tried first when picking a node from the relay list. Ignored when --server or REMOTE_RELAY_SERVER is set")
 	enableDesktop := fs.Bool("enable-desktop", false, "Allow the helper to view this machine's screen and inject mouse/keyboard input (screen_capture + input tools). Off by default: without it the helper cannot see or control the screen. When on, the console prints a warning the first time each helper session views the screen and the first time it controls the mouse/keyboard. An in-channel upgrade turns it off (the upgraded share runs without a visible console, so the warning could not be seen); restart share with this flag to re-enable. Windows / Linux (X11) / macOS; must run in a logged-in interactive graphical session (not a service); the lock screen and elevated/UAC windows are not controllable.")
+	logFile := logFileFlag(fs)
 	minProto := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 
 	fs.Usage = func() {
@@ -179,21 +180,25 @@ func runShare(args []string) {
 
 	*server = client.NormalizeServerAddr(*server) // 无端口补默认 :8443（standalone 走 loopback 不受影响）
 
+	// 日志文件（spec 6.8）：参数校验过了再开，之后面向用户的输出、log 的输出都再写一份进去。
+	closeLog := openLogFile(fs, *logFile, "share")
+	defer closeLog()
+
 	if *unsafeExec {
-		fmt.Fprint(os.Stderr, "\033[1;31m!!! DANGER: --unsafe-exec drops the exec deny/allow lists.\nAny command can run, including rm / shutdown / mkfs.\nAborting in 5 seconds — press Ctrl+C to abort.\033[0m\n")
+		fmt.Fprint(stderrLog(), "\033[1;31m!!! DANGER: --unsafe-exec drops the exec deny/allow lists.\nAny command can run, including rm / shutdown / mkfs.\nAborting in 5 seconds — press Ctrl+C to abort.\033[0m\n")
 		for i := 5; i > 0; i-- {
-			fmt.Fprintf(os.Stderr, "%d... ", i)
+			fmt.Fprintf(stderrLog(), "%d... ", i)
 			time.Sleep(time.Second)
 		}
-		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(stderrLog())
 	}
 
 	// share 由本机用户主动发起、凭协助码授权，信任边界是“协助码交给谁”。--root 是可选的
 	// 防手滑护栏，不是安全边界（exec 不受其约束），故默认不限制。
 	if *rootDir == "" {
-		fmt.Fprintln(os.Stderr, "File access: unrestricted (--root <dir> limits file tools to a subtree)")
+		fmt.Fprintln(stderrLog(), "File access: unrestricted (--root <dir> limits file tools to a subtree)")
 	} else {
-		fmt.Fprintf(os.Stderr, "File access: file tools limited to %s (exec is NOT limited by --root)\n", *rootDir)
+		fmt.Fprintf(stderrLog(), "File access: file tools limited to %s (exec is NOT limited by --root)\n", *rootDir)
 	}
 
 	sbCfg := agent.SandboxConfig{
@@ -205,16 +210,16 @@ func runShare(args []string) {
 
 	if *elevate && !hasElevatedChild {
 		if err := agent.RelaunchElevated(); err != nil {
-			fmt.Fprintf(os.Stderr, "Elevation failed: %v\nContinuing without elevation.\n", err)
+			fmt.Fprintf(stderrLog(), "Elevation failed: %v\nContinuing without elevation.\n", err)
 		}
 	}
 
 	if hasElevatedChild || agent.IsElevated() {
-		fmt.Println("Running as: ELEVATED")
+		fmt.Fprintln(stdoutLog(), "Running as: ELEVATED")
 	} else if u, err := user.Current(); err == nil {
-		fmt.Printf("Running as: %s (non-elevated)\n", u.Username)
+		fmt.Fprintf(stdoutLog(), "Running as: %s (non-elevated)\n", u.Username)
 	} else {
-		fmt.Println("Running as: unknown (non-elevated)")
+		fmt.Fprintln(stdoutLog(), "Running as: unknown (non-elevated)")
 	}
 	if !*newInstance {
 		if isUpgradeSuccessor {
@@ -266,7 +271,7 @@ func runShare(args []string) {
 		// 进程内 relay 走 TLS（临时自签证书），让 help 端连 standalone 与连公网 relay
 		// 命令完全一致（默认 --insecure=true 跳过自签校验），消除原先必须 --plain 的陷阱。
 		if *plain {
-			fmt.Fprintln(os.Stderr, "standalone mode: ignoring --plain; embedded relay uses TLS with a self-signed cert so the help side needs no special flag")
+			fmt.Fprintln(stderrLog(), "standalone mode: ignoring --plain; embedded relay uses TLS with a self-signed cert so the help side needs no special flag")
 			*plain = false
 		}
 		certDir, cleanupCerts, err := standaloneCertDir()
@@ -282,7 +287,7 @@ func runShare(args []string) {
 			log.Fatalf("standalone: generate self-signed cert failed: %v", err)
 		}
 		if fresh {
-			fmt.Fprintf(os.Stderr, "standalone: 已在 %s 生成自签证书；此前连过本机的 help 端会看到「指纹变了」，需要加 --trust-new-cert 重新信任。\n", certDir)
+			fmt.Fprintf(stderrLog(), "standalone: 已在 %s 生成自签证书；此前连过本机的 help 端会看到「指纹变了」，需要加 --trust-new-cert 重新信任。\n", certDir)
 		}
 		relayCfg := &relay.Config{
 			ListenAddr:     *standaloneListen,
@@ -297,7 +302,7 @@ func runShare(args []string) {
 			NoAuth:         *noAuth,
 		}
 		if *noAuth {
-			fmt.Fprintln(os.Stderr, "\033[1;31m!!! WARNING: NO-AUTH mode enabled. Any device that can reach this relay can connect and fully control this machine (exec, read/write files). Use ONLY on a fully trusted private LAN.\033[0m")
+			fmt.Fprintln(stderrLog(), "\033[1;31m!!! WARNING: NO-AUTH mode enabled. Any device that can reach this relay can connect and fully control this machine (exec, read/write files). Use ONLY on a fully trusted private LAN.\033[0m")
 		}
 		relaySrv, err := relay.NewServer(relayCfg)
 		if err != nil {
@@ -320,25 +325,25 @@ func runShare(args []string) {
 		*stunServer = ""
 
 		lanIP := detectLANIPv4()
-		fmt.Println()
-		fmt.Println("================ standalone (LAN) mode ================")
+		fmt.Fprintln(stdoutLog())
+		fmt.Fprintln(stdoutLog(), "================ standalone (LAN) mode ================")
 		if lanIP != "" {
-			fmt.Printf("Relay (TLS, self-signed) listening at: %s:%s (LAN reachable)\n", lanIP, listenPort)
+			fmt.Fprintf(stdoutLog(), "Relay (TLS, self-signed) listening at: %s:%s (LAN reachable)\n", lanIP, listenPort)
 			if *noAuth {
-				fmt.Printf("NO-AUTH mode: help side needs no --code:\n")
-				fmt.Printf("    remote help --server %s:%s --no-auth --p2p disabled\n", lanIP, listenPort)
-				fmt.Printf("Or tell your AI agent: connect(server=\"%s:%s\", no_auth=true)\n", lanIP, listenPort)
+				fmt.Fprintf(stdoutLog(), "NO-AUTH mode: help side needs no --code:\n")
+				fmt.Fprintf(stdoutLog(), "    remote help --server %s:%s --no-auth --p2p disabled\n", lanIP, listenPort)
+				fmt.Fprintf(stdoutLog(), "Or tell your AI agent: connect(server=\"%s:%s\", no_auth=true)\n", lanIP, listenPort)
 			} else {
-				fmt.Printf("Help side connects exactly like a normal relay (no --plain needed):\n")
-				fmt.Printf("    remote help --server %s:%s --code <code> --p2p disabled\n", lanIP, listenPort)
-				fmt.Printf("Or tell your AI agent: \"协助码 <code> 在 %s:%s\" (connect tool overrides server).\n", lanIP, listenPort)
+				fmt.Fprintf(stdoutLog(), "Help side connects exactly like a normal relay (no --plain needed):\n")
+				fmt.Fprintf(stdoutLog(), "    remote help --server %s:%s --code <code> --p2p disabled\n", lanIP, listenPort)
+				fmt.Fprintf(stdoutLog(), "Or tell your AI agent: \"协助码 <code> 在 %s:%s\" (connect tool overrides server).\n", lanIP, listenPort)
 			}
-			fmt.Printf("    (self-signed cert covers localhost only — on LAN keep the default --insecure=true; --insecure=false will fail)\n")
+			fmt.Fprintf(stdoutLog(), "    (self-signed cert covers localhost only — on LAN keep the default --insecure=true; --insecure=false will fail)\n")
 		} else {
-			fmt.Printf("Relay (TLS, self-signed) listening at: 0.0.0.0:%s (LAN IP auto-detect failed; find this host's LAN IP manually)\n", listenPort)
+			fmt.Fprintf(stdoutLog(), "Relay (TLS, self-signed) listening at: 0.0.0.0:%s (LAN IP auto-detect failed; find this host's LAN IP manually)\n", listenPort)
 		}
-		fmt.Println("=======================================================")
-		fmt.Println()
+		fmt.Fprintln(stdoutLog(), "=======================================================")
+		fmt.Fprintln(stdoutLog())
 	}
 
 	// Derive STUN server if not specified（自动模式下不推导，见 shareRelay.stun）
@@ -373,10 +378,10 @@ func runShare(args []string) {
 	}
 
 	if expiresAt.IsZero() {
-		fmt.Printf("\nSession ended. Code %s is no longer valid\n", code)
+		fmt.Fprintf(stdoutLog(), "\nSession ended. Code %s is no longer valid\n", code)
 		return
 	}
-	fmt.Printf("\nSession ended. Code %s expired at %s\n", code, expiresAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(stdoutLog(), "\nSession ended. Code %s expired at %s\n", code, expiresAt.Local().Format("2006-01-02 15:04:05"))
 }
 
 func runHelp(args []string) {
@@ -395,6 +400,7 @@ func runHelp(args []string) {
 	noAuthHelp := fs.Bool("no-auth", false, "Connect without an assist code (use with --no-auth share/relay). DANGER: any device that can reach the relay can connect. Use ONLY on a fully trusted private LAN.")
 	minProtoHelp := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 	mcpStdio := fs.Bool("mcp-stdio", false, "Run as an MCP stdio server for any MCP-capable AI agent (Claude Code, Codex, Doubao, ...)")
+	logFileHelp := logFileFlag(fs)
 	legacySSH := fs.Bool("legacy-ssh", false, "Force original SSH tunnel mode (default if --mcp-stdio not set)")
 
 	fs.Usage = func() {
@@ -413,11 +419,8 @@ func runHelp(args []string) {
 
 	resolveTLSVerify(fs, insecure, *caFile)
 
-	if *noAuthHelp {
-		fmt.Fprintln(os.Stderr, "\033[1;31m!!! WARNING: NO-AUTH mode. Any device that can reach the relay can connect and control the remote share side. Use ONLY on a fully trusted private LAN.\033[0m")
-		if *code == "" {
-			*code = proto.NoAuthCode
-		}
+	if *noAuthHelp && *code == "" {
+		*code = proto.NoAuthCode
 	}
 
 	if *code == "" && !*mcpStdio {
@@ -429,6 +432,13 @@ func runHelp(args []string) {
 	if *mcpStdio && *legacySSH {
 		fmt.Fprintln(os.Stderr, "Error: --mcp-stdio and --legacy-ssh are mutually exclusive")
 		os.Exit(1)
+	}
+
+	// 日志文件（spec 6.8）：参数校验过了再开，之后面向用户的输出、log 的输出都再写一份进去。
+	closeLog := openLogFile(fs, *logFileHelp, "help")
+	defer closeLog()
+	if *noAuthHelp {
+		fmt.Fprintln(stderrLog(), "\033[1;31m!!! WARNING: NO-AUTH mode. Any device that can reach the relay can connect and control the remote share side. Use ONLY on a fully trusted private LAN.\033[0m")
 	}
 
 	*server = client.NormalizeServerAddr(*server) // 无端口补默认 :8443
@@ -451,14 +461,14 @@ func runHelp(args []string) {
 
 	run := newHelpRunner(cfg, *code, *listenAddr, *mcpStdio, relayMode)
 	if err := run(); err != nil {
-		fmt.Fprint(os.Stderr, helpFailureText(err, *mcpStdio))
+		reportHelpFailure(err, *mcpStdio, closeLog)
 		os.Exit(1)
 	}
 	if *mcpStdio {
 		return
 	}
 
-	fmt.Println("\nSession ended.")
+	fmt.Fprintln(stdoutLog(), "\nSession ended.")
 }
 
 // newHelpRunner 按参数建 help 并接上自动模式（spec 6.1）：先按 relay 方式补全 cfg 里的 P2P 配置（helpRelay.configure），
@@ -480,6 +490,13 @@ func newHelpRunner(cfg *client.Config, code, listenAddr string, mcpStdio bool, r
 		relayMode.apply(help)
 		return help.Run
 	}
+}
+
+// reportHelpFailure 把 help 异常结束的原因打到 stderr、也写进日志文件（spec 6.8），再关掉日志文件：调用方随后 os.Exit，
+// 不跑 defer。
+func reportHelpFailure(err error, mcp bool, closeLog func()) {
+	fmt.Fprint(stderrLog(), helpFailureText(err, mcp))
+	closeLog()
 }
 
 // helpFailureText 是 help 异常结束时打到 stderr 的文字。被 relay 封禁时只给那一句话：

@@ -32,6 +32,9 @@ type transferProgress struct {
 	// quietSummaryLogs 为真时不写传输开始/汇总的审计日志：log 与进度在同一个控制台时
 	// 它们和屏幕上的汇总重复。重复分块的日志不受影响——它们不上屏，日志是唯一的痕迹。
 	quietSummaryLogs bool
+	// transcript 是日志文件的状态输出（spec 6.8），没有日志文件时为 nil。Print 的文本都写进去；传输汇总在
+	// quietSummaryLogs 时写进去（不安静时汇总走 log，log 本身也写进日志文件）。进度行不写。
+	transcript io.Writer
 
 	stallAfter   time.Duration // 这么久没有新分块，进度行上标「停滞」
 	abandonAfter time.Duration // 已知总大小却停滞这么久，判为中断并收尾
@@ -104,6 +107,7 @@ func newTransferProgress(out io.Writer, tty bool, width func() int) *transferPro
 		active:       map[string]*transferState{},
 		recent:       map[string]*transferState{},
 		stop:         make(chan struct{}),
+		transcript:   logStatus(),
 	}
 }
 
@@ -256,6 +260,9 @@ func (p *transferProgress) Print(text string) {
 	defer p.mu.Unlock()
 	p.clearLocked()
 	fmt.Fprint(p.out, text)
+	if p.transcript != nil {
+		io.WriteString(p.transcript, text)
+	}
 	p.drawLocked()
 }
 
@@ -348,6 +355,8 @@ func (p *transferProgress) finishLocked(key string, now time.Time) {
 	fmt.Fprintln(p.out, sum)
 	if !p.quietSummaryLogs {
 		p.pendingLogs = append(p.pendingLogs, "tool | transfer | "+sum)
+	} else if p.transcript != nil {
+		io.WriteString(p.transcript, sum+"\n")
 	}
 	p.drawLocked()
 }

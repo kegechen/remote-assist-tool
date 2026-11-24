@@ -139,7 +139,7 @@ func (r helpRelay) skipLANP2P(p2pMode, server string) bool {
 func (r helpRelay) configure(cfg *client.Config) {
 	cfg.STUNServer = r.stun(cfg.STUNServer, cfg.ServerAddr)
 	if r.skipLANP2P(cfg.P2PMode, cfg.ServerAddr) {
-		fmt.Fprintf(os.Stderr, "P2P: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", cfg.ServerAddr)
+		fmt.Fprintf(stderrLog(), "P2P: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", cfg.ServerAddr)
 		cfg.P2PMode = "disabled"
 	}
 }

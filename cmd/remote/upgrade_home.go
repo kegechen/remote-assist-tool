@@ -103,11 +103,11 @@ func restoreUpgradeHomeEnv() []string {
 }
 
 // announceRestoredUpgradeHome 执行还原，并在确实还原了东西时在日志里留一行——升级是远端
-// 无人值守跑的，没有这行就没法事后确认隔离到底解没解除。
+// 无人值守跑的，没有这行就没法事后确认隔离到底解没解除。升级出来的 share 没有可见的控制台，这行要写进日志文件（spec 6.8）。
 func announceRestoredUpgradeHome() {
 	restored := restoreUpgradeHomeEnv()
 	if len(restored) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "升级隔离结束：已还原 %s（后续 exec 子进程恢复使用真实用户目录）\n", strings.Join(restored, "/"))
+	fmt.Fprintf(stderrLog(), "升级隔离结束：已还原 %s（后续 exec 子进程恢复使用真实用户目录）\n", strings.Join(restored, "/"))
 }

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +47,7 @@ type HelpMode struct {
 
 // NewHelpMode 创建协助模式
 func NewHelpMode(cfg *Config, code, listenAddr string) *HelpMode {
+	redactCode(normalizeCode(code)) // 错误信息里可能带回来（spec 6.8）
 	return &HelpMode{
 		client:     NewClient(cfg),
 		code:       normalizeCode(code),
@@ -58,6 +58,7 @@ func NewHelpMode(cfg *Config, code, listenAddr string) *HelpMode {
 
 // NewHelpModeMCP 创建 MCP stdio 模式的协助模式（无 SSH 监听）
 func NewHelpModeMCP(cfg *Config, code string) *HelpMode {
+	redactCode(normalizeCode(code))
 	return &HelpMode{
 		client:   NewClient(cfg),
 		code:     normalizeCode(code),
@@ -161,11 +162,11 @@ func (h *HelpMode) adoptCanonicalCode(returned string) {
 		return
 	}
 	if !strings.EqualFold(returned, h.code) {
-		fmt.Fprintln(os.Stderr, "[警告] 服务端返回的规范码与输入码差异不止大小写，继续用输入码")
+		fmt.Fprintln(stderrLog(), "[警告] 服务端返回的规范码与输入码差异不止大小写，继续用输入码")
 		return
 	}
 	h.code = returned
-	fmt.Fprintln(os.Stderr, "（已按服务端返回的规范码建立会话：输入的码按大写匹配）")
+	fmt.Fprintln(stderrLog(), "（已按服务端返回的规范码建立会话：输入的码按大写匹配）")
 }
 
 // updateNotices 根据 relay 下发的最新版本，分别检查本机与被协助端是否需要升级。
@@ -212,10 +213,10 @@ func (h *HelpMode) Run() error {
 	defer h.client.Close()
 
 	{
-		// mcp-stdio 模式下所有 user-facing 输出走 stderr，避免污染 MCP JSON-RPC 帧流
-		out := os.Stdout
+		// mcp-stdio 模式下所有 user-facing 输出走 stderr，避免污染 MCP JSON-RPC 帧流；都再写一份到日志文件（spec 6.8）
+		out := stdoutLog()
 		if h.mcpStdio {
-			out = os.Stderr
+			out = stderrLog()
 		}
 		printf := func(f string, args ...any) { fmt.Fprintf(out, f, args...) }
 
@@ -223,7 +224,7 @@ func (h *HelpMode) Run() error {
 
 		// MCP stdio 模式：跳过 SSH 监听，直接运行工具通道
 		if h.mcpStdio {
-			fmt.Fprintln(os.Stderr, "MCP stdio 模式：跳过 SSH 监听")
+			fmt.Fprintln(stderrLog(), "MCP stdio 模式：跳过 SSH 监听")
 			return h.RunMCPMode(context.Background())
 		}
 
@@ -233,7 +234,7 @@ func (h *HelpMode) Run() error {
 		p2pMode := p2p.ParseP2PMode(h.client.config.P2PMode)
 		if server := h.client.serverAddr(); lanSkipsP2P(p2pMode, server) {
 			// 显式模式在连接前已按 --server 判断过（cmd/remote）；自动模式要连上才知道连的是哪台、用的哪个地址。
-			fmt.Fprintf(os.Stderr, "P2P: relay %s 是私网或本机地址，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", server)
+			fmt.Fprintf(stderrLog(), "P2P: relay %s 是私网或本机地址，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", server)
 			p2pMode = p2p.P2PModeDisabled
 		}
 		if p2pMode != p2p.P2PModeDisabled {
@@ -285,7 +286,7 @@ func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTun
 	default:
 	}
 
-	fmt.Println("正在尝试 P2P 直连...")
+	fmt.Fprintln(stdoutLog(), "正在尝试 P2P 直连...")
 
 	negotiationTimeout := 12 * time.Second
 	if mode == p2p.P2PModeRequired {
@@ -303,7 +304,7 @@ func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTun
 				if mode == p2p.P2PModeRequired {
 					return nil, fmt.Errorf("P2P 协商超时：对端未响应")
 				}
-				fmt.Println("P2P 协商超时，回退到中转模式")
+				fmt.Fprintln(stdoutLog(), "P2P 协商超时，回退到中转模式")
 				return nil, nil
 			}
 			mgr.Close()
@@ -330,9 +331,9 @@ func (h *HelpMode) negotiateP2P(mode p2p.P2PMode, sessionID string) (*p2p.UDPTun
 
 	result := <-resultCh
 	if result.Tunnel != nil {
-		fmt.Println(result.Tunnel.Describe() + "已建立！")
+		fmt.Fprintln(stdoutLog(), result.Tunnel.Describe()+"已建立！")
 	} else if result.Err == nil {
-		fmt.Println("P2P 打洞超时，回退到中转模式")
+		fmt.Fprintln(stdoutLog(), "P2P 打洞超时，回退到中转模式")
 		mgr.Close()
 	} else {
 		mgr.Close()
@@ -381,7 +382,7 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 	}()
 
 	for {
-		fmt.Printf("\n等待本地SSH连接，通道：%s... (ssh -p %s user@127.0.0.1)\n", tunnel.Describe(), getPort(h.listenAddr))
+		fmt.Fprintf(stdoutLog(), "\n等待本地SSH连接，通道：%s... (ssh -p %s user@127.0.0.1)\n", tunnel.Describe(), getPort(h.listenAddr))
 
 		localConn, err := listener.Accept()
 		if err != nil {
@@ -393,7 +394,7 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 			return err
 		}
 
-		fmt.Println("本地SSH连接已建立，通过 " + tunnel.Describe() + " 转发中...")
+		fmt.Fprintln(stdoutLog(), "本地SSH连接已建立，通过 "+tunnel.Describe()+" 转发中...")
 
 		connMu.Lock()
 		currentConn = localConn
@@ -419,7 +420,7 @@ func (h *HelpMode) handleTunnelP2P(tunnel *p2p.UDPTunnel) error {
 		case err := <-tunnelDone:
 			return err
 		default:
-			fmt.Println("SSH会话已结束 (P2P)")
+			fmt.Fprintln(stdoutLog(), "SSH会话已结束 (P2P)")
 		}
 	}
 }
@@ -474,7 +475,7 @@ func (h *HelpMode) handleTunnel() error {
 
 	// Accept loop: each iteration handles one SSH session
 	for {
-		fmt.Printf("\n等待本地SSH连接... (ssh -p %s user@127.0.0.1)\n", getPort(h.listenAddr))
+		fmt.Fprintf(stdoutLog(), "\n等待本地SSH连接... (ssh -p %s user@127.0.0.1)\n", getPort(h.listenAddr))
 
 		localConn, err := listener.Accept()
 		if err != nil {
@@ -486,7 +487,7 @@ func (h *HelpMode) handleTunnel() error {
 			return err
 		}
 
-		fmt.Println("本地SSH连接已建立，开始转发流量...")
+		fmt.Fprintln(stdoutLog(), "本地SSH连接已建立，开始转发流量...")
 
 		connMu.Lock()
 		currentConn = localConn
@@ -515,7 +516,7 @@ func (h *HelpMode) handleTunnel() error {
 		case err := <-relayDone:
 			return err
 		default:
-			fmt.Println("SSH会话已结束")
+			fmt.Fprintln(stdoutLog(), "SSH会话已结束")
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -558,6 +559,12 @@ func (e *surviveEnv) shareRelayConn() net.Conn {
 	return c.conn
 }
 
+// waitLogged 等 fl 的状态输出里出现 want。
+func waitLogged(t *testing.T, fl *fakeLog, want string) {
+	t.Helper()
+	waitUntil(t, 5*time.Second, "日志文件里写进「"+want+"」", func() bool { return strings.Contains(fl.text(), want) })
+}
+
 func waitUntil(t *testing.T, budget time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(budget)
@@ -625,10 +632,13 @@ func TestP2PSurvivesShareRelayFlap(t *testing.T) {
 	help := e.connectHelpOnP2P(e.newProxy())
 	pc0, _, _ := e.shareP2P()
 	link0, conn0, pairs0 := activeLink(help), helpRelayConn(help), e.p2p.pairCount()
+	fl := &fakeLog{} // 续会话的提示也写进日志文件（spec 6.8）
+	useLogFile(t, fl)
 
 	e.shareVia.cut()
 	e.waitShareAwaiting(5*time.Second, "被协助端保留 P2P 隧道", true)
 	e.mustStat(help, "被协助端离开 relay 期间")
+	waitLogged(t, fl, "被协助端与中转的连接已断开，P2P 直连仍通")
 
 	e.shareVia.restore()
 	e.waitShareAwaiting(15*time.Second, "被协助端重新注册并接着用 P2P", false)
@@ -662,6 +672,8 @@ func TestP2PSurvivesHelpRelayFlap(t *testing.T) {
 	help := e.connectHelpOnP2P(helpVia)
 	pc0, tag0, _ := e.shareP2P()
 	link0, pairs0 := activeLink(help), e.p2p.pairCount()
+	fl := &fakeLog{} // 续会话的提示也写进日志文件（spec 6.8）
+	useLogFile(t, fl)
 
 	helpVia.cut()
 	waitUntil(t, 5*time.Second, "协助端进入续会话", func() bool { return link0.resuming.Load() })
@@ -670,6 +682,8 @@ func TestP2PSurvivesHelpRelayFlap(t *testing.T) {
 	helpVia.restore()
 	waitUntil(t, 10*time.Second, "协助端续上会话", func() bool { return !link0.resuming.Load() })
 	e.mustStat(help, "协助端回到 relay 后")
+	waitLogged(t, fl, "P2P 直连仍通，正在重新接入中转")
+	waitLogged(t, fl, "已重新接入中转（被协助端已确认续会话）")
 	assertSameP2P(t, e, help, link0, pc0, pairs0)
 	_, tag1, _ := e.shareP2P()
 	if tag1 == "" || tag1 == tag0 {

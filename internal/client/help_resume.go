@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -187,7 +186,7 @@ func (l *helpLink) relayLoop() {
 					// proto.RegisterRequest.KeepHelp）；relay 不支持的话会发 PEER_RECONNECTED，
 					// 那时再重新加入。
 					if l.peerStillOnP2P() {
-						fmt.Fprintln(os.Stderr, "MCP: 被协助端与中转的连接已断开，P2P 直连仍通，继续使用")
+						fmt.Fprintln(stderrLog(), "MCP: 被协助端与中转的连接已断开，P2P 直连仍通，继续使用")
 						continue
 					}
 					l.teardown(gone)
@@ -275,7 +274,7 @@ func (l *helpLink) resumeRelay(pc *P2PConn, cause error) {
 		l.teardown(cause)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "MCP: 中转连接中断（%v），P2P 直连仍通，正在重新接入中转...\n", cause)
+	fmt.Fprintf(stderrLog(), "MCP: 中转连接中断（%v），P2P 直连仍通，正在重新接入中转...\n", cause)
 
 	deadline := time.Now().Add(resumeWindow)
 	delay := resumeFirstDelay
@@ -371,7 +370,7 @@ func (l *helpLink) rejoinRelay(pc *P2PConn) (err error) {
 	b.mu.Unlock()
 	l.resuming.Store(false)
 	go l.relayLoop()
-	fmt.Fprintln(os.Stderr, "MCP: 已重新接入中转（被协助端已确认续会话），继续使用 "+pc.tunnel.Describe())
+	fmt.Fprintln(stderrLog(), "MCP: 已重新接入中转（被协助端已确认续会话），继续使用 "+pc.tunnel.Describe())
 	return nil
 }
 
