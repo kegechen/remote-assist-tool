@@ -90,18 +90,30 @@ func writeArgs(data []byte) json.RawMessage {
 	return b
 }
 
+// goWrite 在后台执行一次写入，返回的函数等这次写入退出。
+// 被卡住的写入要等 stop() 放开阻塞才会继续，之后还会读包级的等待时长去写下一块；
+// 用例必须等它退出再还原这些变量，否则会和后续用例改这些变量的写操作构成数据竞争。
+func goWrite(write *ptyWriteTool, data []byte) (wait func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		write.Run(context.Background(), writeArgs(data), nil)
+	}()
+	return func() { <-done }
+}
+
 // 大块写入被卡住（对端 PTY 缓冲满）时，Ctrl+C 不能排在它后面等到超时，应经紧急通道立即送达。
 func TestPTYCtrlCBypassesBlockedWrite(t *testing.T) {
 	oldWait := ptyUrgentLockWait
 	ptyUrgentLockWait = 100 * time.Millisecond
 	defer func() { ptyUrgentLockWait = oldWait }()
 	write, sp, stop := startSlowSession(t, true)
-	defer stop()
 	sp.mu.Lock()
 	sp.block = make(chan struct{})
 	sp.mu.Unlock()
 
-	go write.Run(context.Background(), writeArgs(bytes.Repeat([]byte("x"), 8192)), nil) // 卡在 proc.Write
+	waitBlocked := goWrite(write, bytes.Repeat([]byte("x"), 8192)) // 卡在 proc.Write
+	defer func() { stop(); waitBlocked() }()
 	time.Sleep(50 * time.Millisecond)
 
 	start := time.Now()
@@ -124,11 +136,11 @@ func TestPTYWriteBlockedFailsFastWithoutInterrupter(t *testing.T) {
 	ptyUrgentLockWait, ptyWriteLockWait = 80*time.Millisecond, 300*time.Millisecond
 	defer func() { ptyUrgentLockWait, ptyWriteLockWait = oldU, oldW }()
 	write, sp, stop := startSlowSession(t, false)
-	defer stop()
 	sp.mu.Lock()
 	sp.block = make(chan struct{})
 	sp.mu.Unlock()
-	go write.Run(context.Background(), writeArgs(bytes.Repeat([]byte("x"), 100)), nil)
+	waitBlocked := goWrite(write, bytes.Repeat([]byte("x"), 100))
+	defer func() { stop(); waitBlocked() }()
 	time.Sleep(50 * time.Millisecond)
 
 	for _, data := range [][]byte{{0x03}, []byte("ls\r")} {
@@ -195,12 +207,12 @@ func TestPTYInterruptOncePerSignalKind(t *testing.T) {
 	ptyUrgentLockWait = 100 * time.Millisecond
 	defer func() { ptyUrgentLockWait = oldWait }()
 	write, sp, stop := startSlowSession(t, true)
-	defer stop()
 	sp.mu.Lock()
 	sp.block = make(chan struct{})
 	sp.mu.Unlock()
 
-	go write.Run(context.Background(), writeArgs(bytes.Repeat([]byte("x"), 8192)), nil) // 卡在 proc.Write
+	waitBlocked := goWrite(write, bytes.Repeat([]byte("x"), 8192)) // 卡在 proc.Write
+	defer func() { stop(); waitBlocked() }()
 	time.Sleep(50 * time.Millisecond)
 
 	if _, err := write.Run(context.Background(), writeArgs([]byte{0x03, 0x03, 0x03, 0x1a, 0x03}), nil); err != nil {
