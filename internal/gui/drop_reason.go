@@ -41,6 +41,9 @@ func dropByCode(code string) dropInfo {
 		return dropInfo{code, "连接超时", "网络较差或中继无响应，请检查网络"}
 	case reasonBadCode:
 		return dropInfo{code, "被控端未在线", "协助码已失效或被控端已退出，请确认对方程序仍在运行"}
+	case reasonAlreadyConnected:
+		// 常见于协助端自己在 relay 上尚未超时的半开旧连接：不是“别人”占着，等待即可恢复。
+		return dropInfo{code, "该协助码已有协助端在连接", "可能是上一次连接在 relay 上尚未超时，稍后会自动重试"}
 	case reasonRejected:
 		return dropInfo{code, "被控端拒绝连接", "对方拒绝了本次握手，请让对方确认授权后重新连接"}
 	case reasonPeerLegacy:
@@ -72,7 +75,7 @@ func classifyDropError(err error) dropInfo {
 func classifyReconnectError(err error) (dropInfo, bool) {
 	code, _ := classifyConnectError(err)
 	switch code {
-	case reasonUnreach, reasonRefused, reasonTimeout, reasonBadCode, reasonRejected, reasonPeerLegacy:
+	case reasonUnreach, reasonRefused, reasonTimeout, reasonBadCode, reasonRejected, reasonPeerLegacy, reasonAlreadyConnected:
 		return dropByCode(code), true
 	}
 	return dropInfo{}, false

@@ -129,6 +129,7 @@ func runShare(args []string) {
 	bindIP := fs.String("bind-ip", "", "Bind UDP to specific IP (bypass TUN proxy auto-detection)")
 	rootDir := fs.String("root", "", "Optional: limit file tools to this subtree (empty = no limit). Guards against slips, NOT a security boundary — exec is not confined by it.")
 	allowExec := fs.String("allow-exec", "", "Comma-separated exec basename allowlist (empty = no restriction beyond deny)")
+	allowPTY := fs.Bool("allow-pty", false, "Enable the real terminal (PTY) for the helper. Off by default, like --enable-desktop: a shell inside a PTY can run any command, so it bypasses --allow-exec, --deny-exec and --root. Add --allow-pty only when you accept that those guards no longer constrain the helper.")
 	denyExec := fs.String("deny-exec", "rm,shutdown,reboot,mkfs,dd", "Comma-separated exec basename denylist")
 	elevate := fs.Bool("elevate", false, "Windows: request UAC elevation on startup via ShellExecuteW runas")
 	unsafeExec := fs.Bool("unsafe-exec", false, "DANGER: drop the exec deny/allow lists, letting any command run")
@@ -363,9 +364,9 @@ func runShare(args []string) {
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
 	// 远程桌面（看屏 + 键鼠注入）必须由被控端显式 --enable-desktop 开启：默认开启会让被协助方在不知情时被看屏、被操控。
 	share.SetEnableDesktop(*enableDesktop)
-	// 真终端始终开启，无开关；但设了 --allow-exec/--root 时 shell 会绕过这些护栏，自动关闭
-	guarded := *allowExec != "" || *rootDir != ""
-	share.SetAllowPTY(!guarded)
+	// 真终端（PTY）默认关闭，需被控端显式 --allow-pty 开启；开放后 shell 会绕过
+	// --allow-exec / --deny-exec / --root 等护栏。
+	share.SetAllowPTY(*allowPTY)
 	code, expiresAt, err := share.Run()
 	if err != nil {
 		log.Fatalf("Error: %v", err)
