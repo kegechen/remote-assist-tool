@@ -31,12 +31,15 @@ type Cache struct {
 	Version   int             `json:"version"`
 	Directory json.RawMessage `json:"directory,omitempty"` // 重新编码过的签名信封（见 Offer）
 	State     State           `json:"state"`
+	// LocalAddrs 是本机专用地址（前缀 → host:port），见 localaddr.go。属于「只在列表里还有对应节点时才使用的数据」，
+	// 所以不升 cacheVersion；旧版本把它当不认识的顶层字段原样带着。
+	LocalAddrs localAddrs `json:"local_addrs,omitempty"`
 
 	extra map[string]json.RawMessage // 本版本不认识的顶层字段
 }
 
 // cacheFields 是 Cache 自己的顶层字段，与上面的 json 标签一致。
-var cacheFields = []string{"version", "directory", "state"}
+var cacheFields = []string{"version", "directory", "state", "local_addrs"}
 
 // cacheJSON 与 Cache 字段相同、没有自定义编解码，用来复用标准的结构体编解码。
 type cacheJSON Cache
