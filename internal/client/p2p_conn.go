@@ -59,6 +59,14 @@ func (c *P2PConn) Close() error {
 	return c.tunnel.Close()
 }
 
+// resumable 报告这条工具隧道能否跨 relay 断连继续用：未关闭，且走的是直连。
+//
+// UDP 中继走的是 relay 的 UDP 端口，relay 一重启它也就断了，relay 那边的会话地址登记
+// 也会清掉，不保留。nil 返回 false，调用方不必先判空。
+func (c *P2PConn) resumable() bool {
+	return c != nil && !c.tunnel.Closed() && c.tunnel.Path() == proto.P2PPathDirect
+}
+
 // P2P tunnel mode headers: the first 2 bytes on the tunnel identify the mode.
 // SSH mode (existing help.go path) sends raw SSH bytes with no header.
 // Tool mode (MCP bootstrap) sends this magic header before JSON messages,

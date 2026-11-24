@@ -36,7 +36,7 @@ const fileTransferChunk = 512 * 1024
 // startHolePunching 直接 return，P2P 静默失效。
 type peerAddrRelay struct {
 	mu      sync.Mutex
-	mgr     *p2p.P2PManager
+	mgr     shareP2PManager
 	pending *proto.PeerAddrReady
 }
 
@@ -55,7 +55,7 @@ func (r *peerAddrRelay) deliver(ready *proto.PeerAddrReady) {
 
 // attach 登记 manager 并补投暂存的地址。登记与取暂存在同一临界区内完成，
 // 因此不存在「刚判断完 mgr==nil 就被 attach 抢先、消息永远没人消费」的窗口。
-func (r *peerAddrRelay) attach(mgr *p2p.P2PManager) {
+func (r *peerAddrRelay) attach(mgr shareP2PManager) {
 	r.mu.Lock()
 	r.mgr = mgr
 	pending := r.pending
@@ -77,6 +77,7 @@ type HelpMCPBootstrap struct {
 	mu           sync.Mutex
 	help         *HelpMode   // 装载成功后非 nil
 	bridge       *mcp.Bridge // 装载成功后非 nil
+	link         *helpLink   // 与 help/bridge 同时设置、同时清除
 	activeTarget connectTarget
 	activeResult connectResult
 	// 记录最近一次成功 connect 的参数，供传输中隧道断时自动重连+续传（抗抖动）
@@ -87,6 +88,18 @@ type HelpMCPBootstrap struct {
 	// lastDrop 最近一次会话被拆除的原因（teardown 的 err 文本，如 peer_gone: ...）。
 	// 拆除后 bridge 置空，后续调用只剩 not_connected；带上它，GUI 才能区分对端断开/隧道断开。
 	lastDrop string
+	// newP2PManager 测试注入点，nil 时用 p2p.NewP2PManager。
+	newP2PManager func(p2p.P2PMode, string, string) shareP2PManager
+	// lanServer 测试注入点，nil 时用 IsLANServer。本机回环上的端到端测试要走 auto 模式的
+	// P2P，得绕开「私网 relay 跳过 P2P」。
+	lanServer func(string) bool
+}
+
+func (b *HelpMCPBootstrap) isLANServer(addr string) bool {
+	if b.lanServer != nil {
+		return b.lanServer(addr)
+	}
+	return IsLANServer(addr)
 }
 
 // notConnectedErr 返回 not_connected 错误；若此前有过会话被拆除，附带断开原因（lastDrop）。
@@ -404,7 +417,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	if !fromReconnect && b.lastTarget() != target {
 		b.lastCode, b.lastServer, b.lastNoAuth, b.lastMinProto = "", "", false, ""
 	}
-	if b.help != nil && b.bridge != nil && b.activeTarget.sameEndpoint(target) &&
+	if b.help != nil && b.bridge != nil && b.activeUsableLocked() && b.activeTarget.sameEndpoint(target) &&
 		proto.SatisfiesMinProto(b.activeResult.ProtoVersion, target.MinProto) {
 		// 下限是放宽，不是指定版本：已有会话的协商结果满足本次下限就照常复用。
 		// AI 为保险起见带上 min_proto="1" 重复 connect 时，不该把健康的 v2 会话拆掉重连；
@@ -421,15 +434,23 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 		b.mu.Unlock()
 		return json.Marshal(result)
 	}
-	// 关闭老连接（reconnect 支持）
-	if b.help != nil {
+	// 拆掉老会话（reconnect 支持）。必须整个拆：只关 relay 连接的话，P2P 隧道、manager
+	// 和 P2P 读循环都还留着，要等隧道自己超时才会回收；旧会话正在续会话时更是会一直
+	// 留下去，而且还会继续向对端证明自己。
+	oldLink := b.link
+	if b.help != nil && oldLink == nil {
 		b.help.client.Close()
-		b.help = nil
-		b.bridge = nil
 	}
+	b.help = nil
+	b.bridge = nil
+	b.link = nil
 	b.activeTarget = connectTarget{}
 	b.activeResult = connectResult{}
 	b.mu.Unlock()
+	if oldLink != nil {
+		// 先从 bootstrap 摘下再拆：teardown 只在自己仍是活动会话时才写 lastDrop。
+		oldLink.teardown(errors.New("superseded: 已发起新的 connect，旧会话已关闭"))
+	}
 
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
 	if err := h.client.Connect(); err != nil {
@@ -487,50 +508,8 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	// 会话管理与 P2P 断开后的降级回退。
 	h.client.StartHeartbeatLoop(30 * time.Second)
 
-	// p2pConn 由后台升级 goroutine 填入，teardown 也要能关它 → 原子指针。
-	var p2pConnPtr atomic.Pointer[P2PConn]
-	// helloAckCh 把 relay 上的 ToolHelloAck 交给等待方。P2P 断开后要重新握手才能让
-	// share 把 daemon 出口切回 relay，而此时 relay 已被读循环独占，只能这样转交。
-	helloAckCh := make(chan proto.HelloAck, 1)
-	// p2pMgrPtr 供 teardown 回收 P2P manager（它持有绑定的 UDP socket 与接收循环）。
-	// 不回收的话，每次 connect/重连都会漏一个——transferWithReconnect 一次传输就可能
-	// 重连 5 次。赋值发生在下方 manager 启动处。
-	var p2pMgrPtr atomic.Pointer[p2p.P2PManager]
-	// sessionDone 由 teardown 关闭，唤醒还阻塞在 P2P 协商结果上的升级 goroutine。
-	// 只关 manager 是不够的：P2PManager.Close 仅 close(stopChan)，其 p2pTimeout 收到后
-	// 直接 return 而不往 resultCh 推结果，干等 resultCh 就是永久泄漏。
-	sessionDone := make(chan struct{})
-
-	// teardown 拆除当前会话，sync.Once 保证只跑一次：关闭 relay 控制连接
-	// （→ 心跳循环经 IsClosed() 退出，并让 relay 端读循环 EOF → DisconnectClient
-	// 立即清 Help 槽）、唤醒在途工具调用、清 bootstrap 状态。任一读循环（P2P / relay）
-	// 检测到断开都调它。修复点：旧实现 P2P 隧道断开后只 bridge.Disconnect + 清 b.help，
-	// 不关 h.client，心跳不停 → relay 端 Help 槽永驻 → 新 connect 永久 already-has-helper。
-	var teardownOnce sync.Once
-	teardown := func(err error) {
-		teardownOnce.Do(func() {
-			close(sessionDone)
-			bridge.Disconnect(err)
-			h.client.Close()
-			if pc := p2pConnPtr.Load(); pc != nil {
-				pc.Close()
-			}
-			if mgr := p2pMgrPtr.Load(); mgr != nil {
-				mgr.Close()
-			}
-			b.mu.Lock()
-			if b.bridge == bridge {
-				if err != nil {
-					b.lastDrop = err.Error()
-				}
-				b.help = nil
-				b.bridge = nil
-				b.activeTarget = connectTarget{}
-				b.activeResult = connectResult{}
-			}
-			b.mu.Unlock()
-		})
-	}
+	link := newHelpLink(b, h, bridge, sess, addrRelay)
+	teardown := link.teardown
 	// P2P 起始为 false：连接先在 relay 上可用，升级成功后由 upgradeToP2P 回填
 	// b.activeResult.P2P，重复 connect 走幂等复用路径即可读到最新状态。
 	result := connectResult{
@@ -558,6 +537,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	b.mu.Lock()
 	b.help = h
 	b.bridge = bridge
+	b.link = link
 	b.activeTarget = target
 	b.activeResult = result
 	// 缓存本次 connect 参数，供传输中隧道断时自动重连（用同一码/同一 relay 续传）
@@ -572,66 +552,15 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	p2pMode := p2p.ParseP2PMode(effectiveCfg.P2PMode)
 	// 私网/loopback relay（standalone / 同 LAN）下 relay 已直连、P2P 多余，且 standalone
 	// 不启 STUN 必然打洞超时；auto 模式自动跳过，省掉后台徒劳重试。
-	if p2pMode == p2p.P2PModeAuto && IsLANServer(effectiveCfg.ServerAddr) {
+	if p2pMode == p2p.P2PModeAuto && b.isLANServer(effectiveCfg.ServerAddr) {
 		fmt.Fprintf(os.Stderr, "MCP: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（如需强制用 --p2p required）\n", effectiveCfg.ServerAddr)
 		p2pMode = p2p.P2PModeDisabled
 	}
 	// upgradeDone 报告后台升级的最终结果，仅 --p2p required 会去等它。
 	upgradeDone := make(chan bool, 1)
 
-	// relay 读循环：单点消费 relay 连接，兼做 P2P 信令的转发。协商不再由主线程抢读
-	// relay，两者争抢同一条连接的问题（以及由此需要的 ResetDecoder）就此消失。
-	go func() {
-		for {
-			h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
-			msg, err := h.client.ReadMessage()
-			if err != nil {
-				// relay 信令通道断开：即便 P2P 工具隧道还在，也必须拆除会话，
-				// 否则 relay 端 Help 槽泄漏，新 connect 撞 already-has-helper。
-				teardown(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
-				return
-			}
-			switch msg.Type {
-			case proto.MsgPeerAddrReady:
-				var ready proto.PeerAddrReady
-				if err := proto.DecodePayload(msg, &ready); err == nil {
-					// 经 addrRelay 投递：manager 可能还没起来（它在后台 goroutine 里
-					// 启动，含同步 STUN），暂存后由 attach 补投，绝不丢。
-					addrRelay.deliver(&ready)
-				}
-			case proto.MsgToolHelloAck:
-				// 交给 downgradeToRelay；无人等待时丢弃（初次握手在读循环启动前已完成）。
-				var ack proto.HelloAck
-				if err := proto.DecodePayload(msg, &ack); err == nil {
-					select {
-					case helloAckCh <- ack:
-					default:
-					}
-				}
-			case proto.MsgError:
-				// 对端消失类错误必须拆会话，不能只打日志：此后这条 relay 上不会再有
-				// 工具响应，而 b.activeTarget 还留着，下一次同参数 connect 会命中幂等
-				// 分支拿到指向死会话的 connected=true，永远自愈不了（见 peerGoneError）。
-				if gone := peerGoneError(msg); gone != nil {
-					teardown(gone)
-					return
-				}
-				var errMsg proto.ErrorMessage
-				proto.DecodePayload(msg, &errMsg)
-				log.Printf("MCP relay error: %s", errMsg.Message)
-			default:
-				// 始终投递，即使工具流量已经升级到 P2P。
-				//
-				// 不能按「P2P 活跃就只 drain」来做：P2P 断开时 share 会先把 daemon
-				// 出口切回 relay 并可能立刻发出响应，而 help 这边尚未复位标志，那条
-				// 响应就被当垃圾丢掉、调用方只能干等 deadline。
-				// 重复投递本身是安全的——HandleInbound 的 pending channel 是
-				// buffered 1 且用非阻塞 select 投递，重复的那份自然被丢弃；何况
-				// share 端同一时刻只往一条通道发，实际也不会重复。
-				dispatchHelpToolMessage(msg, bridge)
-			}
-		}
-	}()
+	// relay 读循环：单点消费 relay 连接，兼做 P2P 信令的转发（见 helpLink.relayLoop）。
+	go link.relayLoop()
 
 	// 协商到 v1（对端是 0.0.x）时根本不发起 P2P：谈不成，而且中途状态是不对称的。
 	//
@@ -656,8 +585,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 		fmt.Fprintln(os.Stderr, "MCP: 对端为旧版本（工具协议 v1），P2P 直连不可用，全程使用中转")
 	}
 	if p2pMode != p2p.P2PModeDisabled && !sess.Legacy() {
-		go b.upgradeToP2P(h, bridge, sess, &effectiveCfg, resp.SessionID, p2pMode, addrRelay,
-			&p2pConnPtr, &p2pMgrPtr, helloAckCh, teardown, upgradeDone, sessionDone)
+		go b.upgradeToP2P(link, &effectiveCfg, resp.SessionID, p2pMode, upgradeDone)
 	}
 
 	// --p2p required 明确表示「不接受中转」，因此这里必须同步等升级结果：连接虽已在
@@ -695,21 +623,8 @@ const p2pRequiredWaitTimeout = 60 * time.Second
 // 全程「失败即静默留在 relay」：P2P 只是加速，任何一步不成都不影响已经可用的会话。
 // 关键是 ProbeBidirectional —— 隧道建成不等于双向可达。UDP 打洞的成功判定是单向的，
 // 若不做双向证实就切换，可能把好端端的 relay 会话换成一条只能单向发包的死隧道。
-func (b *HelpMCPBootstrap) upgradeToP2P(
-	h *HelpMode,
-	bridge *mcp.Bridge,
-	sess proto.Session,
-	cfg *Config,
-	sessionID string,
-	mode p2p.P2PMode,
-	addrRelay *peerAddrRelay,
-	p2pConnPtr *atomic.Pointer[P2PConn],
-	p2pMgrPtr *atomic.Pointer[p2p.P2PManager],
-	helloAckCh <-chan proto.HelloAck,
-	teardown func(error),
-	done chan<- bool,
-	sessionDone <-chan struct{},
-) {
+func (b *HelpMCPBootstrap) upgradeToP2P(l *helpLink, cfg *Config, sessionID string, mode p2p.P2PMode, done chan<- bool) {
+	h, bridge, sess := l.h, l.bridge, l.sess
 	// notify 只在首次生效（done 带缓冲，满了就丢），供 --p2p required 的同步等待。
 	notify := func(ok bool) {
 		select {
@@ -723,11 +638,16 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	// manager 在这里启动而不是在 connect 主路径上：Start 内含同步 STUN 竞速发现（UDP 被封
 	// 时要等满约 4 秒的时限），放主路径会让 connect 干等，与「连接立即可用、P2P 后台升级」
 	// 的设计相悖。
-	mgr := p2p.NewP2PManager(mode, cfg.STUNServer, cfg.BindIP)
+	var mgr shareP2PManager
+	if b.newP2PManager != nil {
+		mgr = b.newP2PManager(mode, cfg.STUNServer, cfg.BindIP)
+	} else {
+		mgr = p2p.NewP2PManager(mode, cfg.STUNServer, cfg.BindIP)
+	}
 	mgr.SetAuthCode(h.code)
 	mgr.SetSTUNCandidates(h.client.relaySTUNServers())
 	mgr.SetRelayConn(h.client)
-	p2pMgrPtr.Store(mgr) // 登记给 teardown 回收
+	l.setManager(mgr) // 登记给 teardown 回收
 	resultCh, startErr := mgr.Start(sessionID, false)
 	if startErr != nil {
 		log.Printf("MCP P2P manager start failed, staying on relay: %v", startErr)
@@ -737,13 +657,13 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	}
 	// 登记 manager 并补投握手窗口里暂存的对端地址。没有这一步，help 永远没有
 	// peerInfo，startHolePunching 直接 return，P2P 静默失效。
-	addrRelay.attach(mgr)
+	l.addrRelay.attach(mgr)
 
 	var result p2p.P2PResult
 	var ok bool
 	select {
 	case result, ok = <-resultCh:
-	case <-sessionDone:
+	case <-l.sessionDone:
 		// 会话已拆（relay 断 / --p2p required 等待超时）。干等 resultCh 永远等不到，
 		// manager 被 Close 时不会往它推任何东西。
 		mgr.Close()
@@ -781,7 +701,11 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 
 	// 会话可能已经没了（relay 断开，或 --p2p required 等待超时后 teardown）。此时切换
 	// 毫无意义，还会往 stderr 打出「已切换到 P2P 直连」，与 connect 已报的失败自相矛盾。
+	// 先登记再检查：teardown 若落在两步之间，登记之后它会关掉这条隧道；落在登记之前，
+	// 这里的检查会看到会话已拆。两种顺序下隧道都不会漏关。
+	l.p2pConn.Store(pc)
 	if !b.sessionAlive(bridge) {
+		l.p2pConn.Store(nil)
 		result.Tunnel.Close()
 		mgr.Close()
 		notify(false)
@@ -791,7 +715,6 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 	// 双向证实通过：把工具流量切到隧道。复用 relay 握手协商出的同一把会话密钥
 	// （key 由 code+双方 nonce 派生，与传输通道无关），不必在 P2P 上再握一次手，
 	// 也就不存在新旧 key 的解密竞态。
-	p2pConnPtr.Store(pc)
 	bridge.SwapConn(pc, sess)
 	fmt.Fprintln(os.Stderr, "MCP: 已切换到 "+result.Tunnel.Describe())
 
@@ -809,14 +732,24 @@ func (b *HelpMCPBootstrap) upgradeToP2P(
 		if err != nil {
 			if mode == p2p.P2PModeRequired {
 				// required 明确表示不接受中转，隧道没了就拆会话，不能偷偷降级。
-				p2pConnPtr.Store(nil)
+				l.p2pConn.Store(nil)
 				pc.Close()
 				mgr.Close()
-				teardown(fmt.Errorf("tunnel_lost: P2P 隧道断开且 --p2p required 不接受中转回退（%w），请重新 connect", err))
+				l.teardown(fmt.Errorf("tunnel_lost: P2P 隧道断开且 --p2p required 不接受中转回退（%w），请重新 connect", err))
 				return
 			}
-			b.downgradeToRelay(h, bridge, pc, p2pConnPtr, helloAckCh, teardown, err, sess.Version)
+			if l.resuming.Load() {
+				// relay 这时还没重新接上，没有可以回落的通道。
+				l.p2pConn.Store(nil)
+				pc.Close()
+				l.teardown(fmt.Errorf("tunnel_lost: 中转断开期间 P2P 隧道也断了（%w），请重新 connect", err))
+				return
+			}
+			b.downgradeToRelay(h, bridge, pc, &l.p2pConn, l.helloAckCh, l.teardown, err, sess.Version)
 			return
+		}
+		if l.consumeP2PControl(msg) {
+			continue
 		}
 		dispatchHelpToolMessage(msg, bridge)
 	}

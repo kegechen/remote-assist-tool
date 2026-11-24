@@ -75,7 +75,20 @@ func joinFailureError(respErr string) error {
 // join 向 relay 发 JoinRequest 并等待 JoinResponse；返回 resp 或 error。
 // 不打印 stdout，让调用方决定输出。
 func (h *HelpMode) join() (*proto.JoinResponse, error) {
-	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary(), SupportsUpdateNotice: true, SupportsCanonicalCode: true}
+	return h.joinWithProof(nil)
+}
+
+// isJoinRejected 判断 join 是否被 relay 拒绝（码不存在、被协助端不在线、已有协助端等），
+// 区别于连不上 relay、读写出错。被拒的 join relay 会累计失败次数，其中码不对的还按来源 IP
+// 计分，重试方要节制。封禁（proto.ErrBlocked）不算在内，调用方另行处理。
+func isJoinRejected(err error) bool {
+	return errors.Is(err, ErrJoinFailed) || errors.Is(err, ErrSessionBusySameAddr)
+}
+
+// joinWithProof 同 join，附带续会话证明（nil 即普通 join）。relay 原样转给 share，
+// 由 share 判断这次加入的是不是正在和它跑 P2P 的那个协助端（见 proto.P2PResumeProof）。
+func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinResponse, error) {
+	req := &proto.JoinRequest{Code: h.code, Version: version.Info(), Host: sysinfo.Summary(), SupportsUpdateNotice: true, SupportsCanonicalCode: true, ResumeProof: proof}
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return nil, err
 	}
