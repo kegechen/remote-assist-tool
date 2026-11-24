@@ -68,10 +68,29 @@ type ClientTLSOptions struct {
 	TrustStore *TrustStore
 	// OnPin 钉扎结果回调，供调用方打提示行。可为 nil。
 	OnPin func(PinResult, string)
+
+	// AllowedFPs 非空时启用严格指纹比对（见 strictfp.go）：relay 出示的叶子证书指纹必须是其中之一，
+	// 取代 PKI 校验与 TOFU（SkipVerify、PinAddr、TrustStore、TrustNewCert、OnPin 都被忽略，
+	// 不往指纹表里写任何东西）。给节点列表里的 relay 用，指纹来自根签名的列表。与 CAFile 互斥。
+	AllowedFPs []string
+	// OnFPMismatch 严格比对失败时收到本次出示证书的指纹。可为 nil。
+	OnFPMismatch func(fp string)
 }
 
 // NewClientTLSConfig 按 ClientTLSOptions 构造客户端 tls.Config。
 func NewClientTLSConfig(o ClientTLSOptions) (*tls.Config, error) {
+	if len(o.AllowedFPs) > 0 {
+		if o.CAFile != "" {
+			return nil, fmt.Errorf("refusing to build TLS config: --ca %q would be silently ignored because the relay is verified by certificate fingerprint", o.CAFile)
+		}
+		// 身份由指纹认定：crypto/tls 自带的链与域名校验对自签证书必然失败，必须跳过，由回调接手。
+		// 不要给它设 ClientSessionCache：会话恢复时 crypto/tls 不调 VerifyPeerCertificate，指纹就不比对了。
+		return &tls.Config{
+			MinVersion:            tls.VersionTLS13,
+			InsecureSkipVerify:    true,
+			VerifyPeerCertificate: fpVerifier(o.AllowedFPs, o.OnFPMismatch),
+		}, nil
+	}
 	if o.SkipVerify && o.CAFile != "" {
 		return nil, fmt.Errorf("refusing to build TLS config: --ca %q would be silently ignored because certificate verification is disabled; drop --ca or pass --insecure=false", o.CAFile)
 	}

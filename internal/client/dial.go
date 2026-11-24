@@ -43,11 +43,17 @@ type dialResult struct {
 	err       error
 }
 
-// dialRelay 按 Config.Transport 建立到 relay 的连接（含 TLS 握手），返回实际使用的传输。
+// dialRelay 按 Config.Transport 建立到 Config.ServerAddr 的连接（含 TLS 握手），返回实际使用的传输。
 // preferred 是上一次成功的传输（空=TCP），auto 模式下它先拨。auto 模式下 QUIC 胜出时，
 // tcpErr 是 TCP 一路的失败原因（TCP 还没返回为 nil），供 logTransport 如实说明为什么改用 QUIC。
 func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, tcpErr, err error) {
-	mode := c.config.Transport
+	return dialRelayAddr(context.Background(), c.config.ServerAddr, c.config.Transport, tlsConfig, preferred)
+}
+
+// dialRelayAddr 是 dialRelay 的无状态版本：拨 addr，传输模式 mode（空串=auto），parent 取消时拨号中止。
+// 整个拨号（TCP/QUIC 竞速、各自的 TLS 握手）受 dialTimeout 限制。已经建好的连接不受 parent 之后取消的影响。
+// 自动选节点要同时拨几个节点、各自带着不同的地址与证书指纹，所以不能走 Client 里的单一配置。
+func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, tcpErr, err error) {
 	if mode == "" {
 		mode = TransportAuto
 	}
@@ -62,12 +68,14 @@ func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Co
 		mode = TransportTCP
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	ctx, cancel := context.WithTimeout(parent, dialTimeout)
 	defer cancel()
+	// 先取到本地：竞速里的 goroutine 可能比这次调用活得久，读全局变量会和后面的测试替换它冲突。
+	dial := dialOneFunc
 
 	switch mode {
 	case TransportTCP, TransportQUIC:
-		conn, err := c.dialOne(ctx, mode, tlsConfig)
+		conn, err := dial(ctx, addr, mode, tlsConfig)
 		return conn, mode, nil, err
 	}
 
@@ -78,7 +86,7 @@ func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Co
 	results := make(chan dialResult, 2)
 	start := func(kind string) {
 		go func() {
-			conn, err := c.dialOne(ctx, kind, tlsConfig)
+			conn, err := dial(ctx, addr, kind, tlsConfig)
 			results <- dialResult{conn: conn, transport: kind, err: err}
 		}()
 	}
@@ -91,7 +99,8 @@ func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Co
 	for {
 		select {
 		case <-timer.C:
-			if started == 1 {
+			// 已经取消了就不起另一路（理由同下），等首选一路因取消返回。
+			if started == 1 && ctx.Err() == nil {
 				start(second)
 				started = 2
 			}
@@ -114,6 +123,11 @@ func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Co
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", r.transport, r.err))
 			if started == 1 {
+				if ctx.Err() != nil {
+					// 调用方取消了（或者到了截止时间）：别拿已取消的 ctx 再起另一路。quic-go 这时发不发
+					// Initial 包取决于它内部的时序，发了就是 relay 那边一次没头没尾的握手。
+					return nil, "", nil, errors.Join(errs...)
+				}
 				// 首选一路已经明确失败（如端口拒绝），不必等满延迟，立刻换另一路。
 				start(second)
 				started = 2
@@ -141,8 +155,10 @@ func closeLosers(results <-chan dialResult, pending int) {
 	}()
 }
 
-func (c *Client) dialOne(ctx context.Context, kind string, tlsConfig *tls.Config) (net.Conn, error) {
-	addr := c.config.ServerAddr
+// dialOneFunc 是 dialRelayAddr 拨每一路用的函数，测试替换它来观察拨了哪几路。
+var dialOneFunc = dialOne
+
+func dialOne(ctx context.Context, addr, kind string, tlsConfig *tls.Config) (net.Conn, error) {
 	if kind == TransportQUIC {
 		// relay 对被封 IP 的 QUIC 连接在它那边握手完成后才带原因关闭，那时这边的握手早已
 		// 完成，封禁通常由 quictransport.Conn 的读写识别；但关闭也可能赶在开流之前到。

@@ -114,7 +114,11 @@ type Client struct {
 	// transport 上一次成功建连用的传输（tcp/quic），auto 模式下次先拨它。只记在进程内：
 	// 网络环境变了不该一直沿用旧选择，进程重启即重新从 TCP 开始。
 	transport string
-	mu        sync.Mutex
+	// node 非 nil 表示当前连的是节点列表里的节点（adoptNode 接管的连接），之后的 Connect 照样按接管时的
+	// 指纹严格比对、只用这个地址声明过的传输，不退回 TOFU：那等于把身份校验降级，还会把节点地址写进指纹表。
+	// 指纹是接管时的快照，见 nodePin：会断线重连的调用方要按最新列表重新 dialNode，不要靠 Connect。
+	node *nodePin
+	mu   sync.Mutex
 	// stunMu/relaySTUN：relay 在注册/加入响应里下发的 STUN 服务器（每次注册/加入覆盖）。
 	// 写在注册/加入的 goroutine，读在后台启动 P2P 的 goroutine，单独加锁。
 	stunMu    sync.Mutex
@@ -150,6 +154,10 @@ func (c *Client) Connect() error {
 	c.closed = false               // 允许 Close 后重新连接
 	c.hbStop = make(chan struct{}) // 新一代连接：上一代的 hbStop 已在 Close 里关闭
 
+	if c.node != nil {
+		return c.connectNodeLocked()
+	}
+
 	var tlsConfig *tls.Config
 	if c.config.UseTLS {
 		var err error
@@ -174,7 +182,12 @@ func (c *Client) Connect() error {
 		logTransport(c.config.ServerAddr, transport, c.transport, tcpErr)
 	}
 	c.transport = transport
+	c.installConnLocked(conn)
+	return nil
+}
 
+// installConnLocked 把建好的连接装进 Client。调用方持有 c.mu。
+func (c *Client) installConnLocked(conn net.Conn) {
 	// Enable TCP KeepAlive to detect dead connections
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
@@ -189,7 +202,6 @@ func (c *Client) Connect() error {
 	c.conn = conn
 	c.enc = json.NewEncoder(conn)
 	c.dec = json.NewDecoder(conn)
-	return nil
 }
 
 // Close 关闭连接
