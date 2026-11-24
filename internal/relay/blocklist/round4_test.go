@@ -181,10 +181,16 @@ func TestSaveRetriesWithBackoff(t *testing.T) {
 	cfg.Path = path
 	cfg.SaveInterval = 5 * time.Millisecond
 	cfg.UrgentSaveInterval = 5 * time.Millisecond
+	cfg.retryBackoff = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}
 	l := openAt(t, cfg)
 	defer l.Close()
-	l.retryBackoff = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}
-	time.Sleep(50 * time.Millisecond)
+	// 先等初始写盘落地（文件存在）再让 rename 失败；固定睡一小会儿在负载高时不够。
+	for i := 0; i < 500; i++ {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	// 让 rename 失败：目标路径变成一个非空目录
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)

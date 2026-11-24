@@ -117,6 +117,9 @@ type Config struct {
 	Records *Records
 	// StaticAllow 启动参数 --blocklist-allow 的放行范围（见 static_allow.go）：命中的来源不计分、不被拒绝、不能手动封禁。
 	StaticAllow []netip.Prefix
+	// retryBackoff 写盘失败后的重试间隔（逐次递增，最后一个封顶），空 = defaultRetryBackoff。
+	// 只能在 Open 之前设置（测试用）：saver 协程在 Open 里启动，之后再改会与它的读取竞争。
+	retryBackoff []time.Duration
 }
 
 // MaxTrackedLimit MaxTracked 的上限。按此上限、两族自动封禁全满的正常数据估算持久化文件约 22 MB，
@@ -463,9 +466,8 @@ type List struct {
 	saveBudget     int                          // 写盘字节预算；0 = maxSaveBytes（测试可调小）
 	lastSaveReport atomic.Pointer[budgetReport] // 最近一次写盘的预算裁剪情况
 
-	retryBackoff []time.Duration // 写盘失败后的重试间隔（逐次递增，最后一个封顶）；测试可调小
-	saveFailures atomic.Int64    // 累计写盘失败次数
-	snapshotHold atomic.Int64    // 最近一次写盘快照单次持读锁的最长时长（纳秒，观测与测试用）
+	saveFailures atomic.Int64 // 累计写盘失败次数
+	snapshotHold atomic.Int64 // 最近一次写盘快照单次持读锁的最长时长（纳秒，观测与测试用）
 
 	autoBanEvictedHook func(key string) // 测试钩子：自动封禁被 ban_evicted 时调用（持锁）
 }

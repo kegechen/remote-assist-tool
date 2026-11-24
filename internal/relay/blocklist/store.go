@@ -187,7 +187,7 @@ func (l *List) saver() {
 	defer close(l.doneCh)
 	var last time.Time
 	failures := 0
-	backoff := l.retryBackoff
+	backoff := l.cfg.retryBackoff
 	if len(backoff) == 0 {
 		backoff = defaultRetryBackoff
 	}
