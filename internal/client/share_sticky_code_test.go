@@ -249,7 +249,7 @@ func TestCodeChangeNotice(t *testing.T) {
 
 // 无固定到期时，协助信息不应展示 1970 年的时间，code.json 的 expiresAt 为 0。
 func TestShareInstructionsAndCodeFileWithoutExpiry(t *testing.T) {
-	txt := formatShareInstructions("ABCDEFGHJK", "u@h", &Config{ServerAddr: "x:1"}, time.Time{})
+	txt := formatShareInstructions("ABCDEFGHJK", "u@h", &Config{ServerAddr: "x:1"}, nil, time.Time{})
 	if !strings.Contains(txt, "本进程存活期间一直有效") || strings.Contains(txt, "1970") || strings.Contains(txt, "0001") {
 		t.Fatalf("无到期文案不对:\n%s", txt)
 	}

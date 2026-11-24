@@ -8,12 +8,14 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/remote-assist/tool/internal/agent"
 	"github.com/remote-assist/tool/internal/agent/tools"
+	"github.com/remote-assist/tool/internal/directory"
 	"github.com/remote-assist/tool/internal/p2p"
 	"github.com/remote-assist/tool/internal/proto"
 	"github.com/remote-assist/tool/internal/sysinfo"
@@ -56,6 +58,19 @@ type ShareMode struct {
 	enableDesktop  bool   // 是否允许远程桌面（screen_capture / input），默认关闭
 	daemon         *agent.Daemon
 	daemonOnce     sync.Once
+
+	// nodes 非 nil 时是自动模式（spec 6.3）：按节点列表选节点，没有能用的列表时连 config.ServerAddr。
+	// nil 时只连 config.ServerAddr（显式模式，或本程序没有内置根公钥），与没有节点列表时完全一样。
+	nodes *shareNodes
+	// relayDraining：最近一次注册响应说当前节点在排空，等协助端时迁走（spec 6.3）。
+	relayDraining bool
+	// codePrefix、codeAddr 是 code 在哪个节点（前缀，不在列表节点上时为空）、哪个地址上注册的，codeFPs 是注册时那台
+	// relay 的证书指纹（见 relayFPs）。换了节点就不再请求复用这个码：码和复用令牌只在发它的 relay 上有效，带给别的
+	// 节点等于把令牌交给别的运营者。
+	codePrefix, codeAddr string
+	codeFPs              []string
+	// stunFollowsRelay：config.STUNServer 为空时用当前 relay 主机的 3478（自动模式，见 p2pSTUN）。
+	stunFollowsRelay bool
 
 	// P2P 后台升级相关状态。relay 主循环与升级 goroutine 并发访问，统一由 p2pMu 保护。
 	p2pMu         sync.Mutex
@@ -363,10 +378,11 @@ func (s *ShareMode) clearP2PAttempt(epoch uint64, closeRelay bool) bool {
 
 func (s *ShareMode) makeP2PManager(mode p2p.P2PMode) shareP2PManager {
 	var mgr shareP2PManager
+	stun := s.p2pSTUN()
 	if s.newP2PManager != nil {
-		mgr = s.newP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
+		mgr = s.newP2PManager(mode, stun, s.client.config.BindIP)
 	} else {
-		mgr = p2p.NewP2PManager(mode, s.client.config.STUNServer, s.client.config.BindIP)
+		mgr = p2p.NewP2PManager(mode, stun, s.client.config.BindIP)
 	}
 	// 打洞包要用协助码签 MAC，必须在 Start 之前注入，否则本轮打洞全程发的都是
 	// 无 MAC 的包，对端一律丢弃。
@@ -419,9 +435,47 @@ func NewShareMode(cfg *Config, sshAddr string, newInstance bool, sbCfg agent.San
 	return share
 }
 
+// UseNodeList 开启自动模式（spec 6.1、6.3）：按节点列表选节点，没有能用的列表时连 config.ServerAddr（内置默认节点）。
+// hint 是升级前所在节点的地址（--relay-hint，可为空）：第一次选节点时先试它，之后仍是自动模式。
+// home 是放列表缓存的家目录，空串表示当前用户的（见 newDirManager）。
+// 本程序没有内置根公钥、拿不到主目录时不用列表，照旧只连 config.ServerAddr。要在 Run 之前调用。
+//
+// config.STUNServer 为空时 STUN 跟着当前连的 relay 走（见 p2pSTUN），调用方不要按默认节点推导它。
+func (s *ShareMode) UseNodeList(hint, home string) {
+	s.stunFollowsRelay = true
+	logf := func(format string, args ...any) { s.printf(format+"\n", args...) }
+	if dm := newDirManager(home, logf); dm != nil {
+		s.nodes = newShareNodes(dm, s.client.config.Transport, s.client.config.ServerAddr, hint, logf)
+	}
+}
+
+// p2pSTUN 是这一轮 P2P 用的 STUN 服务器，UDP 中继也走它。自动模式下用户没给 --stun 时用当前 relay 主机的 3478：
+// UDP 中继只认在它那里注册过的会话，share 换到别的节点后还用默认节点的，打洞失败时就中继不了。
+func (s *ShareMode) p2pSTUN() string {
+	if stun := s.client.config.STUNServer; stun != "" || !s.stunFollowsRelay {
+		return stun
+	}
+	return RelaySTUNAddr(s.client.serverAddr())
+}
+
+// RelaySTUNAddr 是 relay 自带的 STUN 地址：relay 主机的 3478 端口。地址里没有主机时返回空串。
+func RelaySTUNAddr(server string) string {
+	host, _, err := net.SplitHostPort(server)
+	if err != nil || host == "" {
+		return ""
+	}
+	return net.JoinHostPort(host, "3478")
+}
+
 // Run 运行被协助模式，协助端断开时自动等待新连接
 func (s *ShareMode) Run() (string, time.Time, error) {
 	defer s.client.Close()
+	if s.nodes != nil {
+		// 启动时取一次节点列表，之后每 6 小时一次（spec 6.2）。和连接并行，不拖慢第一次连接。
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go s.nodes.dm.Run(ctx)
+	}
 	if s.console != nil {
 		// log 默认写 stderr。stderr 也是终端时多半和 stdout 是同一个窗口，
 		// 日志同样要先擦掉进度行再写，否则会接在进度行末尾。
@@ -455,6 +509,12 @@ func (s *ShareMode) serveRound(rapidFails int) int {
 	start := time.Now()
 	tunnelErr := s.waitAndHandleTunnel()
 	sessionDur := time.Since(start)
+
+	if errors.Is(tunnelErr, errNodeMigrated) {
+		// 等协助端时已经连上了新节点（排空迁移）：在它上面注册，不是连接出了问题，不算快速断开。
+		s.reconnectWithBackoff()
+		return 0
+	}
 
 	isPeerDisconnect := errors.Is(tunnelErr, ErrPeerDisconnected)
 	codeExpired := !s.expiresAt.IsZero() && time.Now().After(s.expiresAt)
@@ -515,9 +575,16 @@ func (s *ShareMode) reconnectWithBackoff() {
 	delay := reconnectBaseDelay
 	for attempt := 1; ; attempt++ {
 		s.client.Close()
-		err := s.client.Connect()
+		err := s.connect()
 		if err == nil {
 			err = s.register()
+		}
+		if s.nodes != nil {
+			if err == nil {
+				s.nodes.registered(s.client.config.ServerAddr)
+			} else {
+				s.nodes.failed(err)
+			}
 		}
 		if err == nil {
 			if attempt > 1 {
@@ -538,6 +605,27 @@ func (s *ShareMode) reconnectWithBackoff() {
 		time.Sleep(wait)
 		delay = next
 	}
+}
+
+// connect 连上 relay：自动模式按节点列表选节点（shareNodes），否则连 config.ServerAddr。调用前 client 应已 Close。
+func (s *ShareMode) connect() error {
+	if s.nodes != nil {
+		return s.nodes.connect(s.client)
+	}
+	return s.client.Connect()
+}
+
+// errNodeMigrated 表示等协助端时已经连上了别的节点（排空迁移），要在新节点上重新注册。
+var errNodeMigrated = errors.New("已连上新节点，重新注册")
+
+// registerRejected 是 relay 用错误消息拒绝了注册。
+type registerRejected struct {
+	Code    string
+	Message string
+}
+
+func (e *registerRejected) Error() string {
+	return fmt.Sprintf("register rejected: %s - %s", e.Code, e.Message)
 }
 
 // reconnectFailure 决定一次重连失败后打印什么、等多久、下一次的退避间隔。
@@ -577,16 +665,28 @@ func (s *ShareMode) register() error {
 		return err
 	}
 	hostInfo := sysinfo.Summary()
-	// 本轮 P2P 直连在掉线期间一直通着，就请 relay 保留与那个协助端的配对，免得它被踢下线、
-	// 还得重新加入再证明一遍身份。
-	keepHelp := s.keepHelpTag()
-	// 携带进程内缓存的码：首次注册为空；重连（含 relay 重启、掉线超宽限）时请 relay 原样复用，
-	// 使码在本进程存活期间不变。旧 relay 忽略这两个字段并按旧逻辑发码。
-	if err := s.client.SendMessage(proto.MsgRegisterRequest, &proto.RegisterRequest{
+	req := &proto.RegisterRequest{
 		ClientID: clientID, Version: version.Info(), Host: hostInfo, SupportsUpdateNotice: true,
-		RequestCode: s.code, ReuseToken: s.reuseToken, SupportsStickyCode: true,
-		KeepHelp: keepHelp,
-	}); err != nil {
+		SupportsStickyCode: true,
+	}
+	// 携带进程内缓存的码：首次注册为空；重连（含 relay 重启、掉线超宽限）时请 relay 原样复用，
+	// 使码在本进程存活期间不变。旧 relay 忽略这两个字段并按旧逻辑发码。换了节点时不带（见 codePrefix）。
+	moved := s.code != "" && !s.sameCodeNode()
+	// 本轮 P2P 直连在掉线期间一直通着，就请 relay 保留与那个协助端的配对，免得它被踢下线、
+	// 还得重新加入再证明一遍身份。换了节点时不请求：新节点上没有那个会话，码也会换。
+	keepHelp := ""
+	if !moved {
+		req.RequestCode, req.ReuseToken = s.code, s.reuseToken
+		keepHelp = s.keepHelpTag()
+		req.KeepHelp = keepHelp
+	}
+	if s.nodes != nil && s.nodes.declaresList() {
+		// 带上缓存的列表位置：relay 手里的列表更新时随响应下发；也是能力声明，relay 据此对排空、停用的节点回错误码。
+		// 没有列表时默认地址上的 relay 说过自己在排空就不带，见 shareNodes.failedOffList。
+		serial, keySerial := s.nodes.dm.Position()
+		req.DirectorySerial, req.DirectoryKeySerial = &serial, keySerial
+	}
+	if err := s.client.SendMessage(proto.MsgRegisterRequest, req); err != nil {
 		return err
 	}
 
@@ -611,7 +711,7 @@ func (s *ShareMode) register() error {
 				s.printf("\n[!] %s\n    （例如旧版 share 仍在后台运行：结束它即可，本进程会自动接管）\n", errMsg.Message)
 			}
 		}
-		return fmt.Errorf("register rejected: %s - %s", errMsg.Code, errMsg.Message)
+		return &registerRejected{Code: errMsg.Code, Message: errMsg.Message}
 	}
 	if msg.Type != proto.MsgRegisterResponse {
 		return fmt.Errorf("unexpected response: %s", msg.Type)
@@ -621,6 +721,10 @@ func (s *ShareMode) register() error {
 	if err := proto.DecodePayload(msg, &resp); err != nil {
 		return err
 	}
+	if s.nodes != nil {
+		s.nodes.dm.Offer(resp.Directory, "relay "+s.client.config.ServerAddr)
+	}
+	s.relayDraining = resp.NodeStatus == directory.StatusDraining
 	prevCode := s.code
 	if prevCode != "" && prevCode != resp.Code {
 		// 码换了，旧协助端已经无法用原码重新加入；跨重连保留下来的 P2P 隧道也到此为止，
@@ -630,6 +734,7 @@ func (s *ShareMode) register() error {
 	// 只认自己请求过的保留：没声明 KeepHelp 时 relay 也不该回这个字段。
 	s.setRelayKeptHelp(keepHelp != "" && resp.HelpKept && prevCode == resp.Code)
 	s.code = resp.Code
+	s.codePrefix, s.codeAddr, s.codeFPs = s.nodes.currentPrefix(), s.client.config.ServerAddr, s.relayFPs()
 	s.reuseToken = resp.ReuseToken // 旧 relay 不发：置空，之后不带令牌（旧 relay 本就忽略 request_code）
 	s.codeSticky = resp.CodeSticky
 	if resp.ExpiresAt == 0 && resp.CodeSticky {
@@ -637,7 +742,11 @@ func (s *ShareMode) register() error {
 	} else {
 		s.expiresAt = time.Unix(resp.ExpiresAt, 0)
 	}
-	if notice := codeChangeNotice(prevCode, resp.Code, resp.CodeSticky); notice != "" {
+	notice := codeChangeNotice(prevCode, resp.Code, resp.CodeSticky)
+	if moved && prevCode != resp.Code {
+		notice = nodeChangeNotice(prevCode, resp.Code, s.relayLabel())
+	}
+	if notice != "" {
 		s.printf("\n[!] %s\n", notice)
 	} else if prevCode == "" && !resp.CodeSticky && !s.stickyHinted {
 		s.stickyHinted = true
@@ -645,7 +754,8 @@ func (s *ShareMode) register() error {
 	}
 	s.client.setRelaySTUN(resp.STUNServers)
 	s.conflictHinted = false
-	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, s.expiresAt)
+	node := s.nodes.currentNode()
+	instructions := formatShareInstructions(resp.Code, hostInfo, s.client.config, node, s.expiresAt)
 	s.printf("\n================ 请复制给你的 AI 助手（支持 MCP 即可） ================\n%s\n", instructions)
 	s.println("========================================================")
 	// 整段复制到系统剪贴板，让未配置 MCP 的协助端也能直接按文案中的指南完成安装。
@@ -655,7 +765,8 @@ func (s *ShareMode) register() error {
 	}
 	// 升级提示放在协助信息块之外：不进剪贴板，避免被原样转给协助端。
 	if !s.updateHinted {
-		if n, ok := update.CheckSelf(version.Info(), resp.LatestVersion, resp.DownloadURL, resp.ReleasePage); ok {
+		downloadURL, releasePage := updateLinks(node, resp.UpdateInfo)
+		if n, ok := update.CheckSelf(version.Info(), resp.LatestVersion, downloadURL, releasePage); ok {
 			s.updateHinted = true
 			s.printf("\n[提示] %s\n\n", n)
 		}
@@ -663,6 +774,62 @@ func (s *ShareMode) register() error {
 	s.println("等待协助端连接...")
 	s.writeCodeFile()
 	return nil
+}
+
+// sameCodeNode 报告现在连的是不是注册 code 的那台 relay：
+//   - 注册时和现在都在列表节点上：比前缀。前缀相同就是同一个节点，地址、指纹可以随列表更新而变；前缀不同就是换了
+//     节点，地址相同也一样（地址可能换给了别的节点）。
+//   - 注册时和现在都不在列表节点上（显式模式、一直没有列表）：比地址，与没有节点列表时一样。
+//   - 一边在列表节点上、一边不在（第一次运行没有列表，列表随注册响应才下发；列表失效后回到默认地址）：比证书指纹，
+//     看两次是不是同一个节点的证书。不按地址认：同一台 relay 可以有几个地址，同一个地址也可能出示别人的证书。
+//     也不再读一次列表：注册前后列表可能变得读不了。
+func (s *ShareMode) sameCodeNode() bool {
+	onNode := s.nodes.currentNode() != nil
+	switch {
+	case onNode && s.codePrefix != "":
+		return s.nodes.currentPrefix() == s.codePrefix
+	case !onNode && s.codePrefix == "":
+		return s.client.config.ServerAddr == s.codeAddr
+	default:
+		return fpOverlap(s.codeFPs, s.relayFPs())
+	}
+}
+
+// relayFPs 是现在所连 relay 的证书指纹：在列表节点上时是该节点在列表里的 tls_fps（同一个节点可以有几张证书），
+// 否则是这条连接出示的那一个（明文连接没有）。
+func (s *ShareMode) relayFPs() []string {
+	if n := s.nodes.currentNode(); n != nil {
+		return slices.Clone(n.TLSFPs)
+	}
+	if fp := s.client.peerFingerprint(); fp != "" {
+		return []string{fp}
+	}
+	return nil
+}
+
+// fpOverlap 报告两组证书指纹有没有共同的一个（不分大小写，空串不算）。
+func fpOverlap(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if x != "" && strings.EqualFold(x, y) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// relayLabel 是提示里现在所连中转服务的写法：列表节点写名称（前缀），否则写地址。
+func (s *ShareMode) relayLabel() string {
+	if n := s.nodes.currentNode(); n != nil {
+		return "节点 " + nodeLabel(*n)
+	}
+	return "中转服务 " + s.client.config.ServerAddr
+}
+
+// nodeChangeNotice 是换了节点后协助码变了的提示：码只在发它的节点上有效。
+func nodeChangeNotice(prev, cur, relay string) string {
+	return fmt.Sprintf("已改用%s，原协助码 %s 只在原节点上有效，协助码已变更为 %s，请把新码告知协助端", relay, formatCode(prev), formatCode(cur))
 }
 
 func (s *ShareMode) registrationClientID() (string, error) {
@@ -963,7 +1130,15 @@ func (s *ShareMode) waitSessionReady(onToolHello func()) (*proto.SessionReady, e
 	// 回来等新协助端」这条路会在两分钟后被残留 deadline 打断，白白丢掉一个还没过期的
 	// 协助码去做整轮重连。relay 掉线仍由 30s 心跳的写失败 + TCP keepalive 兜住。
 	s.client.SetReadDeadline(time.Time{})
+	// 排空迁移（spec 6.3）只在这里做：没有协助端连着。进来时看一次，之后每收到心跳回应（约 30 秒一次）再看一次，
+	// 不另起定时器，也不打断读：json 解码器读超时后就不能再用了。迁移时要拨别的节点，这期间不读当前连接；
+	// 恰好此时加入的协助端会随旧连接一起断开，要用新码重新加入。
+	check := true
 	for {
+		if check && s.nodes != nil && s.nodes.migrate(s.relayDraining, s.client.peerFingerprint()) {
+			return nil, errNodeMigrated
+		}
+		check = false
 		msg, err := s.client.ReadMessage()
 		if err != nil {
 			return nil, err
@@ -977,6 +1152,7 @@ func (s *ShareMode) waitSessionReady(onToolHello func()) (*proto.SessionReady, e
 			}
 			return &ready, nil
 		case proto.MsgHeartbeat:
+			check = true
 		case proto.MsgToolHello:
 			// 会话重同步窗口（协助端重连 / session 切换）可能收到工具通道消息。
 			// ToolHello 必须在 relay 上就地应答，并把 daemon 从可能残留的旧 P2P

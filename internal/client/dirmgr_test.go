@@ -1083,7 +1083,7 @@ func TestNewDirManager(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv(directoryEnv, "")
 	os.Unsetenv(directoryEnv)
-	m := newDirManager(func(string, ...any) {})
+	m := newDirManager("", func(string, ...any) {})
 	if m == nil {
 		t.Fatal("newDirManager = nil with a home directory")
 	}
@@ -1104,14 +1104,23 @@ func TestNewDirManager(t *testing.T) {
 	}
 	const custom = "https://relay-list.example.test/v1/directory"
 	t.Setenv(directoryEnv, custom)
-	if m := newDirManager(func(string, ...any) {}); m == nil || m.url != custom {
+	if m := newDirManager("", func(string, ...any) {}); m == nil || m.url != custom {
 		t.Fatalf("newDirManager with %s set = %+v, want url %q", directoryEnv, m, custom)
+	}
+
+	// 指定了家目录（升级继任者在隔离期内用隔离前的家目录）：用它，不看当前的 HOME。
+	real := t.TempDir()
+	if m := newDirManager(real, func(string, ...any) {}); m == nil || m.path != filepath.Join(real, directoryCacheFile) {
+		t.Fatalf("newDirManager(%q) = %+v, want path under it", real, m)
 	}
 
 	// 拿不到主目录：不启用，自动模式退回内置默认节点。
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")
-	if m := newDirManager(func(string, ...any) {}); m != nil {
+	if m := newDirManager("", func(string, ...any) {}); m != nil {
 		t.Fatalf("newDirManager = %+v without a home directory, want nil", m)
+	}
+	if m := newDirManager(real, func(string, ...any) {}); m == nil {
+		t.Fatal("指定了家目录时不该再看 HOME")
 	}
 }

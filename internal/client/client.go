@@ -118,7 +118,9 @@ type Client struct {
 	// 指纹严格比对、只用这个地址声明过的传输，不退回 TOFU：那等于把身份校验降级，还会把节点地址写进指纹表。
 	// 指纹是接管时的快照，见 nodePin：会断线重连的调用方要按最新列表重新 dialNode，不要靠 Connect。
 	node *nodePin
-	mu   sync.Mutex
+	// peerFP 当前连接上 relay 出示的叶子证书指纹，没有 TLS 时为空。share 据此判断重连后连的是不是同一台 relay。
+	peerFP string
+	mu     sync.Mutex
 	// stunMu/relaySTUN：relay 在注册/加入响应里下发的 STUN 服务器（每次注册/加入覆盖）。
 	// 写在注册/加入的 goroutine，读在后台启动 P2P 的 goroutine，单独加锁。
 	stunMu    sync.Mutex
@@ -130,6 +132,33 @@ func (c *Client) setRelaySTUN(servers []string) {
 	c.stunMu.Lock()
 	c.relaySTUN = append([]string(nil), servers...)
 	c.stunMu.Unlock()
+}
+
+// serverAddr 返回当前连的 relay 地址。自动模式下 adoptNode 会在持锁时改它，别的 goroutine 要经这里读。
+func (c *Client) serverAddr() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.config.ServerAddr
+}
+
+// peerFingerprint 返回当前连接上 relay 出示的证书指纹（见 peerFP），没连着时为空。
+func (c *Client) peerFingerprint() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.peerFP
+}
+
+// connPeerFP 取连接上对端出示的叶子证书指纹。*tls.Conn 和 QUIC 连接（quictransport.Conn）都有 ConnectionState；
+// 明文连接没有，返回空串。
+func connPeerFP(conn net.Conn) string {
+	cs, ok := conn.(interface{ ConnectionState() tls.ConnectionState })
+	if !ok {
+		return ""
+	}
+	if certs := cs.ConnectionState().PeerCertificates; len(certs) > 0 {
+		return crypto.CertFingerprint(certs[0].Raw)
+	}
+	return ""
 }
 
 // relaySTUNServers 返回 relay 下发的 STUN 服务器副本。
@@ -200,6 +229,7 @@ func (c *Client) installConnLocked(conn net.Conn) {
 	}
 
 	c.conn = conn
+	c.peerFP = connPeerFP(conn)
 	c.enc = json.NewEncoder(conn)
 	c.dec = json.NewDecoder(conn)
 }
@@ -216,6 +246,7 @@ func (c *Client) Close() {
 	conn := c.conn
 	hbStop := c.hbStop
 	c.conn = nil
+	c.peerFP = ""
 	c.enc = nil
 	c.dec = nil
 	c.hbStop = nil

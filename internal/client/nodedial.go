@@ -230,6 +230,19 @@ func (c *Client) connectNodeLocked() error {
 	return nil
 }
 
+// leaveNode 退出节点模式：之后的 Connect 连 addr，按配置走 TOFU 或 CA 校验（没有可用的节点列表时就是这样）。
+// 不在节点模式时什么都不改。
+func (c *Client) leaveNode(addr string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.node == nil {
+		return
+	}
+	c.node = nil
+	c.config.ServerAddr = addr
+	c.transport = "" // 上次用的传输是节点地址上的，与 addr 无关
+}
+
 // dialStrict 拨 addr，严格比对证书指纹。证书不符时返回 *CertMismatchError：QUIC 把握手错误转成文本，
 // errors.Is 认不出，所以靠 TLS 回调记下出示的指纹，再据此换掉传输层的错误。
 func dialStrict(ctx context.Context, addr, mode string, fps []string, preferred string) (conn net.Conn, transport string, tcpErr, err error) {

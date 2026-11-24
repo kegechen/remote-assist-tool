@@ -3,15 +3,18 @@ package client
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/remote-assist/tool/internal/directory"
+	"github.com/remote-assist/tool/internal/proto"
 )
 
 // 节点列表（spec 6.2）：自动模式靠它选节点（share）、按协助码首位找节点（help）。
@@ -75,17 +78,23 @@ type dirFetch struct {
 	err  error
 }
 
-// newDirManager 返回默认配置的管理器：缓存放在主目录，CF 地址取自 REMOTE_RELAY_DIRECTORY（未设置时用内置地址）。
-// 拿不到主目录、本程序没有内置根公钥时返回 nil。每个进程只建一个：合并请求、限制重试、提示去重的状态都在实例里，
-// 每次连接新建一个，这些就都不起作用了。
-func newDirManager(logf func(format string, args ...any)) *dirManager {
+// newDirManager 返回默认配置的管理器：缓存放在主目录 home（空串表示 os.UserHomeDir），CF 地址取自
+// REMOTE_RELAY_DIRECTORY（未设置时用内置地址）。拿不到主目录、本程序没有内置根公钥时返回 nil。
+// 每个进程只建一个：合并请求、限制重试、提示去重的状态都在实例里，每次连接新建一个，这些就都不起作用了。
+//
+// 升级继任的 share 在和旧进程并存期间 HOME 指向隔离目录，要传隔离前的家目录：缓存里记着已接受的位置、
+// 吊销和本机专用地址，用一份空缓存就忘了它们（旧列表能回放），升级前所在的节点也认不出来。
+func newDirManager(home string, logf func(format string, args ...any)) *dirManager {
 	roots := directory.BuiltinRoots()
 	if !roots.Usable() {
 		return nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		home = h
 	}
 	return &dirManager{
 		path:  filepath.Join(home, directoryCacheFile),
@@ -204,6 +213,48 @@ func (m *dirManager) offer(raw []byte, source string) (*directory.Verified, erro
 		m.logUpdate(before, v, source)
 	}
 	return v, nil
+}
+
+// DropLocalAddr 删掉节点 prefix 的本机专用地址 addr（spec 6.5：连不上一次就删），删了就按固定格式提示。
+// 按地址删：缓存里记的已不是 addr（别的进程改记了新地址）时不动，也不提示。缓存读写失败时只提示缓存的问题。
+func (m *dirManager) DropLocalAddr(prefix, addr string, cause error) {
+	if m == nil {
+		return
+	}
+	var dropped bool
+	err := directory.UpdateCache(m.path, func(c *directory.Cache) (bool, error) {
+		dropped = c.DeleteLocalAddr(prefix, addr)
+		return dropped, nil
+	})
+	m.cacheNote(err)
+	if err == nil && dropped {
+		m.logf("[relay] 本机专用地址 %s 连接失败（%s），已从缓存删除，改用节点列表（默认节点优先）。如需固定使用，请设置 REMOTE_RELAY_SERVER。",
+			addr, dialFailureReason(cause))
+	}
+}
+
+// wsaeConnRefused 是 Windows 的「连接被拒绝」（WSAECONNREFUSED）：那里的 syscall.ECONNREFUSED 是 Go 自造的值，
+// errors.Is 认不出系统真实返回的错误码。Linux、macOS 的错误码都远小于它，不会误认。
+const wsaeConnRefused syscall.Errno = 10061
+
+// dialFailureReason 把拨号失败归成提示里的简短原因：证书指纹不符、访问受限、refused、timeout，其余照原文。
+func dialFailureReason(err error) string {
+	var (
+		mm    *CertMismatchError
+		errno syscall.Errno
+		ne    net.Error
+	)
+	switch {
+	case errors.As(err, &mm):
+		return "证书指纹不符"
+	case errors.Is(err, proto.ErrBlocked):
+		return "访问受限"
+	case errors.As(err, &errno) && (errno == syscall.ECONNREFUSED || errno == wsaeConnRefused):
+		return "refused"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	}
+	return err.Error()
 }
 
 // logUpdate 提示列表位置变了（spec 6.5 的「列表更新」一行），并逐个列出新出现（或原因变了）的被丢弃节点：

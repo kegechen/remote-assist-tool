@@ -169,3 +169,6 @@ func (c *Conn) RemoteAddr() net.Addr               { return c.conn.RemoteAddr() 
 func (c *Conn) SetDeadline(t time.Time) error      { return c.stream.SetDeadline(t) }
 func (c *Conn) SetReadDeadline(t time.Time) error  { return c.stream.SetReadDeadline(t) }
 func (c *Conn) SetWriteDeadline(t time.Time) error { return c.stream.SetWriteDeadline(t) }
+
+// ConnectionState 返回这条 QUIC 连接的 TLS 状态，与 *tls.Conn 的同名方法一致：调用方不分传输就能取对端证书。
+func (c *Conn) ConnectionState() tls.ConnectionState { return c.conn.ConnectionState().TLS }

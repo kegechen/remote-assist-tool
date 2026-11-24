@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -25,7 +26,7 @@ func TestUpgradedShareArgsOmitsMirrorWhenOldHadNoCodeFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"share", "--root=/srv/app", "--server", "new:8443", "--code-file", "/tmp/new.json", upgradeSuccessorFlag}
+	want := []string{"share", "--root=/srv/app", "--relay-hint", "new:8443", "--code-file", "/tmp/new.json", upgradeSuccessorFlag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -40,7 +41,7 @@ func TestUpgradedShareArgsCarriesForwardHostMirror(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"share", "--server", "new:8443", "--code-file", "/tmp/up-B/code.json", "--code-file-mirror", "/host/c.json", upgradeSuccessorFlag}
+	want := []string{"share", "--relay-hint", "new:8443", "--code-file", "/tmp/up-B/code.json", "--code-file-mirror", "/host/c.json", upgradeSuccessorFlag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -51,7 +52,7 @@ func TestUpgradedShareArgsHandlesNoArgumentShare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"share", "--server", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag}
+	want := []string{"share", "--relay-hint", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -72,7 +73,7 @@ func TestUpgradedShareArgsPreservesExplicitFalseStandaloneFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"share", "--standalone=false", "--no-auth=0", "--root", "/srv/app", "--server", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag}
+	want := []string{"share", "--standalone=false", "--no-auth=0", "--root", "/srv/app", "--relay-hint", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
@@ -101,7 +102,7 @@ func TestUpgradedShareArgsPreservesMinProto(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := append(append([]string{"share"}, form...),
-			"--server", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag)
+			"--relay-hint", "relay:8443", "--code-file", "/tmp/code.json", upgradeSuccessorFlag)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("form %v: got %#v, want %#v", form, got, want)
 		}
@@ -116,12 +117,64 @@ func TestUpgradedShareArgsDropsEnableDesktop(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"share", "--root=/srv/app", "--server", "new:8443", "--code-file", "/tmp/new.json", upgradeSuccessorFlag}
+		want := []string{"share", "--root=/srv/app", "--relay-hint", "new:8443", "--code-file", "/tmp/new.json", upgradeSuccessorFlag}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s: got %#v, want %#v", flag, got, want)
 		}
 	}
 	if isEnableDesktopFlag("--enable-desktop-x") || isEnableDesktopFlag("enable-desktop") {
 		t.Fatal("不应误伤相似参数或位置参数")
+	}
+}
+
+// 旧进程是自动模式（没写 --server）：新进程也是自动模式，只是先试旧进程所在的节点（spec 6.3）。
+// 写 --server 会把它变成显式模式，从此不再按节点列表选节点。链式升级时上一次的 --relay-hint 换成这次的。
+func TestUpgradedShareArgsAutoModeUsesRelayHint(t *testing.T) {
+	for _, form := range [][]string{
+		nil,
+		{"--relay-hint", "old:8443"},
+		{"--relay-hint=old:8443"},
+	} {
+		args := append([]string{"/opt/remote", "share", "--root=/srv/app"}, form...)
+		got, err := upgradedShareArgs(args, "relay-w.example.test:8443", "/tmp/new.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"share", "--root=/srv/app", "--relay-hint", "relay-w.example.test:8443", "--code-file", "/tmp/new.json", upgradeSuccessorFlag}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("form %v: got %#v, want %#v", form, got, want)
+		}
+	}
+}
+
+// 旧进程写了 --server（各种写法）：显式模式，照旧写 --server，不带 --relay-hint。
+func TestUpgradedShareArgsExplicitServerStaysExplicit(t *testing.T) {
+	for _, form := range [][]string{
+		{"--server", "old:1"},
+		{"--server=old:1"},
+		{"-server", "old:1"},
+		{"-server=old:1"},
+		{"--server", "old:1", "--relay-hint", "stale:8443"},
+	} {
+		args := append([]string{"/opt/remote", "share"}, form...)
+		got, err := upgradedShareArgs(args, "new:8443", "/tmp/new.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := map[string]string{}
+		for i := 0; i+1 < len(got); i++ {
+			switch got[i] {
+			case "--server", "-server", "--relay-hint":
+				last[got[i]] = got[i+1]
+			}
+		}
+		if last["--server"] != "new:8443" {
+			t.Errorf("form %v: got %#v，最后的 --server 应为 new:8443", form, got)
+		}
+		for _, a := range got {
+			if a == "--relay-hint" || strings.HasPrefix(a, "--relay-hint=") {
+				t.Errorf("form %v: got %#v，显式模式不该带 --relay-hint", form, got)
+			}
+		}
 	}
 }

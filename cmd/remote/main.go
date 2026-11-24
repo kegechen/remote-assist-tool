@@ -117,7 +117,7 @@ func main() {
 
 func runShare(args []string) {
 	fs := flag.NewFlagSet("share", flag.ExitOnError)
-	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)")
+	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)。不写 --server、也没设 REMOTE_RELAY_SERVER 时按节点列表自动选节点；写了就只连它")
 	sshAddr := fs.String("ssh", "127.0.0.1:22", "Local SSH address")
 	newInstance := fs.Bool("new-instance", false, "Start an additional independent share with a new assist code")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
@@ -139,6 +139,7 @@ func runShare(args []string) {
 	noAuth := fs.Bool("no-auth", false, "Standalone mode: use a fixed code instead of random generation, so the help side needs no --code. DANGER: any device that can reach this relay can connect and control this machine. Use ONLY on a fully trusted private LAN.")
 	codeFile := fs.String("code-file", "", "Write assist code + expiry as JSON to this file once registered (for host programs to read instead of parsing stdout)")
 	codeFileMirror := fs.String("code-file-mirror", "", "Internal (make-before-break upgrade): additionally mirror the assist code JSON here, so a prior --code-file path keeps refreshing after an in-channel upgrade")
+	relayHint := fs.String("relay-hint", "", "Internal (in-channel upgrade): the relay the previous share was on; tried first when picking a node from the relay list. Ignored when --server or REMOTE_RELAY_SERVER is set")
 	enableDesktop := fs.Bool("enable-desktop", false, "Allow the helper to view this machine's screen and inject mouse/keyboard input (screen_capture + input tools). Off by default: without it the helper cannot see or control the screen. When on, the console prints a warning the first time each helper session views the screen and the first time it controls the mouse/keyboard. An in-channel upgrade turns it off (the upgraded share runs without a visible console, so the warning could not be seen); restart share with this flag to re-enable. Windows / Linux (X11) / macOS; must run in a logged-in interactive graphical session (not a service); the lock screen and elevated/UAC windows are not controllable.")
 	minProto := fs.String("min-proto", "", "Minimum acceptable tool protocol version. Default 2 refuses to talk to 0.0.x clients; pass 1 to allow falling back to the legacy v1 channel (disables AAD binding, sealed-args enforcement and anti-replay — trusted networks only). Old clients do not have this flag, so it must be set on this (newer) side.")
 
@@ -169,6 +170,8 @@ func runShare(args []string) {
 
 	fs.Parse(args)
 	rejectPositionalArgs(fs, "share")
+	// 自动模式（spec 6.1）：没指定 relay 时按节点列表选节点。要在下面还原升级隔离的 HOME 之前取。
+	relayMode := newShareRelay(fs, *standalone, *plain, isUpgradeSuccessor, *relayHint)
 	// 参数校验紧跟 parse：非法取值要在任何启动输出和副作用之前就退出。
 	*minProto = normalizeMinProto(*minProto)
 
@@ -338,13 +341,8 @@ func runShare(args []string) {
 		fmt.Println()
 	}
 
-	// Derive STUN server if not specified
-	if *stunServer == "" && *server != "" {
-		host, _, _ := net.SplitHostPort(*server)
-		if host != "" {
-			*stunServer = net.JoinHostPort(host, "3478")
-		}
-	}
+	// Derive STUN server if not specified（自动模式下不推导，见 shareRelay.stun）
+	*stunServer = relayMode.stun(*stunServer, *server)
 
 	if !client.ValidTransport(*transport) {
 		log.Fatalf("Error: invalid --transport %q (want auto, tcp or quic)", *transport)
@@ -363,6 +361,7 @@ func runShare(args []string) {
 	}
 
 	share := client.NewShareMode(cfg, *sshAddr, *newInstance, sbCfg, *codeFile, *codeFileMirror)
+	relayMode.apply(share)
 	// 远程桌面（看屏 + 键鼠注入）必须由被控端显式 --enable-desktop 开启：默认开启会让被协助方在不知情时被看屏、被操控。
 	share.SetEnableDesktop(*enableDesktop)
 	// 真终端（PTY）默认关闭，需被控端显式 --allow-pty 开启；开放后 shell 会绕过
