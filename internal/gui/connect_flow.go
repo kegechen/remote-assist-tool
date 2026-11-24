@@ -19,6 +19,7 @@ const (
 	reasonRefused    = "refused"
 	reasonRejected   = "rejected"
 	reasonUnreach    = "unreachable"
+	reasonBlocked    = "blocked"
 	reasonOther      = "other"
 	// reasonAlreadyConnected：relay 明确告知「已有协助端且来自同一地址」。与 bad_code
 	// 区分开，提示用户先断开已有的协助端（常见是本机 webui 没关又用 CLI 连）。
@@ -28,6 +29,8 @@ const (
 // classifyConnectError 把 connect 的原始错误归一为（原因码, 人话）。
 // 顺序有讲究：旧版识别必须最先（且只认固定前缀，见 client.IsLegacyPeerError），
 // 其后「握手被对端拒绝」要排在 join 之前，免得对端回传的文本干扰分类。
+// 「被 relay 封禁」紧随其后、排在所有网络类之前：错误经 MCP 传来时只剩文本，里面常带
+// "relay connect failed" / "join failed"，不先截住就会被误报成网络不通或协助码错误。
 func classifyConnectError(err error) (code, reason string) {
 	if err == nil {
 		return "", ""
@@ -42,6 +45,8 @@ func classifyConnectError(err error) (code, reason string) {
 		return reasonPeerLegacy, "对端是旧版（0.0.x），协议版本不兼容"
 	case strings.Contains(low, "handshake failed") && strings.Contains(msg, "对端拒绝"):
 		return reasonRejected, "被对端拒绝（握手未通过）"
+	case errors.Is(err, proto.ErrBlocked) || strings.Contains(msg, proto.BlockedMessage):
+		return reasonBlocked, proto.BlockedMessage
 	case strings.Contains(low, "refused") || strings.Contains(msg, "拒绝"):
 		return reasonRefused, "连接被拒绝（中继未启动或端口不对）"
 	case errors.Is(err, context.DeadlineExceeded), strings.Contains(low, "timeout"),

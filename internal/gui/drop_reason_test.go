@@ -41,6 +41,7 @@ func TestClassifyReconnectError(t *testing.T) {
 		{"dial tcp: lookup x: no such host", reasonUnreach, true},
 		{"context deadline exceeded", reasonTimeout, true},
 		{"join failed: invalid code", reasonBadCode, true},
+		{"relay connect failed: failed to connect: 访问受限，请联系管理员。", reasonBlocked, true},
 		{"something weird", "", false},
 	}
 	for _, c := range cases {
@@ -55,7 +56,7 @@ func TestClassifyReconnectError(t *testing.T) {
 func TestDropByCodeTexts(t *testing.T) {
 	seen := map[string]string{}
 	for _, code := range []string{dropPeerGone, dropPeerRestarted, dropTunnelLost, dropLocalExit, dropGeneric,
-		reasonUnreach, reasonRefused, reasonTimeout, reasonBadCode, reasonRejected, reasonPeerLegacy} {
+		reasonUnreach, reasonRefused, reasonTimeout, reasonBadCode, reasonRejected, reasonPeerLegacy, reasonBlocked} {
 		i := dropByCode(code)
 		if i.Code != code || i.Text == "" || i.Hint == "" {
 			t.Errorf("%s 文案不全: %+v", code, i)

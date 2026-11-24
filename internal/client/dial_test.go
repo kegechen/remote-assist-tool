@@ -35,24 +35,46 @@ func setDialTimeout(t *testing.T, d time.Duration) {
 
 // freePort 拿一个 TCP、UDP 都空闲的端口号：测试要让 TCP 与 QUIC 共用同一个 host:port，
 // 和生产环境（:8443 同号）一致。
+//
+// Windows 会按 100 个一段给 Hyper-V 等保留端口，TCP 与 UDP 的保留段互不相同，而系统分配的
+// 临时端口大致连续：一种协议先占到的端口可能连着几十个都落在另一种协议的保留段里。所以两种
+// 协议轮流先占，多试几次。
 func freePort(t *testing.T) string {
 	t.Helper()
-	for i := 0; i < 20; i++ {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
+	for i := 0; i < 100; i++ {
+		first, second := "tcp", "udp"
+		if i%2 == 1 {
+			first, second = second, first
+		}
+		port, err := bindAndRelease(first, "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		port := ln.Addr().(*net.TCPAddr).Port
-		ln.Close()
-		pc, err := net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(port))
-		if err != nil {
-			continue
+		addr := "127.0.0.1:" + strconv.Itoa(port)
+		if _, err := bindAndRelease(second, addr); err == nil {
+			return addr
 		}
-		pc.Close()
-		return "127.0.0.1:" + strconv.Itoa(port)
 	}
 	t.Fatal("找不到 TCP/UDP 同时空闲的端口")
 	return ""
+}
+
+// bindAndRelease 在 addr 上占一下 network（tcp/udp）端口随即释放，返回端口号。
+func bindAndRelease(network, addr string) (int, error) {
+	if network == "tcp" {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return 0, err
+		}
+		defer ln.Close()
+		return ln.Addr().(*net.TCPAddr).Port, nil
+	}
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer pc.Close()
+	return pc.LocalAddr().(*net.UDPAddr).Port, nil
 }
 
 func newCertPair(t *testing.T) (cert, key string) {
@@ -322,7 +344,7 @@ func TestQUICEnforcesPinLearnedOverTCP(t *testing.T) {
 	}
 	dial := func(addr, transport string) error {
 		c := NewClient(&Config{ServerAddr: addr, UseTLS: true, InsecureSkip: true, Transport: transport})
-		conn, _, err := c.dialRelay(tlsConfig, "")
+		conn, _, _, err := c.dialRelay(tlsConfig, "")
 		if conn != nil {
 			conn.Close()
 		}

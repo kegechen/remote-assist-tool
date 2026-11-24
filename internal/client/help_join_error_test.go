@@ -14,6 +14,10 @@ func TestJoinFailureErrorMapping(t *testing.T) {
 	if err := joinFailureError(proto.ErrJoinSessionBusySameAddr); !errors.Is(err, ErrSessionBusySameAddr) {
 		t.Fatalf("同源占用应映射为 ErrSessionBusySameAddr，实际 %v", err)
 	}
+	// 封禁最先判：不能被归进 ErrJoinFailed，否则会提示用户去核对协助码。
+	if err := joinFailureError(proto.BlockedMessage); !errors.Is(err, proto.ErrBlocked) || errors.Is(err, ErrJoinFailed) {
+		t.Fatalf("封禁应映射为 proto.ErrBlocked，实际 %v", err)
+	}
 	for _, raw := range []string{"join failed", "", "something else"} {
 		err := joinFailureError(raw)
 		if !errors.Is(err, ErrJoinFailed) {

@@ -48,6 +48,8 @@ func dropByCode(code string) dropInfo {
 		return dropInfo{code, "被控端拒绝连接", "对方拒绝了本次握手，请让对方确认授权后重新连接"}
 	case reasonPeerLegacy:
 		return dropInfo{code, "被控端版本不兼容", "对端为旧版（0.0.x），请升级被控端"}
+	case reasonBlocked:
+		return dropInfo{code, "访问受限", "访问受限，请联系管理员。"}
 	}
 	return dropInfo{dropGeneric, "连接已断开", "与被控端的连接已断开，正在尝试重新连接"}
 }
@@ -75,7 +77,7 @@ func classifyDropError(err error) dropInfo {
 func classifyReconnectError(err error) (dropInfo, bool) {
 	code, _ := classifyConnectError(err)
 	switch code {
-	case reasonUnreach, reasonRefused, reasonTimeout, reasonBadCode, reasonRejected, reasonPeerLegacy, reasonAlreadyConnected:
+	case reasonUnreach, reasonRefused, reasonTimeout, reasonBadCode, reasonRejected, reasonPeerLegacy, reasonAlreadyConnected, reasonBlocked:
 		return dropByCode(code), true
 	}
 	return dropInfo{}, false

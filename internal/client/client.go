@@ -166,12 +166,12 @@ func (c *Client) Connect() error {
 		}
 	}
 
-	conn, transport, err := c.dialRelay(tlsConfig, c.transport)
+	conn, transport, tcpErr, err := c.dialRelay(tlsConfig, c.transport)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 	if c.config.Transport == "" || c.config.Transport == TransportAuto {
-		logTransport(c.config.ServerAddr, transport, c.transport)
+		logTransport(c.config.ServerAddr, transport, c.transport, tcpErr)
 	}
 	c.transport = transport
 

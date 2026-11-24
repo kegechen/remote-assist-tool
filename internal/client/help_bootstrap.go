@@ -340,6 +340,13 @@ func (b *HelpMCPBootstrap) connectWith(ctx context.Context, a connectArgs) (json
 	return b.connectLocked(ctx, a, false)
 }
 
+// blockedConnectError 是被 relay 封禁时 connect 工具返回给 AI agent 的错误。不带
+// "relay connect failed" / "join failed" 前缀：前者像网络问题、后者像协助码错误，agent
+// 都会去重试或换码；这里明说重试无效。仍包着 proto.ErrBlocked，调用方可用 errors.Is 判定。
+func blockedConnectError() error {
+	return fmt.Errorf("access_denied: %w 管理员解除限制前，重试 connect 无效。", proto.ErrBlocked)
+}
+
 // connectLocked 建立（或复用）一次连接，调用方须持有 connectMu。fromReconnect 标明调用
 // 来自传输中的自动重连：那是在沿用缓存参数，不代表调用方的新意图，不能动缓存。
 func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fromReconnect bool) (json.RawMessage, error) {
@@ -426,11 +433,17 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
 	if err := h.client.Connect(); err != nil {
+		if errors.Is(err, proto.ErrBlocked) {
+			return nil, blockedConnectError()
+		}
 		return nil, fmt.Errorf("relay connect failed: %w", err)
 	}
 	resp, err := h.join()
 	if err != nil {
 		h.client.Close()
+		if errors.Is(err, proto.ErrBlocked) {
+			return nil, blockedConnectError()
+		}
 		// join 失败已经有面向用户的明确文案（含「已有协助端」的可识别错误），
 		// 不再包一层 "join failed"，否则会出现 "join failed: join failed: ..." 的嵌套。
 		if errors.Is(err, ErrJoinFailed) || errors.Is(err, ErrSessionBusySameAddr) {

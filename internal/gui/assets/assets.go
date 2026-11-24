@@ -429,6 +429,8 @@ es.addEventListener('reconnect-fail',e=>{
 es.addEventListener('lost',e=>{
   const d=parseDrop(e);if(d)dropInfo=d;
   setStatus(false,d?'丢失（'+d.text+'）':'丢失');
+  // 被 relay 封禁：只说那一句，不附重试建议——重试只会继续被拒
+  if(d&&d.reason==='blocked'){termLog('<span class="err">'+esc(d.hint)+'</span>');return}
   termLog('<span class="err">自动重连失败'+(d?'：'+esc(d.text)+'。'+esc(d.hint):'')+'；请处理后重新点击连接</span>');
 });
 es.addEventListener('upgrade-progress',e=>{const n=$('#upgrade-notice');n.style.display='flex';n.className='';$('#upgrade-msg').textContent=e.data});
@@ -590,7 +592,7 @@ async function doConnect(allowLegacy){
     connToastHide();setStatus(false,'未连接');termLog('<span class="meta">已取消连接</span>');return;
   }
   setStatus(false,'失败');
-  if(r.error)termLog('<span class="err">'+esc(r.error)+'</span>');
+  if(r.error&&r.code!=='blocked')termLog('<span class="err">'+esc(r.error)+'</span>');
   if(r.code==='peer_legacy'&&r.needs_confirm){
     // 公网中继上不自动降级：中继是不可信第三方，可伪造「旧版」应答诱导降级，必须由用户确认
     connToastShow('confirm','对端似乎是旧版，需用户确认才能用兼容模式连接',

@@ -7,11 +7,13 @@ package quictransport
 
 import (
 	"crypto/tls"
+	"errors"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/remote-assist/tool/internal/proto"
 )
 
 // ALPN 区分 relay 协议与同端口上可能存在的其他 QUIC 服务（如 HTTP/3）。
@@ -83,6 +85,9 @@ type Conn struct {
 	closeOnce sync.Once
 	// syncClose 客户端侧：Close 同步等对端、同步发出 CONNECTION_CLOSE（见 clientCloseLinger）。
 	syncClose bool
+	// client 客户端侧：relay 以封禁原因关闭连接时，Read/Write 返回 proto.ErrBlocked。
+	// relay 侧不做这层映射：客户端关连接时填什么原因都不该改变 relay 的处理。
+	client bool
 }
 
 var _ net.Conn = (*Conn)(nil)
@@ -94,15 +99,33 @@ func NewConn(conn *quic.Conn, stream *quic.Stream) *Conn {
 
 // NewClientConn 同 NewConn，但 Close 同步完成，进程随后退出也能让 relay 立刻感知断开。
 func NewClientConn(conn *quic.Conn, stream *quic.Stream) *Conn {
-	return &Conn{conn: conn, stream: stream, syncClose: true}
+	return &Conn{conn: conn, stream: stream, syncClose: true, client: true}
 }
 
-func (c *Conn) Read(p []byte) (int, error) { return c.stream.Read(p) }
+// IsBlockedClose 报告 err 是否是 relay 因封禁关闭了 QUIC 连接：对端发来的应用层关闭，
+// 原因恰为 proto.BlockedMessage。旧 relay 关连接不带原因，不会被认成封禁。
+func IsBlockedClose(err error) bool {
+	var ae *quic.ApplicationError
+	return errors.As(err, &ae) && ae.Remote && ae.ErrorMessage == proto.BlockedMessage
+}
+
+func (c *Conn) mapErr(err error) error {
+	if err != nil && c.client && IsBlockedClose(err) {
+		return proto.ErrBlocked
+	}
+	return err
+}
+
+func (c *Conn) Read(p []byte) (int, error) {
+	n, err := c.stream.Read(p)
+	return n, c.mapErr(err)
+}
 
 func (c *Conn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return c.stream.Write(p)
+	n, err := c.stream.Write(p)
+	return n, c.mapErr(err)
 }
 
 // Close 按 net.Conn 语义立即唤醒阻塞中的 Read 与 Write，同时尽量把已写出的数据送达：

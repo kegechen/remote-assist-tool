@@ -363,13 +363,25 @@ func (s *ShareMode) reconnectWithBackoff() {
 			s.client.StartHeartbeatLoop(30 * time.Second)
 			return
 		}
-		s.printf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay)
-		time.Sleep(delay)
-		delay *= 2
-		if delay > reconnectMaxDelay {
-			delay = reconnectMaxDelay
-		}
+		line, wait, next := reconnectFailure(attempt, err, delay)
+		s.printf("%s", line)
+		time.Sleep(wait)
+		delay = next
 	}
+}
+
+// reconnectFailure 决定一次重连失败后打印什么、等多久、下一次的退避间隔。
+// 被 relay 封禁时只显示那一句话，并直接按上限间隔等：快速重试无用，解除后自动恢复。
+func reconnectFailure(attempt int, err error, delay time.Duration) (line string, wait, next time.Duration) {
+	if errors.Is(err, proto.ErrBlocked) {
+		return fmt.Sprintf("连接失败(第 %d 次): %s %s 后重试...\n", attempt, proto.BlockedMessage, reconnectMaxDelay),
+			reconnectMaxDelay, reconnectMaxDelay
+	}
+	next = delay * 2
+	if next > reconnectMaxDelay {
+		next = reconnectMaxDelay
+	}
+	return fmt.Sprintf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay), delay, next
 }
 
 // rapidReconnectBackoff 根据上一会话存活时长与连续快速失败次数，决定重连前的退避。

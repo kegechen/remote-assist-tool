@@ -832,28 +832,41 @@ func (s *Server) guardLoop() {
 			continue
 		}
 
-		// 自动重连，轻量退避，最多 6 次（约 1+2+3+4+5+5 = 20s）
 		s.broadcast(sseEventWithInfo("reconnecting", why, nil))
-		outcome := reconnectFailed
-		backoff := []time.Duration{1, 2, 3, 4, 5, 5}
-		for attempt, d := range backoff {
-			time.Sleep(d * time.Second)
-			outcome = s.tryReconnect(gen, code, server, noAuth, minProto)
-			if outcome != reconnectFailed {
-				break
-			}
-			// 重连时的拨号/握手错误比最初的断线原因更接近“现在为什么连不上”
-			if info, ok := s.takeReconnectFailure(); ok {
-				why = info
-			}
-			s.broadcast(sseEventWithInfo("reconnect-fail", why, map[string]any{"retry": attempt + 1, "max": len(backoff)}))
-		}
+		outcome, why := s.autoReconnect(why, func() reconnectOutcome {
+			return s.tryReconnect(gen, code, server, noAuth, minProto)
+		})
 		// reconnectSuperseded：用户在退避/连接期间自己接管了连接（主动断开或改连别的
 		// share）。别再广播 lost 盖掉用户当前看到的状态；仅在重连确实彻底失败时才报 lost。
 		if outcome == reconnectFailed {
 			s.broadcast(sseEventWithInfo("lost", why, nil))
 		}
 	}
+}
+
+// reconnectBackoff 自动重连的轻量退避，最多 6 次（约 1+2+3+4+5+5 = 20s）。var 仅为测试可调。
+var reconnectBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second}
+
+// autoReconnect 按 reconnectBackoff 退避调用 try，每次失败广播 reconnect-fail；返回最终结果
+// 与最新的断线原因。被 relay 封禁时立即停止：重试只会继续被拒，不该再让用户看着它一次次失败。
+func (s *Server) autoReconnect(why dropInfo, try func() reconnectOutcome) (reconnectOutcome, dropInfo) {
+	outcome := reconnectFailed
+	for attempt, d := range reconnectBackoff {
+		time.Sleep(d)
+		outcome = try()
+		if outcome != reconnectFailed {
+			break
+		}
+		// 重连时的拨号/握手错误比最初的断线原因更接近“现在为什么连不上”
+		if info, ok := s.takeReconnectFailure(); ok {
+			why = info
+		}
+		if why.Code == reasonBlocked {
+			break
+		}
+		s.broadcast(sseEventWithInfo("reconnect-fail", why, map[string]any{"retry": attempt + 1, "max": len(reconnectBackoff)}))
+	}
+	return outcome, why
 }
 
 // reconnectOutcome 表示一次自动重连尝试的结果。

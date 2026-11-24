@@ -58,11 +58,15 @@ var (
 	ErrSessionBusySameAddr = errors.New("该协助码已有协助端在连接（与当前连接来自同一地址，通常是本机另一个客户端或网页未断开）。同一协助码同时只允许一个协助端，请先在已连接的协助端断开后重试")
 )
 
-// joinFailureError 把 JoinResponse.Error 映射为面向用户的错误。只有 relay 明确下发
+// joinFailureError 把 JoinResponse.Error 映射为面向用户的错误。被 relay 封禁最先判：
+// 返回 proto.ErrBlocked，不归入 join 失败，免得被当成协助码错误。只有 relay 明确下发
 // 「同源地址已有协助端」时才用专用文案，其余（含旧 relay 的统一 "join failed"）都用
 // 并列原因提示，防止用户只怀疑协助码。
 func joinFailureError(respErr string) error {
-	if respErr == proto.ErrJoinSessionBusySameAddr {
+	switch respErr {
+	case proto.BlockedMessage:
+		return proto.ErrBlocked
+	case proto.ErrJoinSessionBusySameAddr:
 		return ErrSessionBusySameAddr
 	}
 	return ErrJoinFailed

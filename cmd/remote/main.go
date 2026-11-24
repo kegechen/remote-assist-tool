@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -466,13 +467,13 @@ func runHelp(args []string) {
 		if *code == "" {
 			boot := client.NewHelpMCPBootstrap(cfg)
 			if err := boot.Run(context.Background()); err != nil {
-				fmt.Fprintf(os.Stderr, "\n连接中断: %v\nMCP 通道已断开。请让 AI agent 重新调用 connect 工具重连（或重启此 MCP server）。\n", err)
+				fmt.Fprint(os.Stderr, helpFailureText(err, true))
 				os.Exit(1)
 			}
 		} else {
 			help := client.NewHelpModeMCP(cfg, *code)
 			if err := help.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "\n连接中断: %v\nMCP 通道已断开。请让 AI agent 重新调用 connect 工具重连（或重启此 MCP server）。\n", err)
+				fmt.Fprint(os.Stderr, helpFailureText(err, true))
 				os.Exit(1)
 			}
 		}
@@ -480,12 +481,24 @@ func runHelp(args []string) {
 	} else {
 		help := client.NewHelpMode(cfg, *code, *listenAddr)
 		if err := help.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "\n连接中断: %v\n协助会话已结束。如需继续，请重新运行 remote help（SSH 隧道断开后原 ssh 会话也需重连）。\n", err)
+			fmt.Fprint(os.Stderr, helpFailureText(err, false))
 			os.Exit(1)
 		}
 	}
 
 	fmt.Println("\nSession ended.")
+}
+
+// helpFailureText 是 help 异常结束时打到 stderr 的文字。被 relay 封禁时只给那一句话：
+// 「请重新运行 / 重新 connect」在封禁期内无效，留着只会让人反复重试。
+func helpFailureText(err error, mcp bool) string {
+	if errors.Is(err, proto.ErrBlocked) {
+		return "\n" + proto.BlockedMessage + "\n"
+	}
+	if mcp {
+		return fmt.Sprintf("\n连接中断: %v\nMCP 通道已断开。请让 AI agent 重新调用 connect 工具重连（或重启此 MCP server）。\n", err)
+	}
+	return fmt.Sprintf("\n连接中断: %v\n协助会话已结束。如需继续，请重新运行 remote help（SSH 隧道断开后原 ssh 会话也需重连）。\n", err)
 }
 
 // rejectPositionalArgs 在解析后拦下任何多余的位置参数。

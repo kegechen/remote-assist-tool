@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/remote-assist/tool/internal/client"
+	"github.com/remote-assist/tool/internal/proto"
 )
 
 var errLegacy = errors.New("handshake failed: " + client.LegacyPeerMarker + "工具协议版本不兼容：对端（被协助端）只支持 v1")
@@ -128,6 +130,13 @@ func TestClassifyConnectError(t *testing.T) {
 		{errors.New("relay connect failed: failed to connect: dial tcp: lookup x: no such host"), reasonUnreach},
 		{errors.New("handshake failed: 对端拒绝工具通道握手：x"), reasonRejected},
 		{errors.New("something else"), reasonOther},
+		// 被 relay 封禁：MCP 传来的文本里带着 relay connect failed / join failed，必须先于它们截住。
+		{errors.New("connect failed: access_denied: 访问受限，请联系管理员。 管理员解除限制前，重试 connect 无效。"), reasonBlocked},
+		{errors.New("relay connect failed: failed to connect: 访问受限，请联系管理员。"), reasonBlocked},
+		{errors.New("join failed: join failed: 访问受限，请联系管理员。"), reasonBlocked},
+		{fmt.Errorf("x: %w", proto.ErrBlocked), reasonBlocked},
+		// 对端回传的拒绝原因里即使带着这句话，也是对端拒绝，不是 relay 封禁。
+		{errors.New("handshake failed: 对端拒绝工具通道握手：访问受限，请联系管理员。"), reasonRejected},
 	}
 	for _, c := range cases {
 		if got, _ := classifyConnectError(c.err); got != c.code {
