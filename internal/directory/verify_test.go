@@ -168,6 +168,24 @@ func TestVerifyRejectsMalformedInput(t *testing.T) {
 	mustVerify(t, f, append(slices.Clone(clean), " \r\n"...), directory.State{})
 }
 
+// 验签之前就会出的错（这里是信封里的未知字段）也会打到终端、写进 relay 每次刷新的日志，而里面的文本由对方决定：
+// 要有长度上限，也不能带控制字符。
+func TestVerifyErrorTextIsBounded(t *testing.T) {
+	f := dirtest.New(t)
+	clean := f.Sign(f.Body(f.Entry("A")))
+	name := strings.Repeat(`\u001b`, 30000) // JSON 转义，解出来是控制字符
+	raw := append([]byte(`{"`+name+`":"x",`), clean[1:]...)
+	_, err := verify(t, f, raw, directory.State{})
+	wantErr(t, err, directory.ErrMalformed, "directory")
+	msg := err.Error()
+	if len(msg) > 4096 {
+		t.Errorf("error text is %d bytes, want it clipped", len(msg))
+	}
+	if !strings.Contains(msg, "truncated") || strings.Contains(msg, "\x1b") {
+		t.Errorf("error %.200q... should be escaped and say it was truncated", msg)
+	}
+}
+
 // tamper 改写已签名列表的正文但保留原签名，模拟传输中被篡改。
 func tamper(t *testing.T, raw []byte, mod func(*directory.Body)) []byte {
 	t.Helper()

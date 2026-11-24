@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"sync"
 	"time"
@@ -31,7 +29,6 @@ const (
 
 	directoryFile         = "directory.json"
 	directoryFetchTimeout = 30 * time.Second
-	directoryMaxRedirects = 5
 	// directoryRecheck 是重新验签手里那份列表的间隔：列表、状态密钥授权、本节点证书都会过期，
 	// 过期要在使用时生效，不能等下一次拉取成功（拉取可能一直失败）。验一次只要几十次 ed25519 验签。
 	directoryRecheck = time.Minute
@@ -43,12 +40,8 @@ func ValidateNodeMode(cfg *Config) error {
 	if cfg.DirectoryURL == "" {
 		return nil
 	}
-	u, err := url.Parse(cfg.DirectoryURL)
-	if err != nil {
-		return fmt.Errorf("directory URL %q: %w", cfg.DirectoryURL, err)
-	}
-	if u.Scheme != "https" || u.Host == "" || u.User != nil {
-		return fmt.Errorf("directory URL %q must be an https URL with a host and no credentials", cfg.DirectoryURL)
+	if err := directory.CheckURL(cfg.DirectoryURL); err != nil {
+		return err
 	}
 	if cfg.DirectoryRefresh != 0 && cfg.DirectoryRefresh < MinDirectoryRefresh {
 		return fmt.Errorf("directory refresh %s is shorter than the minimum %s", cfg.DirectoryRefresh, MinDirectoryRefresh)
@@ -169,7 +162,7 @@ func newNodeDirectory(cfg *Config) (*nodeDirectory, error) {
 		d.now = time.Now
 	}
 	if d.client == nil {
-		d.client = defaultDirectoryClient()
+		d.client = directory.NewHTTPClient(directoryFetchTimeout)
 	}
 	// 缓存坏了不能带病启动：之后的每次写回都会被拒（见 directory.UpdateCache），节点模式永远起不来。
 	// 错误里带着路径；损坏的删掉即可重置，更新版本写的要升级 relay。
@@ -189,21 +182,6 @@ func newNodeDirectory(cfg *Config) (*nodeDirectory, error) {
 	return d, nil
 }
 
-func defaultDirectoryClient() *http.Client {
-	return &http.Client{
-		Timeout: directoryFetchTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme != "https" {
-				return fmt.Errorf("refusing redirect to non-https URL %s", req.URL.Redacted())
-			}
-			if len(via) >= directoryMaxRedirects {
-				return fmt.Errorf("stopped after %d redirects", directoryMaxRedirects)
-			}
-			return nil
-		},
-	}
-}
-
 // current 返回当前可用的列表与本节点。每隔 directoryRecheck（或时钟回拨、缓存换过）重新验签一次，
 // 过期、吊销在使用时生效。
 func (d *nodeDirectory) current() nodeView {
@@ -218,7 +196,7 @@ func (d *nodeDirectory) current() nodeView {
 	var summary string
 	switch {
 	case err != nil:
-		summary = "Node mode: the node directory is no longer valid (" + errorClass(err) + "), issuing random codes and enforcing no node status until a valid one is fetched"
+		summary = "Node mode: the node directory is no longer valid (" + directory.ErrorClass(err) + "), issuing random codes and enforcing no node status until a valid one is fetched"
 	case v == nil:
 		summary = "Node mode: no node directory yet, issuing random codes until one is fetched"
 	default:
@@ -248,40 +226,11 @@ func (d *nodeDirectory) current() nodeView {
 	return view
 }
 
-// errorClass 把验证错误归成稳定的类别，用于判断状态有没有变化（错误原文里带着时间，每次都不同）。
-func errorClass(err error) string {
-	for _, e := range []error{directory.ErrExpired, directory.ErrNotYetValid, directory.ErrRevoked, directory.ErrRollback, directory.ErrBadSignature, directory.ErrMalformed, directory.ErrNoRoots} {
-		if errors.Is(err, e) {
-			return e.Error()
-		}
-	}
-	return "invalid"
-}
-
-// fetch 拉取一份列表原文，大小不超过 directory.MaxRawSize。
+// fetch 拉取一份列表原文，大小不超过 directory.MaxRawSize。注入的测试客户端可能没设超时，这里再用 ctx 限一次。
 func (d *nodeDirectory) fetch(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, directoryFetchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", d.url, resp.Status)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, directory.MaxRawSize+1))
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", d.url, err)
-	}
-	if len(data) > directory.MaxRawSize {
-		return nil, fmt.Errorf("GET %s: response larger than %d bytes", d.url, directory.MaxRawSize)
-	}
-	return data, nil
+	return directory.Fetch(ctx, d.client, d.url)
 }
 
 // refreshDirectory 拉取一次列表：验签、位置不回退、未过期才原子写回 <StateDir>/directory.json 并生效。

@@ -167,10 +167,12 @@ func (e *VerifyError) Error() string {
 
 func (e *VerifyError) Unwrap() error { return e.Err }
 
+// verr 构造 VerifyError。Msg 里常有没验过签的内容（未知字段名、签名者名、解析错误），验签之前就会出现，
+// 而它会打到终端、写进 relay 每次刷新的日志：截短并转义，同 Fetch 的错误。
 func verr(layer string, err error, format string, args ...any) *VerifyError {
 	msg := ""
 	if format != "" {
-		msg = fmt.Sprintf(format, args...)
+		msg = clipPrintable(fmt.Sprintf(format, args...))
 	}
 	return &VerifyError{Layer: layer, Err: err, Msg: msg}
 }
