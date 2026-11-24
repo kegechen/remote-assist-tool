@@ -722,25 +722,44 @@ func TestRecordsActiveDoNotEvictEnded(t *testing.T) {
 // 超出上限不逐条裁剪（裁剪是 O(n)，而开记录时持有名单的写锁）：留 1/8 的余量，写盘与加载时再精确裁剪。
 func TestRecordsTrimIsBatched(t *testing.T) {
 	clk := newFakeClock()
-	path := filepath.Join(t.TempDir(), "records.json")
-	r, err := OpenRecords(RecordsConfig{Path: path, Now: clk.Now, MaxRecords: 80})
+	since := clk.Now().Unix()
+	fill := func(r *Records, check func(i, n int)) {
+		for i := 1; i <= 200; i++ {
+			key := fmt.Sprintf("192.0.2.%d", i)
+			r.start(Record{Target: TargetIP, Key: key, Reason: "manual", Actor: "op", Since: since, Permanent: true})
+			r.end(TargetIP, key, banRef{since: since, permanent: true}, EndUnban, since+1, "op")
+			check(i, len(r.Snapshot()))
+		}
+	}
+
+	// 逐条的条数检查放在纯内存的 Records 上：持久化的 Records 有后台 saver，它第一次写盘是立即触发的，
+	// 写盘会把条数精确裁到上限；它在循环的哪一步运行取决于调度，会让「85 条没超出余量」的断言时有时无。
+	mem, err := OpenRecords(RecordsConfig{Now: clk.Now, MaxRecords: 80})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = r.Close() }) // 中途失败也要释放文件锁，临时目录才删得掉
-	since := clk.Now().Unix()
-	for i := 1; i <= 200; i++ {
-		key := fmt.Sprintf("192.0.2.%d", i)
-		r.start(Record{Target: TargetIP, Key: key, Reason: "manual", Actor: "op", Since: since, Permanent: true})
-		r.end(TargetIP, key, banRef{since: since, permanent: true}, EndUnban, since+1, "op")
-		n := len(r.Snapshot())
+	t.Cleanup(func() { _ = mem.Close() })
+	fill(mem, func(i, n int) {
 		if n > 90 {
 			t.Fatalf("第 %d 条之后内存里有 %d 条，应不超过上限 80 加余量 10", i, n)
 		}
 		if i == 85 && n != 85 {
 			t.Fatalf("85 条没超出余量，不应裁剪：实际 %d 条", n)
 		}
+	})
+
+	// 持久化的只断言不超过余量（写盘只会让条数更少）和写盘后的最终结果。
+	path := filepath.Join(t.TempDir(), "records.json")
+	r, err := OpenRecords(RecordsConfig{Path: path, Now: clk.Now, MaxRecords: 80})
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = r.Close() }) // 中途失败也要释放文件锁，临时目录才删得掉
+	fill(r, func(i, n int) {
+		if n > 90 {
+			t.Fatalf("第 %d 条之后内存里有 %d 条，应不超过上限 80 加余量 10", i, n)
+		}
+	})
 	if err := r.Close(); err != nil { // 写盘时精确裁剪
 		t.Fatal(err)
 	}
