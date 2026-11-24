@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"math/rand/v2"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -39,6 +40,9 @@ func setDialTimeout(t *testing.T, d time.Duration) {
 // Windows 会按 100 个一段给 Hyper-V 等保留端口，TCP 与 UDP 的保留段互不相同，而系统分配的
 // 临时端口大致连续：一种协议先占到的端口可能连着几十个都落在另一种协议的保留段里。所以两种
 // 协议轮流先占，多试几次。
+//
+// 保留段常常连着几百个，两种协议的分配计数器又可能同时落在对方的保留段里（建连接多的测试
+// 会把 TCP 计数器推得很快），这时轮流先占也拿不到，再到临时端口区以外随机挑。
 func freePort(t *testing.T) string {
 	t.Helper()
 	for i := 0; i < 100; i++ {
@@ -52,6 +56,17 @@ func freePort(t *testing.T) string {
 		}
 		addr := "127.0.0.1:" + strconv.Itoa(port)
 		if _, err := bindAndRelease(second, addr); err == nil {
+			return addr
+		}
+	}
+	// 20000–31999 在 Windows（49152 起）和 Linux（默认 32768 起）的临时端口区以外，
+	// 挑中之后也不会被别的连接临时占走。
+	for i := 0; i < 200; i++ {
+		addr := "127.0.0.1:" + strconv.Itoa(20000+rand.IntN(12000))
+		if _, err := bindAndRelease("tcp", addr); err != nil {
+			continue
+		}
+		if _, err := bindAndRelease("udp", addr); err == nil {
 			return addr
 		}
 	}
