@@ -30,6 +30,9 @@ type HelpMode struct {
 	// nodes 非 nil 表示自动模式（UseNodeList）：按协助码首位找节点。defaultAddr 是没有能用的列表时连的地址。
 	nodes       *helpNodes
 	defaultAddr string
+	// stunFollowsRelay：config.STUNServer 为空时用实际连上的 relay 主机的 3478（见 p2pSTUN）。进程是自动模式时就开，
+	// 与这次有没有节点列表无关：调用方这时没按默认地址推导 STUN，MCP connect 带了 server、拿不到家目录时也要靠它。
+	stunFollowsRelay bool
 }
 
 // NewHelpMode 创建协助模式
@@ -200,6 +203,11 @@ func (h *HelpMode) Run() error {
 
 		// 尝试 P2P 直连
 		p2pMode := p2p.ParseP2PMode(h.client.config.P2PMode)
+		if server := h.client.serverAddr(); lanSkipsP2P(p2pMode, server) {
+			// 显式模式在连接前已按 --server 判断过（cmd/remote）；自动模式要连上才知道连的是哪台、用的哪个地址。
+			fmt.Fprintf(os.Stderr, "P2P: relay %s 是私网或本机地址，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", server)
+			p2pMode = p2p.P2PModeDisabled
+		}
 		if p2pMode != p2p.P2PModeDisabled {
 			tunnel, err := h.negotiateP2P(p2pMode, resp.SessionID)
 			if err != nil {
@@ -219,6 +227,13 @@ func (h *HelpMode) Run() error {
 		printf("\n在另一个终端运行:  ssh -p %s user@127.0.0.1\n", getPort(h.listenAddr))
 		return h.handleTunnel()
 	}
+}
+
+// lanSkipsP2P 报告是否因 relay 在私网/本机（standalone / 同 LAN）而跳过 P2P：relay 已是 LAN 直连，P2P 多余，
+// standalone 还不启 STUN、打洞必然超时。只改 auto，required 尊重用户的意思。server 是实际连着的 relay 地址：
+// 自动模式下连上之后才知道（spec 6.4），显式模式下就是指定的那个。
+func lanSkipsP2P(mode p2p.P2PMode, server string) bool {
+	return mode == p2p.P2PModeAuto && IsLANServer(server)
 }
 
 // newHelpP2PManager 建 help 端的 P2P manager。变量以便测试看到传进去的 STUN 地址。

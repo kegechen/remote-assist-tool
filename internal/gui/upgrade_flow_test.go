@@ -83,6 +83,7 @@ type fakeToolCall struct {
 	Name      string
 	Argv      []string
 	TimeoutMS int
+	Args      map[string]any // 工具的全部参数
 }
 
 // fakeRemote 在 fakeServer 上按工具名应答，并按顺序记下每次调用。handle 返回
@@ -93,6 +94,11 @@ type fakeRemote struct {
 }
 
 func (f *fakeRemote) serve(srv *fakeServer, handle func(name string, argv []string) (string, string)) {
+	f.serveCalls(srv, func(c fakeToolCall) (string, string) { return handle(c.Name, c.Argv) })
+}
+
+// serveCalls 同 serve，handle 拿到整条调用（含全部参数）。
+func (f *fakeRemote) serveCalls(srv *fakeServer, handle func(c fakeToolCall) (string, string)) {
 	go func() {
 		for srv.fromClient.Scan() {
 			var req struct {
@@ -105,7 +111,7 @@ func (f *fakeRemote) serve(srv *fakeServer, handle func(name string, argv []stri
 			if json.Unmarshal(srv.fromClient.Bytes(), &req) != nil || req.ID == 0 {
 				continue
 			}
-			call := fakeToolCall{Name: req.Params.Name}
+			call := fakeToolCall{Name: req.Params.Name, Args: req.Params.Arguments}
 			if ms, ok := req.Params.Arguments["timeout_ms"].(float64); ok {
 				call.TimeoutMS = int(ms)
 			}
@@ -118,7 +124,7 @@ func (f *fakeRemote) serve(srv *fakeServer, handle func(name string, argv []stri
 			f.mu.Lock()
 			f.calls = append(f.calls, call)
 			f.mu.Unlock()
-			text, errMsg := handle(call.Name, call.Argv)
+			text, errMsg := handle(call)
 			var resp map[string]any
 			if errMsg != "" {
 				resp = map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32000, "message": errMsg}}
@@ -219,13 +225,19 @@ func upgradeRemote(goos, candidateVersion string, overrides map[string][2]string
 	}
 }
 
-// postUpgrade 以已连接状态把 binary 提交给 /api/upgrade。
+// postUpgrade 以已连接状态把 binary 提交给 /api/upgrade；连 old 时服务器栏填的是 relay.example:8443。
 func postUpgrade(t *testing.T, s *Server, h http.Handler, client *MCPClient, peerVersion, peerHost, binary string) *httptest.ResponseRecorder {
+	t.Helper()
+	return postUpgradeFrom(t, s, h, client, peerVersion, peerHost, binary, "relay.example:8443", "relay.example:8443")
+}
+
+// postUpgradeFrom 同 postUpgrade，lastServer 是连 old 时服务器栏填的地址（空串是没填），effective 是实际连着的 relay。
+func postUpgradeFrom(t *testing.T, s *Server, h http.Handler, client *MCPClient, peerVersion, peerHost, binary, lastServer, effective string) *httptest.ResponseRecorder {
 	t.Helper()
 	s.mu.Lock()
 	s.client, s.connected = client, true
-	s.lastCode, s.lastServer = "AAAA-BBBBBB", "relay.example:8443"
-	s.peerVersion, s.peerHost, s.effectiveSrv = peerVersion, peerHost, "relay.example:8443"
+	s.lastCode, s.lastServer = "AAAA-BBBBBB", lastServer
+	s.peerVersion, s.peerHost, s.effectiveSrv = peerVersion, peerHost, effective
 	s.mu.Unlock()
 	content, err := os.ReadFile(binary)
 	if err != nil {

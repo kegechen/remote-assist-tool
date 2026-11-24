@@ -642,6 +642,17 @@ func (s *Server) markConnectionLost(client *MCPClient) bool {
 	return true
 }
 
+// upgradeReconnectServer 是通道内升级后连 new share 用的 server 参数（written 是 new share 在 code 文件里写的地址）。
+// 用户连 old 时是自动模式（服务器栏留空、GUI 也没设 REMOTE_RELAY_SERVER，help 子进程按节点列表找节点，spec 6.1）
+// 就不带地址，仍按新码找节点：new share 写的是它实际连的地址，可能是对方机器上的本机专用地址，这边连不上；带上地址
+// 还会让这次连接变成显式、走 TOFU，节点按列表换过证书时，这边按地址记的指纹对不上。其余情况照旧连 written。
+func upgradeReconnectServer(oldServer, defaultServer, written string) string {
+	if oldServer == "" && defaultServer == "" {
+		return ""
+	}
+	return written
+}
+
 func connectToolArgs(code, server string, noAuth bool, minProto string) map[string]any {
 	args := map[string]any{}
 	if noAuth {
@@ -700,11 +711,12 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	connected := s.connected
 	oldCode, oldServer, oldNoAuth, oldMinProto := s.lastCode, s.lastServer, s.lastNoAuth, s.lastMinProto
 	peerVersion, peerHost, effectiveServer := s.peerVersion, s.peerHost, s.effectiveSrv
+	defaultServer := s.defaultServer
 	if effectiveServer == "" {
 		if oldServer != "" {
 			effectiveServer = oldServer
 		} else {
-			effectiveServer = s.defaultServer
+			effectiveServer = defaultServer
 		}
 	}
 	s.mu.Unlock()
@@ -934,7 +946,9 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.upgradeProgress("新 share 已就绪，正在切换通道")
 	// 新 share 就是本次刚装上的当前版本，按默认下限（不降级）连；回连 old 才沿用原来的放宽——
 	// 被升级的 old 很可能正是靠「兼容旧版」才连上的 0.0.x。
-	newMeta, err := reconnectPeer(ctx, client, newCode.Code, newCode.Server, false, "")
+	// 自动模式下按新码找节点，不带 new share 写的地址（见 upgradeReconnectServer）。
+	newServer := upgradeReconnectServer(oldServer, defaultServer, newCode.Server)
+	newMeta, err := reconnectPeer(ctx, client, newCode.Code, newServer, false, "")
 	if err != nil {
 		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		_, reconnectErr := reconnectPeer(rollbackCtx, client, oldCode, oldServer, oldNoAuth, oldMinProto)
@@ -1008,7 +1022,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.client == client {
 		s.connected = true
-		s.recordConnectMetadata(mustJSON(newMeta), newCode.Code, newCode.Server, false, "")
+		s.recordConnectMetadata(mustJSON(newMeta), newCode.Code, newServer, false, "")
 	}
 	s.mu.Unlock()
 	s.upgrading.Store(false) // 先开放普通 API，随后 connected 事件触发的 loadDrives 才能成功。

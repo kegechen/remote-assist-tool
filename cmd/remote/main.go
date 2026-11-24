@@ -381,7 +381,7 @@ func runShare(args []string) {
 
 func runHelp(args []string) {
 	fs := flag.NewFlagSet("help", flag.ExitOnError)
-	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)")
+	server := fs.String("server", defaultRelayServer(), "Relay server address (host 或 host:port；省略端口时默认 8443)。不写 --server、也没设 REMOTE_RELAY_SERVER 时按节点列表找发这个协助码的节点；写了就只连它")
 	code := fs.String("code", "", "Assist code (required)")
 	listenAddr := fs.String("listen", "127.0.0.1:2222", "Local listen address")
 	insecure := fs.Bool("insecure", true, "Skip TLS verification (default true: built-in relay uses a self-signed cert). WARNING: default also skips verification for public/CA relays — transport identity is NOT authenticated; security then relies on tool-channel AEAD + SSH host-key. Use --insecure=false to enforce.")
@@ -407,6 +407,8 @@ func runHelp(args []string) {
 	}
 	fs.Parse(args)
 	rejectPositionalArgs(fs, "help")
+	// 自动模式（spec 6.1）：没指定 relay 时按协助码首位找节点（spec 6.4）。
+	relayMode := newHelpRelay(fs, *plain)
 	*minProtoHelp = normalizeMinProto(*minProtoHelp)
 
 	resolveTLSVerify(fs, insecure, *caFile)
@@ -431,21 +433,6 @@ func runHelp(args []string) {
 
 	*server = client.NormalizeServerAddr(*server) // 无端口补默认 :8443
 
-	// Derive STUN server if not specified
-	if *stunServer == "" && *server != "" {
-		host, _, _ := net.SplitHostPort(*server)
-		if host != "" {
-			*stunServer = net.JoinHostPort(host, "3478")
-		}
-	}
-
-	// 私网/loopback relay（standalone / 同 LAN）下 auto 跳过 P2P：relay 已直连、P2P 多余，
-	// 且 standalone 不启 STUN 必然打洞超时。required 仍尊重用户意图。
-	if *p2pMode == "auto" && client.IsLANServer(*server) {
-		fmt.Fprintf(os.Stderr, "P2P: server %s 为私网/loopback，relay 已 LAN 直连，跳过 P2P（auto→disabled；如需强制用 --p2p required）\n", *server)
-		*p2pMode = "disabled"
-	}
-
 	if !client.ValidTransport(*transport) {
 		log.Fatalf("Error: invalid --transport %q (want auto, tcp or quic)", *transport)
 	}
@@ -462,30 +449,37 @@ func runHelp(args []string) {
 		Transport:    *transport,
 	}
 
+	run := newHelpRunner(cfg, *code, *listenAddr, *mcpStdio, relayMode)
+	if err := run(); err != nil {
+		fmt.Fprint(os.Stderr, helpFailureText(err, *mcpStdio))
+		os.Exit(1)
+	}
 	if *mcpStdio {
-		if *code == "" {
-			boot := client.NewHelpMCPBootstrap(cfg)
-			if err := boot.Run(context.Background()); err != nil {
-				fmt.Fprint(os.Stderr, helpFailureText(err, true))
-				os.Exit(1)
-			}
-		} else {
-			help := client.NewHelpModeMCP(cfg, *code)
-			if err := help.Run(); err != nil {
-				fmt.Fprint(os.Stderr, helpFailureText(err, true))
-				os.Exit(1)
-			}
-		}
 		return
-	} else {
-		help := client.NewHelpMode(cfg, *code, *listenAddr)
-		if err := help.Run(); err != nil {
-			fmt.Fprint(os.Stderr, helpFailureText(err, false))
-			os.Exit(1)
-		}
 	}
 
 	fmt.Println("\nSession ended.")
+}
+
+// newHelpRunner 按参数建 help 并接上自动模式（spec 6.1）：先按 relay 方式补全 cfg 里的 P2P 配置（helpRelay.configure），
+// 再建 help。--mcp-stdio 没给协助码时等 AI agent 用 connect 工具给，给了就直接连；不带 --mcp-stdio 是命令行协助（SSH 隧道）。
+// 返回的函数阻塞跑完整个会话。
+func newHelpRunner(cfg *client.Config, code, listenAddr string, mcpStdio bool, relayMode helpRelay) func() error {
+	relayMode.configure(cfg)
+	switch {
+	case mcpStdio && code == "":
+		boot := client.NewHelpMCPBootstrap(cfg)
+		relayMode.apply(boot) // 之后不带 server 的 connect 按协助码找节点
+		return func() error { return boot.Run(context.Background()) }
+	case mcpStdio:
+		help := client.NewHelpModeMCP(cfg, code)
+		relayMode.apply(help)
+		return help.Run
+	default:
+		help := client.NewHelpMode(cfg, code, listenAddr)
+		relayMode.apply(help)
+		return help.Run
+	}
 }
 
 // helpFailureText 是 help 异常结束时打到 stderr 的文字。被 relay 封禁时只给那一句话：

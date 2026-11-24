@@ -80,11 +80,12 @@ type previewLoad struct {
 	err  error
 }
 
-// NewServer 创建一个 GUI 后端。binPath 为 remote 可执行文件路径。
+// NewServer 创建一个 GUI 后端。binPath 为 remote 可执行文件路径。defaultServer 是 GUI 进程的 REMOTE_RELAY_SERVER，
+// 只有空白时当作没设（同 CLI，spec 6.1）。
 func NewServer(binPath, defaultServer string) *Server {
 	return &Server{
 		binPath:       binPath,
-		defaultServer: defaultServer,
+		defaultServer: strings.TrimSpace(defaultServer),
 		token:         randomToken(),
 		sseSubs:       make(map[chan string]struct{}),
 		previewCache:  defaultPreviewCacheDir(),
@@ -680,14 +681,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// bootstrap 模式：子进程进入等待 connect 工具的状态，不预先传 --code / --no-auth，
 	// 否则会走 NewHelpModeMCP（无 connect 工具）。server/code/no_auth 全部通过 connect
 	// 工具传入，支持动态连接与重连。
-	var spawnArgs []string
-	if req.Server != "" {
-		spawnArgs = append(spawnArgs, "--server", req.Server)
-	} else if s.defaultServer != "" {
-		spawnArgs = append(spawnArgs, "--server", s.defaultServer)
-	}
-
-	mc, err := NewMCPClient(s.binPath, spawnArgs)
+	mc, err := NewMCPClient(s.binPath, helpSpawnArgs(req.Server, s.defaultServer))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -917,13 +911,7 @@ func (s *Server) tryReconnect(gen uint64, code, server string, noAuth bool, minP
 		return reconnectSuperseded
 	}
 
-	spawnArgs := []string{}
-	if server != "" {
-		spawnArgs = append(spawnArgs, "--server", server)
-	} else if defSrv != "" {
-		spawnArgs = append(spawnArgs, "--server", defSrv)
-	}
-	client, err := NewMCPClient(binPath, spawnArgs)
+	client, err := NewMCPClient(binPath, helpSpawnArgs(server, defSrv))
 	if err != nil {
 		return reconnectFailed
 	}
@@ -1119,6 +1107,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// helpSpawnArgs 是 help --mcp-stdio 子进程的额外参数。服务器栏填了地址（server）就带 --server；没填时 GUI 自己设了
+// REMOTE_RELAY_SERVER（defaultServer）就带它。两者都没有时不带：子进程是自动模式，不带 server 的 connect 按协助码
+// 找节点（spec 6.1）。
+func helpSpawnArgs(server, defaultServer string) []string {
+	switch {
+	case server != "":
+		return []string{"--server", server}
+	case defaultServer != "":
+		return []string{"--server", defaultServer}
+	}
+	return nil
 }
 
 // splitCodeServer 把「协助码@host:port」拆成协助码和中转地址。server 已显式给出时以它为准；

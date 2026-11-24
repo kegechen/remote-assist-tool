@@ -70,7 +70,8 @@ func TestReconnectPeerSendsMinProto(t *testing.T) {
 }
 
 // TestMain 让测试二进制兼任一个假的 `remote help --mcp-stdio` 子进程：设了
-// RAT_GUI_FAKE_MCP_LOG 时，它只回 initialize / connect，并把 connect 的参数写进该文件。
+// RAT_GUI_FAKE_MCP_LOG 时，它只回 initialize / connect，并把 connect 的参数写进该文件、
+// 把自己的命令行参数写进该文件加 .argv 后缀的文件。
 // 这样 tryReconnect 走的是真实的建子进程 → initialize → connect 全流程。
 func TestMain(m *testing.M) {
 	if logPath := os.Getenv("RAT_GUI_FAKE_MCP_LOG"); logPath != "" {
@@ -81,6 +82,9 @@ func TestMain(m *testing.M) {
 }
 
 func runFakeMCP(logPath string) {
+	if argv, err := json.Marshal(os.Args[1:]); err == nil {
+		os.WriteFile(logPath+".argv", argv, 0o644)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var req struct {

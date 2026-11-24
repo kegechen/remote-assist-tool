@@ -28,10 +28,18 @@ type joinRelay struct {
 	accepted atomic.Int32
 	closed   atomic.Int32 // 客户端关掉（或被 stop 断开）的连接数
 
-	mu   sync.Mutex
-	reqs []proto.JoinRequest
-	all  []net.Conn
-	ln   net.Listener
+	mu        sync.Mutex
+	reqs      []proto.JoinRequest
+	all       []net.Conn
+	ln        net.Listener
+	afterJoin *proto.Message // 非 nil 时紧跟在加入响应后面发
+}
+
+// sendAfterJoin 让 relay 在每个加入响应之后紧跟着发 m。
+func (f *joinRelay) sendAfterJoin(m *proto.Message) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.afterJoin = m
 }
 
 func startJoinRelay(t *testing.T, reply func(req proto.JoinRequest) *proto.JoinResponse) *joinRelay {
@@ -105,6 +113,14 @@ func (f *joinRelay) serve(c net.Conn) {
 		}
 		if enc.Encode(out) != nil {
 			return
+		}
+		if msg.Type == proto.MsgJoinRequest {
+			f.mu.Lock()
+			after := f.afterJoin
+			f.mu.Unlock()
+			if after != nil && enc.Encode(after) != nil {
+				return
+			}
 		}
 	}
 }
@@ -588,7 +604,7 @@ func TestHelpP2PUsesNodeSTUN(t *testing.T) {
 	t.Run("MCP", func(t *testing.T) {
 		stun := captureHelpSTUN(t)
 		b := NewHelpMCPBootstrap(p2pConfig())
-		b.nodes = testHelpNodes(t, e, m)
+		b.nodes, b.stunFollowsRelay = testHelpNodes(t, e, m), true // 同 UseNodeList
 		if _, err := mcpConnect(t, b, `{"code":"W234-5678-9ABC"}`); err == nil || !strings.Contains(err.Error(), "P2P required") {
 			t.Fatalf("P2P 应失败: %v", err)
 		}
@@ -596,6 +612,144 @@ func TestHelpP2PUsesNodeSTUN(t *testing.T) {
 			t.Fatalf("STUN = %q，应为所连节点的 %q", got, RelaySTUNAddr(w.addr))
 		}
 	})
+}
+
+// 自动模式的进程（没指定 relay）里，cmd/remote 不按默认地址推导 STUN，STUN 由这里跟着实际连上的 relay：MCP connect 带了
+// server 的、拿不到节点列表（拿不到家目录）而连默认地址的，也都要有 STUN，不能是空的（空的就没有 STUN 发现和 UDP 中继）。
+func TestHelpSTUNFollowsRelayInAutoProcess(t *testing.T) {
+	d, w := startJoinRelay(t, joinOK(nil)), startJoinRelay(t, joinOK(nil))
+	t.Setenv(directoryEnv, "off") // 不去 CF 取列表
+	p2pConfig := func() *Config {
+		cfg := nodeHelpConfig(t, d.addr)
+		cfg.P2PMode, cfg.BindIP = "required", "192.0.2.1"
+		return cfg
+	}
+	noHome := func(t *testing.T) {
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+	}
+
+	t.Run("MCP connect 带 server", func(t *testing.T) {
+		// 默认地址用不会去连的 relay.example.test，推出的 STUN 与 w 的不同，才看得出跟的是哪台。
+		server := w.addr
+		cfg := p2pConfig()
+		cfg.ServerAddr = "relay.example.test:8443"
+		stun := captureHelpSTUN(t)
+		b := NewHelpMCPBootstrap(cfg)
+		b.UseNodeList(t.TempDir())
+		if b.nodes == nil {
+			t.Fatal("应接上节点列表")
+		}
+		if _, err := mcpConnect(t, b, `{"code":"W234-5678-9ABC","server":"`+server+`"}`); err == nil || !strings.Contains(err.Error(), "P2P required") {
+			t.Fatalf("P2P 应失败: %v", err)
+		}
+		if got := recv5s(t, "建 P2P manager", stun); got != RelaySTUNAddr(server) {
+			t.Fatalf("STUN = %q，应为所连 relay 的 %q", got, RelaySTUNAddr(server))
+		}
+	})
+
+	t.Run("MCP 拿不到家目录", func(t *testing.T) {
+		noHome(t)
+		stun := captureHelpSTUN(t)
+		b := NewHelpMCPBootstrap(p2pConfig())
+		b.UseNodeList("")
+		if b.nodes != nil {
+			t.Fatal("拿不到家目录时不该有节点列表")
+		}
+		if _, err := mcpConnect(t, b, `{"code":"W234-5678-9ABC"}`); err == nil || !strings.Contains(err.Error(), "P2P required") {
+			t.Fatalf("P2P 应失败: %v", err)
+		}
+		if got := recv5s(t, "建 P2P manager", stun); got != RelaySTUNAddr(d.addr) {
+			t.Fatalf("STUN = %q，应为所连默认 relay 的 %q", got, RelaySTUNAddr(d.addr))
+		}
+	})
+
+	t.Run("命令行拿不到家目录", func(t *testing.T) {
+		noHome(t)
+		h := NewHelpMode(p2pConfig(), "W23456789ABC", "127.0.0.1:0")
+		h.UseNodeList("")
+		if h.nodes != nil {
+			t.Fatal("拿不到家目录时不该有节点列表")
+		}
+		if got := h.p2pSTUN(); got != RelaySTUNAddr(d.addr) {
+			t.Fatalf("STUN = %q，应为所连默认 relay 的 %q", got, RelaySTUNAddr(d.addr))
+		}
+	})
+}
+
+// relay 在私网/本机时 auto 跳过 P2P（relay 已是 LAN 直连）；required 照做，disabled 本来就不做。
+func TestLANSkipsP2P(t *testing.T) {
+	for _, tc := range []struct {
+		mode   p2p.P2PMode
+		server string
+		want   bool
+	}{
+		{p2p.P2PModeAuto, "127.0.0.1:8443", true},
+		{p2p.P2PModeAuto, "localhost:8443", true},
+		{p2p.P2PModeAuto, "relay.example.test:8443", false},
+		{p2p.P2PModeAuto, "192.0.2.1:8443", false},
+		{p2p.P2PModeRequired, "127.0.0.1:8443", false},
+		{p2p.P2PModeDisabled, "127.0.0.1:8443", false},
+	} {
+		if got := lanSkipsP2P(tc.mode, tc.server); got != tc.want {
+			t.Errorf("lanSkipsP2P(%v, %q) = %v，想要 %v", tc.mode, tc.server, got, tc.want)
+		}
+	}
+}
+
+// 命令行 help 自动模式下 P2P 的私网判断按连上的实际地址：默认地址是公网，但按码连到的节点在本机/私网（例如本机专用地址
+// 是内网地址）时，auto 不做 P2P，与 MCP connect 一样。连接前（cmd/remote）只对显式模式判断，那时还不知道会连哪台。
+func TestHelpSkipsP2POnLANNode(t *testing.T) {
+	d, w := startJoinRelay(t, joinOK(nil)), startJoinRelay(t, joinOK(nil))
+	bye, err := proto.NewMessage(proto.MsgError, &proto.ErrorMessage{Message: "bye"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.sendAfterJoin(bye) // 让 Run 在 relay 隧道上马上结束
+	e := newDirEnv(t)
+	m := e.manager()
+	e.publish(m, 42, "", e.nodeEntry("D", d.node(), directory.StatusActive, 100), e.nodeEntry("W", w.node(), directory.StatusActive, 100))
+	stun := captureHelpSTUN(t)
+	cfg := nodeHelpConfig(t, "relay.example.test:8443") // 默认地址是公网的；码属于 W，不会去连它
+	cfg.P2PMode = "auto"
+	h := NewHelpMode(cfg, "W23456789ABC", "127.0.0.1:0")
+	h.useNodes(testHelpNodes(t, e, m))
+	t.Cleanup(h.client.Close)
+	if err := within5s(t, "Run", h.Run); err == nil || !strings.Contains(err.Error(), "bye") {
+		t.Fatalf("应在 relay 隧道上收到 bye 后结束: %v", err)
+	}
+	wantJoins(t, w, "W", 1)
+	wantUntouched(t, d, "默认节点 D")
+	select {
+	case s := <-stun:
+		t.Fatalf("连到本机的节点时 auto 不该做 P2P，却建了 P2P manager（STUN %q）", s)
+	default:
+	}
+}
+
+// MCP 自动模式同样按连上的实际地址判断：默认地址是公网的，按码连到本机的节点时 auto 不做 P2P。P2P 在 connect 返回后
+// 才在后台起，所以等一会儿看它有没有建 P2P manager。
+func TestMCPSkipsP2POnLANNode(t *testing.T) {
+	d, w := startJoinRelay(t, joinOK(nil)), startJoinRelay(t, joinOK(nil))
+	e := newDirEnv(t)
+	m := e.manager()
+	e.publish(m, 42, "", e.nodeEntry("D", d.node(), directory.StatusActive, 100), e.nodeEntry("W", w.node(), directory.StatusActive, 100))
+	stun := captureHelpSTUN(t)
+	b := nodeBootstrap(t, e, m, "relay.example.test:8443") // 码属于 W，不会去连默认地址
+	b.cfg.P2PMode = "auto"
+	res, err := mcpConnect(t, b, `{"code":"W234-5678-9ABC"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Server != w.addr {
+		t.Fatalf("连上的地址 = %s，应为节点 W 的 %s", res.Server, w.addr)
+	}
+	wantUntouched(t, d, "默认节点 D")
+	select {
+	case s := <-stun:
+		t.Fatalf("连到本机的节点时 auto 不该做 P2P，却建了 P2P manager（STUN %q）", s)
+	case <-time.After(time.Second):
+	}
 }
 
 // 本机专用地址连不上就从缓存删掉（按固定格式提示），改连列表地址；与 share 共用一套拨号处理。
@@ -660,7 +814,7 @@ func TestHelpUseNodeList(t *testing.T) {
 func nodeBootstrap(t *testing.T, e *dirEnv, m *dirManager, defaultAddr string) *HelpMCPBootstrap {
 	t.Helper()
 	b := NewHelpMCPBootstrap(nodeHelpConfig(t, defaultAddr))
-	b.nodes = testHelpNodes(t, e, m)
+	b.nodes, b.stunFollowsRelay = testHelpNodes(t, e, m), true // 同 UseNodeList
 	t.Cleanup(func() {
 		b.mu.Lock()
 		h := b.help

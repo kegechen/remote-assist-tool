@@ -74,6 +74,9 @@ type HelpMCPBootstrap struct {
 	cfg *Config
 	// nodes 非 nil 表示自动模式（UseNodeList）：不带 server 的 connect 按协助码找节点（spec 6.4），各次 connect 共用。
 	nodes *helpNodes
+	// stunFollowsRelay：进程是自动模式（UseNodeList，有没有列表都算），每次 connect 的 STUN 都跟着实际连上的 relay，
+	// 带不带 server 都一样（见 HelpMode.p2pSTUN）。
+	stunFollowsRelay bool
 
 	connectMu    sync.Mutex // 串行化 connect，避免并发调用互相拆连接
 	mu           sync.Mutex
@@ -480,6 +483,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	}
 
 	h := NewHelpModeMCP(&effectiveCfg, a.Code)
+	h.stunFollowsRelay = b.stunFollowsRelay
 	if target.Auto {
 		h.useNodes(b.nodes)
 	}

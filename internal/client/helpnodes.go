@@ -106,15 +106,19 @@ func (e *relayConnectError) Error() string { return e.err.Error() }
 func (e *relayConnectError) Unwrap() error { return e.err }
 
 // UseNodeList 进入自动模式（没指定 relay）：按协助码首位找节点（spec 6.4），P2P 的 STUN 跟着实际连上的节点。
-// home 是列表缓存所在的家目录（空串表示当前用户的）。本程序没有内置根公钥、拿不到家目录时什么都不改，与显式模式一样。
+// home 是列表缓存所在的家目录（空串表示当前用户的）。本程序没有内置根公钥、拿不到家目录时不用列表，只连配置的地址，
+// STUN 照样跟着它（调用方没按默认地址推导 STUN）。
 func (h *HelpMode) UseNodeList(home string) {
+	h.stunFollowsRelay = true
 	if hn := newHelpNodesAt(home, h.client.config.Transport); hn != nil {
 		h.useNodes(hn)
 	}
 }
 
 // UseNodeList 同 HelpMode.UseNodeList：之后不带 server 的 connect 按协助码找节点，带 server 的照旧只连它。
+// 两种 connect 的 STUN 都跟着实际连上的 relay。
 func (b *HelpMCPBootstrap) UseNodeList(home string) {
+	b.stunFollowsRelay = true
 	b.nodes = newHelpNodesAt(home, b.cfg.Transport)
 }
 
@@ -132,12 +136,13 @@ func newHelpNodesAt(home, transport string) *helpNodes {
 func (h *HelpMode) useNodes(hn *helpNodes) {
 	h.nodes = hn
 	h.defaultAddr = h.client.config.ServerAddr
+	h.stunFollowsRelay = true
 }
 
-// p2pSTUN 是 P2P 用的 STUN 地址（也是 UDP 中继的地址）：指定了就用它；自动模式下跟着实际连上的节点（relay 主机的 3478），
+// p2pSTUN 是 P2P 用的 STUN 地址（也是 UDP 中继的地址）：指定了就用它；自动模式下跟着实际连上的 relay（relay 主机的 3478），
 // 不按默认地址推导，同 ShareMode.p2pSTUN。
 func (h *HelpMode) p2pSTUN() string {
-	if stun := h.client.config.STUNServer; stun != "" || h.nodes == nil {
+	if stun := h.client.config.STUNServer; stun != "" || !h.stunFollowsRelay {
 		return stun
 	}
 	return RelaySTUNAddr(h.client.serverAddr())
