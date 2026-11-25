@@ -48,7 +48,9 @@ Windows 版本的 relay 同时支持前台模式和原生 Windows 服务模式�
 {
   "listen": ":8443",
   "ttl": "30m",
-  "length": 10,
+  "length": 12,
+  "code_max_age": "24h",
+  "state_dir": "C:\\ProgramData\\RemoteAssistRelay\\state",
   "audit": "C:\\ProgramData\\RemoteAssistRelay\\logs\\audit.jsonl",
   "plain": false,
   "certs_dir": "C:\\ProgramData\\RemoteAssistRelay\\certs",
@@ -61,7 +63,9 @@ Windows 版本的 relay 同时支持前台模式和原生 Windows 服务模式�
 
 `blocklist_enabled` / `blocklist_db` 对应 relay 的 `--blocklist-enabled` / `--blocklist-db`（见 README 的「IP 黑名单」）。旧版本生成的 `config.json` 没有这两项时沿用上面的默认值，即升级后黑名单默认开启；`blocklist_db` 置空为纯内存模式。新安装生成的配置带有这两个字段，旧版 relay.exe 不认识它们，回滚到旧版本前先删掉。
 
-可选字段包括 `cert`、`key`、`stun`、`advertise_stun` 和 `limits_file`。`advertise_stun` 是逗号分隔的 `host:port`（单播 IPv4 或域名，最多 4 个；回环、IPv6 字面量、localhost 等客户端会丢弃的值启动时直接报错），本机 UDP 3478 对外不通时用它让客户端改用别处的 STUN。旧版 relay.exe 不认识这个字段，配置加载会因未知字段失败：回滚到旧版本前先删掉它。修改配置后需要重启服务：
+可选字段包括 `cert`、`key`、`stun`、`advertise_stun`、`limits_file`、`directory_url`、`directory_refresh` 和 `state_dir`。`advertise_stun` 是逗号分隔的 `host:port`（单播 IPv4 或域名，最多 4 个；回环、IPv6 字面量、localhost 等客户端会丢弃的值启动时直接报错），本机 UDP 3478 对外不通时用它让客户端改用别处的 STUN。旧版 relay.exe 不认识这个字段，配置加载会因未知字段失败：回滚到旧版本前先删掉它。
+
+`directory_url` / `directory_refresh` 让 relay 进入节点模式：前者是签名节点列表的 https 地址（官方列表是 `https://relay-list.ifly.qzz.io/v1/directory`），后者是拉取间隔（默认 `5m`，不小于 `1m`）。`state_dir` 保存节点列表（`directory.json`）和协助码复用密钥，节点模式必须配置；服务默认的数据目录已可用，见上文的 `config.json` 生成方式。节点模式还要求 TLS 证书/私钥和长度 12 的协助码，不能与 `no_auth` 同用；节点按自己证书的指纹在列表里认出自己。入网流程见[部署说明](DEPLOYMENT.md#节点模式加入节点列表)。旧版 relay.exe 同样不认识这两个字段（`state_dir`、`code_max_age` 在 v1.2.3 之前的版本里也没有），回滚前删掉。修改配置后需要重启服务：
 
 ```powershell
 .\relay.exe service stop

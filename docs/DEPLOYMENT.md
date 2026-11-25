@@ -38,6 +38,27 @@ echo $! > /opt/remote-assist/relay.pid
 
 如果本机 UDP 3478 对外不可达（例如云厂商安全组未放行 UDP、又改不了），用 `--advertise-stun host:port[,host:port...]`（Windows 服务配置为 `advertise_stun`；单播 IPv4 或域名，最多 4 个，客户端会丢弃的值启动时直接报错）让新版客户端改用别处可达的 STUN 发现公网地址，例如 `--advertise-stun 23.95.78.14:3478,stun.chat.bilibili.com:3478,stun.cloudflare.com:3478`。客户端会把它们与 relay:3478、内置公共 STUN 一起竞速，谁先应答用谁；UDP 中继兜底仍只走本机的 `--stun`。
 
+## 节点模式加入节点列表
+
+节点模式让 relay 在官方签名的节点列表里登记自己，客户端不写 `--server` 时就能选到它，协助码首位也会变成该节点的前缀。开启前先准备好 TLS 证书（公网域名、有效期）、稳定地址和持久化目录；运营者把证书公钥和节点信息提交给管理员，不要把私钥发给任何人。
+
+```bash
+# 生成入网申请（name/operator 不能有空格、不写个人信息）
+remote-assist-relay-linux-amd64 node-request \
+  --cert <cert> --key <key> --name N --operator O \
+  --tcp <relay-host>:8443 --out node-request.json
+
+# 节点模式运行：按 TLS 证书指纹在列表里认出自己，发以本节点前缀开头的协助码
+remote-assist-relay-linux-amd64 run \
+  --listen :8443 --cert <cert> --key <key> --state-dir /opt/remote-assist/state \
+  --directory-url https://relay-list.ifly.qzz.io/v1/directory \
+  --directory-refresh 5m
+```
+
+要求 TLS、持久化 `--state-dir`、协助码长度 12（默认值），不能与 `--no-auth` 同用；`--directory-refresh` 不小于 `1m`。管理员用 `remote-assist-admin sign-node` 签发节点证书后，把申请和证书通过管理页上传、设置状态（启用/排空/停用）并发布新的列表；列表发布成功后节点才会被新客户端选中。relay 拉不到列表时继续用手里验过签的那份，直到过期。
+
+换证书的顺序：先把新证书传进管理页并发布列表，再重启 relay 用新证书。反过来先换 relay 会让列表里的指纹对不上，自动模式的客户端会跳过这个地址。节点排空时不再接新的 share，已经在上面的会话不受影响；停用或移出列表后，没有协助端连着的 share 会自动迁到别的节点。
+
 ## 连接测试
 
 在被协助端运行 share：
@@ -58,7 +79,7 @@ remote-assist-cli-linux-amd64 help \
   --insecure=false
 ```
 
-> `--server` 不是必填：省略它会使用内置公共 relay `23.95.78.14:8443`。上面的写法用于连接自建 relay；使用内置 relay 时可删掉 `--server <relay-host>:8443`，并保留默认的 `--insecure`。
+> `--server` 不是必填：省略它会按官方签名节点列表自动选 relay（拿不到列表时用内置公共 relay `23.95.78.14:8443`）。上面的写法用于连接自建 relay；使用自动模式时可删掉 `--server <relay-host>:8443`，并保留默认的 `--insecure`。
 
 如果 relay 使用自签证书，开发测试可把两端的 `--insecure=false` 改为 `--insecure`。这会跳过 TLS 证书校验；公网生产环境应改用受信 CA 或 `--ca`，不要使用 `--plain`。
 

@@ -562,7 +562,8 @@ func resolveTLSVerify(fs *flag.FlagSet, insecure *bool, caFile string) {
 
 // defaultRelayServerAddr 是内置的公网 relay 地址，未显式 --server 时使用。
 // 可用环境变量 REMOTE_RELAY_SERVER 覆盖，避免换 IP 时重新编译。
-const defaultRelayServerAddr = "23.95.78.14:8443"
+// 写成变量只是为了 e2e：带 remoteassist_e2e 构建时 default_relay_e2e.go 把它换成本机地址，正式构建里没有地方改它。
+var defaultRelayServerAddr = "23.95.78.14:8443"
 
 func defaultRelayServer() string {
 	if v := strings.TrimSpace(os.Getenv("REMOTE_RELAY_SERVER")); v != "" {

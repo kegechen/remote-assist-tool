@@ -111,6 +111,11 @@ If `--allow-exec` is configured, the `sh`/`powershell.exe`, `mkdir`, `chmod`, `k
 allowed to run. After the original path is replaced, existing systemd / startup configurations need no file-name changes; the temporary takeover process keeps
 using the isolated ClientID, and the next normal start from the original path restores the standard HOME/ClientID.
 
+> A share upgraded from a release that predates the node list (v1.2.3 and earlier) still has the old `--server <address>` in its
+> command line, so it stays in explicit mode: it does not select a node from the list and does not migrate when a node drains or
+> goes away; later in-channel upgrades keep the explicit mode too. Restart the share once (or let the autostart entry relaunch it
+> from the original command line after a machine reboot) to enter automatic mode. Upgrades between recent releases are unaffected.
+
 ### Usage 1: Classic SSH remote assistance (via relay)
 
 On the machine being assisted (sharing its local SSH):
@@ -119,7 +124,7 @@ On the machine being assisted (sharing its local SSH):
 remote share --server relay.example.com:8443
 ```
 
-> `--server` is not required: if omitted, the built-in public relay `23.95.78.14:8443` is used; only fill in your own address when connecting to a self-hosted relay.
+> `--server` is not required: if omitted, the client picks a relay from the official signed node list (falling back to the built-in public relay `23.95.78.14:8443` if no list is available); see "Default relay, node list and self-hosting" below. Only fill in your own address when connecting to a self-hosted relay.
 
 The program displays an assist code, for example:
 
@@ -147,7 +152,7 @@ On the helper side (connect with the assist code; MCP mode is the default, add `
 
 ```bash
 remote help --server relay.example.com:8443 --code ABCD-EFGHIJ --legacy-ssh
-# You can also omit --server and use the built-in public relay directly
+# You can also omit --server: the first character of the assist code selects the relay that issued it from the node list
 # Then in another terminal:
 ssh -p 2222 user@127.0.0.1
 ```
@@ -204,7 +209,7 @@ Configure it locally as an MCP server. Taking Claude Code as an example (`.mcp.j
 }
 ```
 
-`--server` in the configuration can also be omitted; when omitted, the MCP server uses the built-in public relay. Only a self-hosted relay needs `--server <host>:<port>`.
+`--server` in the configuration can also be omitted; the MCP server then uses the `server` passed to `connect` (the "Relay" line of the assist message). If only an assist code is given, its first character selects the relay from the node list. Only a self-hosted relay needs `--server <host>:<port>`.
 
 For other agents, fill in the same thing in their own configuration format: command `remote`, arguments `help --server <relay> --mcp-stdio`,
 and we recommend naming the MCP server `remote-debug`.
@@ -239,9 +244,21 @@ The old usage (hard-coding the assist code) is still supported: add `"--code", "
 
 ## Command-Line Reference
 
-### Default relay and self-hosting
+### Default relay, node list and self-hosting
 
-When `--server` is not passed, `remote share` / `remote help` connect to the built-in public relay `23.95.78.14:8443`, which is deployed **overseas**.
+Without `--server` (and without `REMOTE_RELAY_SERVER`), `remote share` / `remote help` are in **automatic mode** and select a relay from a signed node list:
+
+- The list is signed by the official root keys; the client verifies it with built-in public keys and ignores anything that fails verification. It is fetched from `https://relay-list.ifly.qzz.io/v1/directory`
+  (3-second timeout); connected relays also forward an updated list in their response. Verified lists are cached in `~/.remote_assist_relays.json` and the cache is used when the network is unavailable.
+- share follows the list policy: prefer the default node, or dial several candidates at once and use the first one to finish the handshake. The certificate must match the fingerprint listed for that node, otherwise the address is skipped (no TOFU).
+  The assist code starts with the prefix of the node that issued it, and the "Relay" line in the assist message names the actual node, so older help clients can connect directly to that address.
+- help given only an assist code uses the code's first character to find the issuing node in the list; if the prefix is unknown, it connects to the default node.
+- When a node drains, is disabled, or is removed from the list, a share with no connected helper automatically switches to another node (the assist code changes, and the clipboard and `--code-file` are updated).
+- When no list is available (first run without network access), the built-in default node `23.95.78.14:8443` (**overseas**) is used, as in previous releases.
+- `REMOTE_RELAY_DIRECTORY=off` disables network fetches; only cached and relay-forwarded lists are used. The variable can also be set to another https URL.
+
+Passing `--server` (or `REMOTE_RELAY_SERVER`) means **explicit mode**: only that relay is used, no node selection or migration, even if it is the built-in address.
+
 It works out of the box, but self-hosting is recommended in two cases:
 
 - **Cannot connect or it is slow**: access to overseas servers is unstable from some networks;
@@ -251,6 +268,7 @@ Self-hosting is simple: download the `remote-assist-relay-<os>-<arch>` for your 
 (amd64 and arm64 for Windows / Linux / macOS are available), run it on a machine reachable from both ends,
 and open TCP 8443; on both ends use `--server <host>:8443`, or set the environment variable `REMOTE_RELAY_SERVER=<host>:8443` to point to it.
 When both ends are on the same LAN, it is easier to just use `remote share --standalone`, which needs no separate relay.
+To join the official node list so that automatic mode can select your relay, follow the [deployment guide](docs/DEPLOYMENT.md#节点模式加入节点列表) (Chinese).
 
 ### relay — relay server
 
@@ -260,8 +278,8 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--cert` / `--key` | - | TLS certificate / private key files |
 | `--ttl` | `30m` | Assist code lifetime |
 | `--code-max-age` | `24h` | Absolute lifetime of an assist code, counted from first issue and never reset by reconnects/reuse, even while its share stays online. `0` disables the cap (a leaked code then stays valid as long as its share runs) |
-| `--state-dir` | empty | Persist the code-reuse signing key (`reuse-secret`, mode 0600). Empty = key kept in memory only: after a relay restart every share receives a new assist code and nobody can reclaim an old one (so a leaked code cannot be grabbed by a third party). Set it if shares should keep their code across relay restarts; only the original share (holding its reuse token) can reclaim it. The Windows service enables it by default |
-| `--length` | `10` | Assist code length |
+| `--state-dir` | empty | Persist the code-reuse signing key (`reuse-secret`, mode 0600), and in node mode the directory list (`directory.json`). Empty = key kept in memory only: after a relay restart every share receives a new assist code and nobody can reclaim an old one (so a leaked code cannot be grabbed by a third party). Set it if shares should keep their code across relay restarts; only the original share (holding its reuse token) can reclaim it. The Windows service enables it by default. Node mode requires it |
+| `--length` | `12` | Assist code length (node mode requires 12) |
 | `--audit` | `audit.log` | Audit log file |
 | `--stun` | empty | STUN/UDP relay listen address; e.g. `:3478`, empty disables it |
 | `--advertise-stun` | empty | Comma-separated STUN servers (`host:port`, unicast IPv4 or domain, at most 4) sent to new clients for public-address discovery, e.g. when this host's UDP 3478 is blocked by a cloud security group |
@@ -272,6 +290,8 @@ When both ends are on the same LAN, it is easier to just use `remote share --sta
 | `--release-page` | GitHub release page of that version | Fallback link when the platform is unknown or has no released asset |
 | `--update-info-file` | empty | Reloadable JSON announcement file; the relay polls metadata every 5 seconds and reparses only when it changes, without restarting the service |
 | `--print-default-limits` | `false` | Print the complete default rate-limit JSON and exit |
+| `--directory-url` | empty | Node mode: https URL of the signed node list (the official list is `https://relay-list.ifly.qzz.io/v1/directory`). The relay identifies itself in the list by its TLS certificate fingerprint, issues codes with its node prefix, applies the status assigned by the directory admin and forwards the list to new clients. Requires TLS and `--state-dir`; incompatible with `--no-auth`. See the [deployment guide](docs/DEPLOYMENT.md#节点模式加入节点列表) (Chinese) for enrollment |
+| `--directory-refresh` | `5m` | Node mode: directory polling interval (minimum `1m`); when a fetch fails the last verified list remains usable until it expires |
 | `--no-auth` | `false` | Fixed-code mode without authentication, only for fully trusted private networks |
 | `--plain` | `false` | Non-TLS mode (development and testing only) |
 | `--gen-certs` | `false` | Generate self-signed certificates and exit |
@@ -334,7 +354,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 | Option | Default | Description |
 |------|--------|------|
-| `--server` | built-in public relay `23.95.78.14:8443` | Relay server address (can also be overridden by the environment variable `REMOTE_RELAY_SERVER`). The default relay is overseas, see "Default relay and self-hosting" above |
+| `--server` | selected from the node list | Relay server address (can also be overridden by the environment variable `REMOTE_RELAY_SERVER`). Set it to connect only to that relay; when omitted, a node is selected from the node list, see "Default relay, node list and self-hosting" above |
 | `--insecure` | `true` | Skip TLS verification (for self-signed relays; set to `false` when connecting to a relay with a trusted CA) |
 | `--ca` | - | CA certificate file |
 | `--trust-new-cert` | `false` | Accept a relay certificate fingerprint that differs from the one recorded on first connection and record it again (use when the relay really changed its certificate) |
@@ -346,6 +366,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--standalone` | `false` | Start a relay in-process and listen on `--standalone-listen`, for LAN direct-connection scenarios |
 | `--standalone-listen` | `:8443` | standalone relay listen address |
 | `--code-file` | - | After registration, atomically write the assist code + expiry as JSON to this file (for a host program to read) |
+| `--log-file` | `auto` | Also write status output and logs to a file with the assist code redacted as `********`: `auto` writes `<temp>/remote-assist-<user>/share-<pid>.log` (5 MB rotation, files older than 7 days removed at startup), `off` disables it, or pass a file path. Can also be set via `REMOTE_ASSIST_LOG`; the command line takes precedence |
 | `--root` | - | Optional: confine the file tools to this subtree (unset = unrestricted). Protection against slips, not a security boundary |
 | `--allow-exec` | - | exec command allow list (comma-separated; empty = bound only by the deny list) |
 | `--allow-pty` | false | enable the real terminal (PTY); off by default because a shell bypasses `--allow-exec`, `--deny-exec` and `--root` |
@@ -358,7 +379,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 | Option | Default | Description |
 |------|--------|------|
-| `--server` | built-in public relay `23.95.78.14:8443` | Relay server address (can be overridden by `REMOTE_RELAY_SERVER`) |
+| `--server` | derived from the assist code | Relay server address (can be overridden by `REMOTE_RELAY_SERVER`). Set it to connect only to that relay; when omitted, the first character of the assist code selects the node from the node list |
 | `--code` | - | Assist code (required for SSH / direct mode; leave empty in MCP bootstrap mode, where the `connect` tool supplies it) |
 | `--insecure` | `true` | Skip TLS verification (same as share) |
 | `--ca` | - | CA certificate file |
@@ -369,6 +390,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--bind-ip` | - | Specify the UDP bind IP |
 | `--mcp-stdio` | `false` | Run as an MCP stdio server (for any MCP-capable AI agent) |
 | `--legacy-ssh` | `false` | Force the traditional SSH tunnel mode (this is the mode when `--mcp-stdio` is not given) |
+| `--log-file` | `auto` | Same as share (file name `help-<pid>.log`); with `--mcp-stdio` only the log path goes to stderr, tool responses are never written to the file |
 | `--plain` | `false` | Non-TLS (development only) |
 
 ## MCP Tools Overview (12)

@@ -111,6 +111,10 @@ relay 的 Linux/Windows amd64/arm64 share，`--standalone` / `--no-auth` 会被�
 获准执行。原路径替换后，已有 systemd/开机启动配置无需改文件名；当前临时接管进程继续
 使用隔离 ClientID，下一次由原路径正常启动时恢复标准 HOME/ClientID。
 
+> 从不认识节点列表的旧版本（v1.2.3 及更早）升级上来的 share，命令行里带着旧版写入的 `--server <当时连的地址>`，
+> 因此是显式模式：不按节点列表选节点，节点排空、下线时也不迁移，之后的链式升级也一直保持显式。重启一次 share
+> （或机器重启后由自启项按原始命令行拉起）即进入自动模式。新版本之间的升级不受影响。
+
 ### 用法一：经典 SSH 远程协助（经 relay）
 
 被协助端（分享本机 SSH）：
@@ -119,7 +123,7 @@ relay 的 Linux/Windows amd64/arm64 share，`--standalone` / `--no-auth` 会被�
 remote share --server relay.example.com:8443
 ```
 
-> `--server` 不是必填：省略它会使用内置公共 relay `23.95.78.14:8443`；只有连接自建 relay 时才填写自己的地址。
+> `--server` 不是必填：省略它会按官方节点列表自动选 relay（拿不到列表时用内置公共 relay `23.95.78.14:8443`），见下文「默认 relay、节点列表与自建」；只有连接自建 relay 时才填写自己的地址。
 
 程序显示协助码，例如：
 
@@ -147,7 +151,7 @@ remote share --new-instance --ssh 127.0.0.1:2222 --server relay.example.com:8443
 
 ```bash
 remote help --server relay.example.com:8443 --code ABCD-EFGHIJ --legacy-ssh
-# 也可以省略 --server，直接使用内置公共 relay
+# 也可以省略 --server：按协助码的第一位在节点列表里找到发码的 relay
 # 然后在另一个终端：
 ssh -p 2222 user@127.0.0.1
 ```
@@ -204,7 +208,7 @@ remote share --server relay.example.com:8443
 }
 ```
 
-配置中的 `--server` 也可以省略；省略时 MCP server 使用内置公共 relay。只有自建 relay 才需要填写 `--server <host>:<port>`。
+配置中的 `--server` 也可以省略；省略时 MCP server 连 `connect` 传入的 `server`（协助信息里的「中转服务」），只给协助码时按码的第一位在节点列表里找到发码的 relay。只有自建 relay 才需要填写 `--server <host>:<port>`。
 
 其他 agent 按各自的配置方式填同样的内容即可：命令 `remote`，参数 `help --server <relay> --mcp-stdio`，
 MCP server 名建议用 `remote-debug`。
@@ -239,9 +243,21 @@ MCP server 名建议用 `remote-debug`。
 
 ## 命令行参考
 
-### 默认 relay 与自建
+### 默认 relay、节点列表与自建
 
-`remote share` / `remote help` 不传 `--server` 时，连接内置的公共 relay `23.95.78.14:8443`，它部署在**海外**。
+`remote share` / `remote help` 不传 `--server`、也没设环境变量 `REMOTE_RELAY_SERVER` 时是**自动模式**，按一份签名的节点列表选 relay：
+
+- 列表由官方根密钥签名，客户端用内置的根公钥验签，验不过的一律不用。列表从 `https://relay-list.ifly.qzz.io/v1/directory`
+  获取（超时 3 秒），连上的 relay 也会随响应转发更新的列表；验过的列表缓存在 `~/.remote_assist_relays.json`，取不到时用缓存。
+- share 按列表的策略选节点：默认节点优先，或同时拨几个候选、谁先完成握手用谁。连上的证书必须与列表里该节点的指纹一致，
+  不一致的地址直接跳过（不走 TOFU）。协助码的第一位是所在节点的前缀；协助信息里的「中转服务」写实际所在的节点，旧版 help 照这个地址连即可。
+- help 只给协助码时，按码的第一位在列表里找节点；列表里没有这个前缀时连默认节点。
+- 节点排空、停用或移出列表时，没有协助端连着的 share 会自动换到别的节点（协助码随之变化，剪贴板和 `--code-file` 一并更新）。
+- 没有可用列表（第一次运行且取不到列表）时，连内置的默认节点 `23.95.78.14:8443`（部署在**海外**），与以前的版本一致。
+- 环境变量 `REMOTE_RELAY_DIRECTORY=off` 不从网络取列表，只用缓存和 relay 转发的；也可以设成另一个 https 地址。
+
+写了 `--server`（或设了 `REMOTE_RELAY_SERVER`）就是**显式模式**：只连这一台，不按列表选节点、不迁移，写的是内置地址也一样。
+
 开箱即用，但有两种情况建议自建：
 
 - **连不上或很慢**：部分网络访问海外服务器不稳定；
@@ -251,6 +267,7 @@ MCP server 名建议用 `remote-debug`。
 `remote-assist-relay-<os>-<arch>`（Windows / Linux / macOS 的 amd64、arm64 都有），在一台两端都能访问的机器上运行，
 放行 TCP 8443；两端用 `--server <host>:8443`，或设置环境变量 `REMOTE_RELAY_SERVER=<host>:8443` 指向它。
 两端在同一局域网时，更省事的是直接用 `remote share --standalone`，不需要单独的 relay。
+想让自建 relay 进官方节点列表、被自动模式选中，按[部署说明](docs/DEPLOYMENT.md#节点模式加入节点列表)申请入网。
 
 ### relay — 中转服务器
 
@@ -260,8 +277,8 @@ MCP server 名建议用 `remote-debug`。
 | `--cert` / `--key` | - | TLS 证书 / 私钥文件 |
 | `--ttl` | `30m` | 协助码有效期 |
 | `--code-max-age` | `24h` | 协助码绝对寿命：从首次签发起算，重连/复用都不重置，share 一直在线也到期。`0` 关闭上限（泄露的码将在其 share 在线期间一直有效） |
-| `--state-dir` | 空 | 把「码复用令牌」的签名密钥落盘（`reuse-secret`，权限 0600）。为空时密钥只在内存：relay 重启后所有 share 换新协助码、任何人都无法取回旧码（泄露的码因此不会被第三方抢占）。希望 relay 重启后 share 的码不变就设置它，只有持有复用令牌的原 share 才能取回原码。Windows 服务默认开启 |
-| `--length` | `10` | 协助码长度 |
+| `--state-dir` | 空 | 把「码复用令牌」的签名密钥落盘（`reuse-secret`，权限 0600）。为空时密钥只在内存：relay 重启后所有 share 换新协助码、任何人都无法取回旧码（泄露的码因此不会被第三方抢占）。希望 relay 重启后 share 的码不变就设置它，只有持有复用令牌的原 share 才能取回原码。Windows 服务默认开启。节点模式下节点列表也存在这里（`directory.json`） |
+| `--length` | `12` | 协助码长度（节点模式要求保持 12） |
 | `--audit` | `audit.log` | 审计日志文件 |
 | `--stun` | 空 | STUN/UDP relay 监听地址；例如 `:3478`，空则禁用 |
 | `--advertise-stun` | 空 | 下发给新版客户端做公网地址发现的 STUN（`host:port`，单播 IPv4 或域名，逗号分隔，最多 4 个），用于本机 UDP 3478 被云安全组挡住等情况 |
@@ -272,6 +289,8 @@ MCP server 名建议用 `remote-debug`。
 | `--download-url` | GitHub 该版本产物 | 升级提示里的 HTTPS 下载链接模板；建议把版本 tag 直接写入链接（例如 `v1.1.0`），只保留 `{os}`/`{arch}`/`{ext}` 占位符，配置者需确保最终 URL 可访问。
 | `--release-page` | GitHub 该版本 Release 页 | 平台未知或该平台无发布产物时的兜底链接 |
 | `--update-info-file` | 空 | 独立加载升级公告 JSON 文件；relay 每 5 秒检查元数据，文件变更后重新解析，删除文件时恢复启动时配置。
+| `--directory-url` | 空 | 节点模式：签名节点列表的 https 地址（官方列表是 `https://relay-list.ifly.qzz.io/v1/directory`）。relay 按自己 TLS 证书的指纹在列表里认出自己，发以本节点前缀开头的协助码、执行管理员设的节点状态，并把列表转发给新客户端。要求 TLS 和 `--state-dir`，不能与 `--no-auth` 同用。入网流程见[部署说明](docs/DEPLOYMENT.md#节点模式加入节点列表) |
+| `--directory-refresh` | `5m` | 节点模式拉取列表的间隔（不小于 `1m`）；拉不到时继续用手里那份，直到它过期 |
 | `--no-auth` | `false` | 固定码无鉴权模式，仅限完全可信私网 |
 | `--plain` | `false` | 非 TLS 模式（仅开发测试） |
 | `--gen-certs` | `false` | 生成自签证书后退出 |
@@ -334,7 +353,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `--server` | 内置公共 relay `23.95.78.14:8443` | 中转服务器地址（也可用环境变量 `REMOTE_RELAY_SERVER` 覆盖）。默认 relay 位于海外，见上方「默认 relay 与自建」 |
+| `--server` | 按节点列表自动选 | 中转服务器地址（也可用环境变量 `REMOTE_RELAY_SERVER` 覆盖）。写了就只连这一台；不写时按节点列表自动选节点，见上方「默认 relay、节点列表与自建」 |
 | `--insecure` | `true` | 跳过 TLS 校验（自签 relay 用；对接受信 CA relay 改 `false`） |
 | `--ca` | - | CA 证书文件 |
 | `--trust-new-cert` | `false` | 接受与首次连接时不一致的 relay 证书指纹并重新记录（relay 确实换了证书时用） |
@@ -346,6 +365,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--standalone` | `false` | 进程内启动 relay 并监听 `--standalone-listen`，LAN 直连场景 |
 | `--standalone-listen` | `:8443` | standalone relay 监听地址 |
 | `--code-file` | - | 注册后把协助码+有效期以 JSON 原子写到该文件（供宿主程序读取） |
+| `--log-file` | `auto` | 状态输出和日志另写一份到文件，协助码打码成 `********`：`auto` 写到 `<临时目录>/remote-assist-<用户>/share-<pid>.log`（5 MB 轮转，启动时删除 7 天前的旧文件），`off` 关闭，也可以写文件路径。也可用环境变量 `REMOTE_ASSIST_LOG` 设置，命令行优先 |
 | `--root` | - | 可选：把文件工具限制在该子树（未设 = 不限制）。防手滑，非安全边界 |
 | `--allow-exec` | - | exec 命令白名单（逗号分隔，空=仅受黑名单约束） |
 | `--allow-pty` | false | 开启真终端（PTY）；默认关闭，因为 shell 能绕过 `--allow-exec`、`--deny-exec` 与 `--root` |
@@ -358,7 +378,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| `--server` | 内置公共 relay `23.95.78.14:8443` | 中转服务器地址（可用 `REMOTE_RELAY_SERVER` 覆盖） |
+| `--server` | 按协助码找节点 | 中转服务器地址（可用 `REMOTE_RELAY_SERVER` 覆盖）。写了就只连这一台；不写时按协助码的第一位在节点列表里找发码的节点 |
 | `--code` | - | 协助码（SSH/直连模式必填；MCP bootstrap 模式留空，由 `connect` 工具提供） |
 | `--insecure` | `true` | 跳过 TLS 校验（同 share） |
 | `--ca` | - | CA 证书文件 |
@@ -369,6 +389,7 @@ remote-assist-relay-windows-amd64.exe run --listen :8443 --ttl 1h
 | `--bind-ip` | - | 指定 UDP 绑定 IP |
 | `--mcp-stdio` | `false` | 作为 MCP stdio server 运行（供任何支持 MCP 的 AI agent） |
 | `--legacy-ssh` | `false` | 强制传统 SSH 隧道模式（不加 `--mcp-stdio` 时即此模式） |
+| `--log-file` | `auto` | 同 share（文件名 `help-<pid>.log`）；`--mcp-stdio` 下日志路径只打到 stderr，工具响应内容不进文件 |
 | `--plain` | `false` | 非 TLS（仅开发） |
 
 ## MCP 工具一览（12 个）
