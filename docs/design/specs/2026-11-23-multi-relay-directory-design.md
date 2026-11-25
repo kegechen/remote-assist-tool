@@ -336,9 +336,7 @@
   - `<管理域名>`：`/admin`（页面）和 `/api/*`。用 Cloudflare Access 保护（Zero Trust 免费版即可），Worker 自己还要再校验 `Cf-Access-Jwt-Assertion`（team JWKS + AUD），防止 Access 配错时裸奔。
   - **兜底（用不了 Cloudflare Access 时）**：管理端改用 secret 令牌加每 IP 限频，令牌只放在你本机。因为状态密钥只能改状态、改不了节点集合（见 3.3），令牌泄露的最坏后果也只是可用性问题。
 - **KV**：
-  - `nodes/<prefix>`：证书信封、状态、权重
-  - `config`：策略、默认前缀
-  - `status_key_cert`、`revocations`
+  - `state`：全部可编辑状态放在一个键里——每个节点的证书信封、状态、权重，策略、默认前缀，状态密钥授权，吊销列表。KV 没有跨键事务，分开存的话写到一半失败会留下一半新一半旧（定时重签会把它发出去）；`list` 又是最终一致的（新键最长约 60 秒才列得出来），靠 `list` 枚举节点会把刚上传的节点悄悄漏掉。32 个节点也不到 100 KB。
   - `directory/current`、`directory/history/<serial>`（保留最近 50 份）
   - `audit/<ts>`：操作人邮箱、改动内容
   - 写入只发生在管理员保存时和每日定时任务，远低于免费额度。
