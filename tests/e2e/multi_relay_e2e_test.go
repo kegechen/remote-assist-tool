@@ -42,9 +42,9 @@ import (
 //	go -C /tmp/rat-v123 build -o /tmp/cli-v123.exe ./cmd/remote
 //	RAT_RELEASED_CLI=/tmp/cli-v123.exe RAT_DEPLOYED_RELAY=/tmp/relay-deployed.exe go test ./tests/e2e/ -run MultiRelay -v
 //
-// CI（环境变量 CI 非空）上默认跳过，和本包其它要预先构建二进制的 e2e 一样不在 CI 跑：CI 的主步骤是
-// go test ./... -timeout 120s，各包并行，这里还要另编两个二进制、起多个进程，既可能超时也容易受负载影响。
-// 要在 CI 上跑就设 RAT_E2E_MULTI_RELAY=1（并给这个包单独放宽 -timeout）。
+// CI（环境变量 CI 非空）上默认跳过：CI 的主步骤是 go test ./... -timeout 120s，各包并行，这里还要另编两个二进制、
+// 起多个进程，既可能超时也容易受负载影响。设 RAT_E2E_MULTI_RELAY=1 才跑——.github/workflows/test.yml 在 ubuntu 上
+// 单独一步这样跑，放宽了 -timeout，RAT_RELEASED_CLI 用 v1.2.3 源码编的 remote。
 
 const e2eBuildTag = "remoteassist_e2e"
 

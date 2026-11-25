@@ -27,6 +27,23 @@ jobs:
       - name: Run all tests
         shell: bash
         run: go test ./... -timeout 120s
+      # 多 relay e2e 在上一步里因 CI 环境变量跳过：它要另编两个带 remoteassist_e2e tag 的二进制、起多个进程，
+      # 挤在全量并行的 120s 里容易超时。这里单独跑、放宽超时。旧客户端兼容用 v1.2.3（最后一个不认节点列表的发布版），
+      # 从 tag 源码编；RAT_DEPLOYED_RELAY（线上没有节点模式的 relay）在 CI 上没有，那一条跳过。
+      - name: Build released CLI v1.2.3 (multi-relay compat)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          git fetch --depth=1 origin tag v1.2.3
+          mkdir -p "$RUNNER_TEMP/rat-v123"
+          git archive v1.2.3 | tar -x -C "$RUNNER_TEMP/rat-v123"
+          go -C "$RUNNER_TEMP/rat-v123" build -o "$RUNNER_TEMP/cli-v123" ./cmd/remote
+      - name: Multi-relay e2e
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          RAT_E2E_MULTI_RELAY: '1'
+        run: RAT_RELEASED_CLI="$RUNNER_TEMP/cli-v123" go test ./tests/e2e/ -run MultiRelay -v -count=1 -timeout 10m
       - name: Race detector (internal packages)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
