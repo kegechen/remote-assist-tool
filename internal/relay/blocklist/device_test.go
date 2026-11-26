@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -363,9 +364,15 @@ func TestDeviceListTempFilesDoNotCollide(t *testing.T) {
 		_, err := os.Stat(p)
 		return err == nil
 	}
-	var patterns []string
+	// 两本名单各有一个后台写盘协程，都会调 record：追加要加锁。
+	var (
+		mu       sync.Mutex
+		patterns []string
+	)
 	record := func(path string, data []byte, pattern string) error {
+		mu.Lock()
 		patterns = append(patterns, filepath.Base(path)+" "+pattern)
+		mu.Unlock()
 		return writeFileAtomicPattern(path, data, pattern)
 	}
 
@@ -402,8 +409,11 @@ func TestDeviceListTempFilesDoNotCollide(t *testing.T) {
 	if err := ipl.Close(); err != nil {
 		t.Fatal(err)
 	}
+	mu.Lock()
+	got := append([]string(nil), patterns...)
+	mu.Unlock()
 	var sawDev, sawIP bool
-	for _, p := range patterns {
+	for _, p := range got {
 		switch {
 		case strings.HasPrefix(p, "blocklist-devices.json "):
 			sawDev = true
@@ -418,7 +428,7 @@ func TestDeviceListTempFilesDoNotCollide(t *testing.T) {
 		}
 	}
 	if !sawDev || !sawIP {
-		t.Fatalf("两本名单都应写过盘：%q", patterns)
+		t.Fatalf("两本名单都应写过盘：%q", got)
 	}
 }
 
