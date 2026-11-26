@@ -230,8 +230,8 @@ func TestDialNodeAutoRacesWithinAddress(t *testing.T) {
 	if r.Transport != TransportQUIC {
 		t.Fatalf("transport=%q，TCP 黑洞时应改走 QUIC", r.Transport)
 	}
-	if r.TCPErr != nil && !tcpUnreachable(r.TCPErr) {
-		t.Logf("tcpErr = %v", r.TCPErr)
+	if r.OtherErr != nil && !tcpUnreachable(r.OtherErr) {
+		t.Logf("tcpErr = %v", r.OtherErr)
 	}
 }
 

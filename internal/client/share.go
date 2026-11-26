@@ -762,7 +762,7 @@ func (s *ShareMode) register() error {
 	// 收到应答只说明那一刻 relay 发来的数据还过得来。协助码一显示出来，用户就会把它交给协助端；这条连接要是已经
 	// 收不到 relay 发来的数据（被网络干扰时可能从握手、注册之后就开始丢），会话就绪、协助端的请求都到不了，显示出来
 	// 的协助码根本用不了。所以先确认一次再显示，不通就当这次注册失败：什么都不显示、不写协助码文件，退避后重连
-	// （auto 模式下 TCP 收不到数据时改走 QUIC）。放在改任何状态之前：失败的这一次不留痕迹，换码提示等下一次照常给。
+	// （auto 模式下 TCP 收不到数据时优先用 QUIC）。放在改任何状态之前：失败的这一次不留痕迹，换码提示等下一次照常给。
 	if err := s.client.probeDownlink(downlinkProbeTimeout); err != nil {
 		return err
 	}
@@ -1185,12 +1185,12 @@ var errRelayServer = errors.New("server error")
 // waitSessionReady 等待会话就绪。onToolHello 在处理 relay 上的 ToolHello 之前调用（可为 nil）。
 func (s *ShareMode) waitSessionReady(onToolHello func()) (*proto.SessionReady, error) {
 	// 等新协助端本来就是无限期的，但连接得是通的：relay 对每个心跳都回一个（约 30 秒一次），超过 relaySilenceTimeout
-	// 一条消息都没收到，就是连接已经不通了，返回 *relaySilentError 去重连（auto 模式下 TCP 收不到数据时改走 QUIC）。
-	// 否则 relay 发来的数据被网络丢掉时，share 会一直停在「等待协助端连接...」，而协助端加入的消息永远到不了：
-	// 心跳照常发得出去（写不失败），TCP keepalive 也照常有回应，别的办法都发现不了。
+	// 一个字节都没收到，就是连接已经不通了，返回 *relaySilentError 去重连（重连后注册时还收不到数据、或者短时间内
+	// 又这样静默一次，auto 模式下之后先拨 QUIC）。否则 relay 发来的数据被网络丢掉时，share 会一直停在「等待协助端连接...」，而协助端加入的消息永远
+	// 到不了：心跳照常发得出去（写不失败），TCP keepalive 也照常有回应，别的办法都发现不了。
 	//
-	// 读 deadline 每读一条消息之前重新设，不会打断健康的等待。不能沿用上一轮 handleTunnel 留下、不再往后推的那个：
-	// 「协助端断开→协助码仍有效→回来等新协助端」这条路会被它在到点时打断，白白做一整轮重连。
+	// readIdle 每次读连接之前重新推 deadline，不会打断健康的等待，也不会沿用上一轮 handleTunnel 留下的那个：
+	// 「协助端断开→协助码仍有效→回来等新协助端」这条路要是被它在到点时打断，就白白做一整轮重连。
 	//
 	// 排空迁移（spec 6.3）只在这里做：没有协助端连着。进来时看一次，之后每收到心跳回应（约 30 秒一次）再看一次，
 	// 不另起定时器，也不打断读：json 解码器读超时后就不能再用了。迁移时要拨别的节点，这期间不读当前连接；
@@ -1201,10 +1201,9 @@ func (s *ShareMode) waitSessionReady(onToolHello func()) (*proto.SessionReady, e
 			return nil, errNodeMigrated
 		}
 		check = false
-		s.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
-		msg, err := s.client.ReadMessage()
+		msg, err := s.client.readIdle(relaySilenceTimeout)
 		if err != nil {
-			return nil, s.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
+			return nil, err
 		}
 
 		switch msg.Type {
@@ -1502,15 +1501,14 @@ func (s *ShareMode) handleTunnel() error {
 
 	// Main loop: read from relay, forward to SSH (connecting on demand)
 	for {
-		// 每读一条消息之前重新设读 deadline：relay 对每个心跳都回一个，太久一条都没有就是连接不通了（见 waitSessionReady）。
-		s.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
-		msg, err := s.client.ReadMessage()
+		// relay 对每个心跳都回一个，太久一个字节都没收到就是连接不通了（见 waitSessionReady）。
+		msg, err := s.client.readIdle(relaySilenceTimeout)
 		if err != nil {
 			closeSSH()
 			if err.Error() == "EOF" {
 				return nil
 			}
-			return s.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
+			return err
 		}
 
 		switch msg.Type {

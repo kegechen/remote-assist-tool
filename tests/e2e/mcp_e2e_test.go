@@ -287,8 +287,9 @@ func send(t *testing.T, w io.Writer, line string) {
 	}
 }
 
-// codeRE 匹配 "协助码: XXXX-XXXXXX" 格式，提取不含连字符的原始码
-var codeRE = regexp.MustCompile(`协助码[:：]?\s*([A-Za-z0-9]{4}-[A-Za-z0-9]+)`)
+// codeRE 匹配 "协助码: XXXX-XXXX-XXXX" 格式（formatCode 每 4 位插一个连字符），取完整的码：段数不限，旧版的
+// 8 位码只有两段。只取前两段的话 12 位码会被截成 8 位，拿去加入只会被 relay 拒绝。
+var codeRE = regexp.MustCompile(`协助码[:：]?\s*([A-Za-z0-9]{4}(?:-[A-Za-z0-9]+)+)`)
 
 func waitCode(t *testing.T, buf *lockedBuffer, timeout time.Duration) string {
 	t.Helper()

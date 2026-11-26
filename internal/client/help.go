@@ -138,7 +138,7 @@ func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinRespon
 	}
 	// 同 ShareMode.register：收到应答只说明那一刻 relay 发来的数据还过得来，确认之后还收得到再报「已连接」。
 	// 不通就当这次加入失败（调用方会关掉连接，relay 随即腾出协助端的位置），auto 模式下 TCP 收不到数据时
-	// joinVia 改走 QUIC 再加入一次。
+	// joinVia 优先用 QUIC 再加入一次。
 	if err := h.client.probeDownlink(downlinkProbeTimeout); err != nil {
 		return nil, err
 	}
@@ -452,11 +452,10 @@ func (h *HelpMode) handleTunnel() error {
 	// Single long-lived goroutine: reads from relay, writes to current local SSH connection
 	go func() {
 		for {
-			// 每读一条消息之前重新设读 deadline：relay 对每个心跳都回一个，太久一条都没有就是连接不通了。
-			h.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
-			msg, err := h.client.ReadMessage()
+			// relay 对每个心跳都回一个，太久一个字节都没收到就是连接不通了（见 readIdle）。
+			msg, err := h.client.readIdle(relaySilenceTimeout)
 			if err != nil {
-				relayDone <- h.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
+				relayDone <- err
 				listener.Close() // unblock Accept
 				return
 			}

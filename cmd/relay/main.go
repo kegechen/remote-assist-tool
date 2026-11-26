@@ -479,6 +479,8 @@ func openDeviceBlocklist(opts relayOptions, recs *blocklist.Records) *blocklist.
 		log.Printf("ERROR: device blocklist persistence unavailable (%v); running in memory-only mode, device bans will not survive restart", err)
 	case dev.Persistent():
 		log.Printf("Device blocklist enabled (file: %s)", cfg.Path)
+	default:
+		log.Printf("WARNING: device blocklist running in memory-only mode (--blocklist-db is empty)")
 	}
 	return dev
 }

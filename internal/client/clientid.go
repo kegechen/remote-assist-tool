@@ -95,7 +95,8 @@ const helpDeviceIDPrefix = "remote-assist/help-device-id/v1\x00"
 //
 // 不发 ClientID 原文：relay 凭 ClientID 就能接管这台机器上 share 的会话、拿到当前协助码，而 help 连上的
 // relay 不一定可信。混进 relayFP：同一台机器发给每个 relay 的值都不同，恶意 relay 拿到的值到别的 relay 上
-// 冒名制造失败封不掉这台设备，几个 relay 之间也没法按它把同一个用户对上。
+// 冒名制造失败封不掉这台设备，几个 relay 之间也没法按它把同一个用户对上。这只在 TLS 下成立：明文连接（--plain，
+// 仅开发测试）relayFP 为空，发给所有明文 relay 的值都一样，而且路上看得见（README「按设备计分」写明了）。
 //
 // ClientID 落不了盘（每次都是新值）时返回空：带了 relay 也只会把每次加入当成新设备，不如不带，
 // 让 relay 退回按身份串加来源计。

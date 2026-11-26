@@ -38,6 +38,7 @@ func resetTCPStalls(t *testing.T) {
 	reset := func() {
 		tcpStalls.Lock()
 		tcpStalls.addrs = map[string]time.Time{}
+		tcpStalls.idle = map[string]time.Time{}
 		tcpStalls.Unlock()
 	}
 	reset()
@@ -52,14 +53,15 @@ func newMsg(typ proto.MessageType, payload any) *proto.Message {
 	return msg
 }
 
-// scriptRelay 是明文的假 relay，只接一条连接：收到的每条消息交给 onMsg，它返回的消息发回去（nil 不回）；
-// push 主动往这条连接上发。
+// scriptRelay 是假 relay（明文，或 startTLSScriptRelay 的 TLS），只接一条连接：收到的每条消息交给 onMsg，它返回的
+// 消息发回去（nil 不回）；push 主动往这条连接上发。
 type scriptRelay struct {
 	addr      string
 	connected chan struct{}
 
-	mu  sync.Mutex
-	enc *json.Encoder
+	mu   sync.Mutex
+	conn net.Conn
+	enc  *json.Encoder
 }
 
 func startScriptRelay(t *testing.T, onMsg func(*proto.Message) *proto.Message) *scriptRelay {
@@ -68,6 +70,26 @@ func startScriptRelay(t *testing.T, onMsg func(*proto.Message) *proto.Message) *
 	if err != nil {
 		t.Fatal(err)
 	}
+	return serveScript(t, ln, onMsg)
+}
+
+// startTLSScriptRelay 同 startScriptRelay，走 TLS（自签证书，客户端用 tlsConfigFor 跳过校验连）。
+func startTLSScriptRelay(t *testing.T, onMsg func(*proto.Message) *proto.Message) *scriptRelay {
+	t.Helper()
+	cert, key := newCertPair(t)
+	pair, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{pair}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveScript(t, ln, onMsg)
+}
+
+func serveScript(t *testing.T, ln net.Listener, onMsg func(*proto.Message) *proto.Message) *scriptRelay {
+	t.Helper()
 	r := &scriptRelay{addr: ln.Addr().String(), connected: make(chan struct{})}
 	var conn atomic.Pointer[net.Conn]
 	go func() {
@@ -77,6 +99,7 @@ func startScriptRelay(t *testing.T, onMsg func(*proto.Message) *proto.Message) *
 		}
 		conn.Store(&c)
 		r.mu.Lock()
+		r.conn = c
 		r.enc = json.NewEncoder(c)
 		r.mu.Unlock()
 		close(r.connected)
@@ -107,6 +130,37 @@ func (r *scriptRelay) push(msg *proto.Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_ = r.enc.Encode(msg)
+}
+
+// pushSlowly 把 msg 分成 chunks 段、每段隔 gap 发出去：慢链路上的一条大消息，一直在收数据，整条却要读很久。
+func (r *scriptRelay) pushSlowly(msg *proto.Message, chunks int, gap time.Duration) {
+	<-r.connected
+	data, err := json.Marshal(msg)
+	if err != nil {
+		panic(err)
+	}
+	data = append(data, '\n')
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	size := (len(data) + chunks - 1) / chunks
+	for len(data) > 0 {
+		n := min(size, len(data))
+		if _, err := r.conn.Write(data[:n]); err != nil {
+			return
+		}
+		data = data[n:]
+		if len(data) > 0 {
+			time.Sleep(gap)
+		}
+	}
+}
+
+// hangUp 关掉这条连接（客户端读到 EOF 一类的错误，不是超时）。
+func (r *scriptRelay) hangUp() {
+	<-r.connected
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.conn.Close()
 }
 
 // answerRegister 回注册请求，heartbeat 为 true 时也回心跳（真 relay 的行为），别的不理。
@@ -293,8 +347,8 @@ func timeoutErr() error {
 	return &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 }
 
-// silentErr 只在 auto 模式下的 TCP 上记下「这个地址的 TCP 收不到数据」，之后拨它先走 QUIC；用户限定了 TCP 时
-// 提示可以改用 QUIC；别的错误原样返回。
+// 刚连上就等不到应答时，silentErr 只在 auto 模式下的 TCP 上记下「这个地址的 TCP 收不到数据」，之后拨它先走 QUIC；
+// 用户限定了 TCP 时提示可以改用 QUIC；别的错误原样返回。
 func TestSilentErrMarksStalledTCPOnlyInAutoMode(t *testing.T) {
 	const addr = "Relay.Example.Test:8443"
 	cases := []struct {
@@ -304,7 +358,7 @@ func TestSilentErrMarksStalledTCPOnlyInAutoMode(t *testing.T) {
 		node      *nodePin
 		fallback  bool
 		hint      bool // 提示 --transport quic
-		tcpNote   bool // 说明 TCP 连接还在、收不到数据
+		tcpNote   bool // 说明 TCP 连接已经建立、收不到数据
 	}{
 		{name: "auto 下的 TCP", cfg: Config{UseTLS: true}, transport: TransportTCP, fallback: true, tcpNote: true},
 		{name: "显式 auto", cfg: Config{UseTLS: true, Transport: TransportAuto}, transport: TransportTCP, fallback: true, tcpNote: true},
@@ -321,7 +375,7 @@ func TestSilentErrMarksStalledTCPOnlyInAutoMode(t *testing.T) {
 			cfg.ServerAddr = addr
 			c := NewClient(&cfg)
 			c.transport, c.node = tc.transport, tc.node
-			err := c.silentErr(timeoutErr(), "加入应答", 15*time.Second)
+			err := c.silentErr(timeoutErr(), "加入应答", 15*time.Second, true)
 			var silent *relaySilentError
 			if !errors.As(err, &silent) {
 				t.Fatalf("读超时应换成 *relaySilentError，实际: %v", err)
@@ -347,7 +401,7 @@ func TestSilentErrMarksStalledTCPOnlyInAutoMode(t *testing.T) {
 
 	c := NewClient(&Config{ServerAddr: addr, UseTLS: true})
 	c.transport = TransportTCP
-	if err := c.silentErr(io.EOF, "加入应答", time.Second); err != io.EOF {
+	if err := c.silentErr(io.EOF, "加入应答", time.Second, true); err != io.EOF {
 		t.Fatalf("不是超时的错误应原样返回，实际: %v", err)
 	}
 }
@@ -359,7 +413,7 @@ func TestSilentErrLogsStallOnce(t *testing.T) {
 	c := NewClient(&Config{ServerAddr: "relay.example.test:8443", UseTLS: true})
 	c.transport = TransportTCP
 	for i := 0; i < 3; i++ {
-		_ = c.silentErr(timeoutErr(), relaySilenceWhat, relaySilenceTimeout)
+		_ = c.silentErr(timeoutErr(), "心跳回应", downlinkProbeTimeout, true)
 	}
 	if n := strings.Count(logs.String(), "之后连它先走 QUIC"); n != 1 {
 		t.Fatalf("应只打一次，实际 %d 次:\n%s", n, logs.String())
@@ -428,12 +482,12 @@ func TestLogTransportQuietWhenQUICChosenForStalledTCP(t *testing.T) {
 	}
 }
 
-// 重试提示要说清楚这次改走 QUIC。
+// 重试提示要说清楚这次优先用 QUIC。不说「改走」：UDP 也不通时 TCP 照样会连上。
 func TestReconnectFailureSaysRetryUsesQUIC(t *testing.T) {
 	silent := &relaySilentError{addr: "relay.example.test:8443", transport: TransportTCP, what: "心跳回应",
-		wait: 10 * time.Second, fallback: true, err: timeoutErr()}
+		wait: 10 * time.Second, afterConnect: true, fallback: true, err: timeoutErr()}
 	line, _, _ := reconnectFailure(1, silent, time.Second)
-	want := "连接失败(第 1 次): 中转服务 relay.example.test:8443 在 10 秒内没有发来心跳回应（TCP 连接还在，但收不到它发回的数据，可能被网络干扰）；1s 后改走 QUIC（UDP）重试...\n"
+	want := "连接失败(第 1 次): 中转服务 relay.example.test:8443 在 10 秒内没有发来心跳回应（TCP 连接已经建立，但收不到它发回的数据，可能被网络干扰）；1s 后优先用 QUIC（UDP）重试...\n"
 	if line != want {
 		t.Fatalf("提示:\n%q\n期望:\n%q", line, want)
 	}
@@ -572,8 +626,8 @@ func TestShareMovesToQUICBeforeShowingCodeWhenTCPDownlinkStalls(t *testing.T) {
 	if n := strings.Count(got, "请复制给你的 AI 助手"); n != 1 {
 		t.Fatalf("协助码应只显示一次（QUIC 上注册好之后），实际 %d 次，输出:\n%s", n, got)
 	}
-	if !strings.Contains(got, "改走 QUIC（UDP）重试") {
-		t.Fatalf("重试提示应说改走 QUIC，输出:\n%s", got)
+	if !strings.Contains(got, "优先用 QUIC（UDP）重试") {
+		t.Fatalf("重试提示应说优先用 QUIC，输出:\n%s", got)
 	}
 
 	// 显示出来的协助码真的用得了：协助端加入，share 收到会话就绪。

@@ -137,37 +137,39 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 	// 导致后台 goroutine 退出 → MCP 工具调用全部失效。
 	h.client.StartHeartbeatLoop(30 * time.Second)
 	// 后台 ReadMessage 循环，把工具消息投给 bridge
-	go func() {
-		for {
-			// 读 deadline 兜底检测隧道死亡：心跳每 30s 且 relay 回 echo，健康隧道每 30s
-			// 必有帧重置本 deadline；取 75s（容 2 个心跳周期）比原 2min 更快发现静默死亡
-			// → 更早 Disconnect 唤醒在途调用。
-			h.client.SetReadDeadline(time.Now().Add(75 * time.Second))
-			msg, err := h.client.ReadMessage()
-			if err != nil {
-				// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
-				err = h.client.silentErr(err, relaySilenceWhat, 75*time.Second)
-				bridge.Disconnect(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
-				return
-			}
-			if msg.Type == proto.MsgError {
-				if gone := peerGoneError(msg); gone != nil {
-					// 对端没了，这条连接不会再有工具响应：唤醒在途调用并关掉 relay，
-					// 否则要干等 75s 读超时才发现，且 relay 端 Help 槽也一直占着。
-					bridge.Disconnect(gone)
-					h.client.Close()
-					return
-				}
-			}
-			dispatchHelpToolMessage(msg, bridge)
-		}
-	}()
+	go h.mcpReadLoop(bridge)
 
 	srv := mcp.NewServer(bridge)
 	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 		return fmt.Errorf("mcp serve: %w", err)
 	}
 	return nil
+}
+
+// mcpReadLoop 是 RunMCPMode 的 relay 读循环：把工具消息投给 bridge，直到隧道断开或对端没了，返回让 bridge 断开的原因。
+func (h *HelpMode) mcpReadLoop(bridge *mcp.Bridge) error {
+	for {
+		// 读超时兜底检测隧道死亡：心跳每 30s 且 relay 回 echo，健康隧道每 30s 必有数据；取 mcpRelaySilenceTimeout
+		// （容 2 个心跳周期）比原 2min 更快发现静默死亡 → 更早 Disconnect 唤醒在途调用。按多久没收到数据算（readIdle），
+		// 慢链路上读一个大文件的响应不会被当成静默。
+		msg, err := h.client.readIdle(mcpRelaySilenceTimeout)
+		if err != nil {
+			// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
+			err = fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err)
+			bridge.Disconnect(err)
+			return err
+		}
+		if msg.Type == proto.MsgError {
+			if gone := peerGoneError(msg); gone != nil {
+				// 对端没了，这条连接不会再有工具响应：唤醒在途调用并关掉 relay，
+				// 否则要干等读超时才发现，且 relay 端 Help 槽也一直占着。
+				bridge.Disconnect(gone)
+				h.client.Close()
+				return gone
+			}
+		}
+		dispatchHelpToolMessage(msg, bridge)
+	}
 }
 
 // localIncompatError 握手因版本不兼容失败。文本是给命令行用户看的 LocalHint

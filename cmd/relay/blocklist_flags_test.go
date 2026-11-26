@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +169,27 @@ func TestOpenBlocklistDerivesDeviceFile(t *testing.T) {
 	}
 	if ipData, err := os.ReadFile(db); err == nil && bytes.Contains(ipData, []byte(key)) {
 		t.Fatal("设备封禁不应写进 IP 名单文件")
+	}
+}
+
+// 设备名单跟着 IP 名单进入纯内存模式时同样要打 WARNING：重启后设备封禁全部失效，运维得从启动日志里看得出来。
+func TestOpenBlocklistWarnsWhenDeviceListIsMemoryOnly(t *testing.T) {
+	var logs bytes.Buffer
+	prev, flags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(flags) })
+
+	memOnly, err := parseRelayOptions([]string{"--blocklist-db="}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bl, dev, recs := openBlocklist(memOnly)
+	t.Cleanup(func() { _ = dev.Close(); _ = bl.Close(); _ = recs.Close() })
+	if dev == nil || dev.Persistent() {
+		t.Fatal("前置：设备名单应以纯内存模式打开")
+	}
+	if !strings.Contains(logs.String(), "WARNING: device blocklist running in memory-only mode") {
+		t.Fatalf("设备名单纯内存时应打 WARNING，日志:\n%s", logs.String())
 	}
 }
 

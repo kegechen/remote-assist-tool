@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/remote-assist/tool/internal/crypto"
@@ -42,22 +43,29 @@ var joinTimeout = 15 * time.Second
 // 正常是一个往返；留够丢包重传的余量。var 仅为测试可调。
 var downlinkProbeTimeout = 10 * time.Second
 
-// relaySilenceTimeout 是连着 relay 时最多多久收不到它的任何消息，超过就当连接已经不通。两端每 30 秒发一次心跳，
-// relay 每个都回（最早的版本就是这样），正常时最多隔 30 秒就有一条；这里留出三个心跳周期。
+// probeHeartbeats 是 probeDownlink 等待期间一共发几个心跳：开头一个，之后均匀补发。
+const probeHeartbeats = 3
+
+// relaySilenceTimeout 是连着 relay 时最多多久一个字节都收不到，超过就当连接已经不通（见 readIdle）。两端每 30 秒发一次
+// 心跳，relay 每个都回（最早的版本就是这样），正常时最多隔 30 秒就有数据；这里留出三个心跳周期。
 //
 // TCP 连得上、relay 发来的数据却被网络丢掉时（下行被干扰），只有这样才发现得了：心跳照常发得出去（写不失败），
 // relay 回的不带数据的 ACK 也照常过得来，TCP keepalive 一切正常。var 仅为测试可调。
 var relaySilenceTimeout = 90 * time.Second
 
-// relaySilenceWhat 是 relaySilentError 里等的东西：连着 relay 时一条消息都没等到。
-const relaySilenceWhat = "任何消息（心跳也没有回应）"
+// mcpRelaySilenceTimeout 是 MCP 模式（RunMCPMode）读循环的 relaySilenceTimeout：容两个心跳周期，更快发现隧道死亡、
+// 唤醒在途的工具调用。var 仅为测试可调。
+var mcpRelaySilenceTimeout = 75 * time.Second
+
+// relaySilenceWhat 是 relaySilentError 里等的东西：连着 relay 时一个字节都没等到。
+const relaySilenceWhat = "任何数据（心跳也没有回应）"
 
 // RelaySilentMarker 是 relaySilentError 文案里稳定的片段（Error 拼出「中转服务 X 在 N 秒内没有发来…」）。
 // 错误经 MCP 传到 GUI 时只剩文本，GUI 的错误分类靠它认出这是「中转服务收不到回应」的超时类，
 // 不然会落到 join failed 被说成协助码错误。
 const RelaySilentMarker = "内没有发来"
 
-// relaySilentError 表示 relay 在时限内一条消息都没发来：请求或心跳发出去了，等的回应没有到。
+// relaySilentError 表示 relay 在时限内什么都没发来：请求或心跳发出去了，等的回应没有到。
 // TCP 握手成功、请求的应答也到过，不代表之后的数据还过得来：被网络干扰时，relay 发回的数据可能从某一刻起
 // 全被丢掉，而发出去的方向一切正常。
 type relaySilentError struct {
@@ -65,6 +73,11 @@ type relaySilentError struct {
 	transport string // 当时连接用的传输
 	what      string // 等的是什么
 	wait      time.Duration
+	// afterConnect：刚连上时等不到（注册、加入的应答，或之后的下行确认，见 readReply、probeDownlink）。握手刚刚过得来，
+	// 紧接着的数据却过不来，多半是发回的数据被网络丢掉了。为 false 是连着之后的常驻读循环里很久收不到（readIdle）：
+	// 断网、切换网络、relay 掉电也都是这样，分不出是哪种，不下「被干扰」的结论；单独一次也不据此改走 QUIC，短时间内
+	// 反复才改（见 repeatTCPSilence）。
+	afterConnect bool
 	// explicitTCP：用户用 --transport tcp 限定了只走 TCP，提示可以改用 QUIC。
 	explicitTCP bool
 	// fallback：当时是 auto 模式下的 TCP，已经记下这个地址的 TCP 收不到数据（markTCPStalled），之后拨它先走 QUIC。
@@ -74,8 +87,11 @@ type relaySilentError struct {
 
 func (e *relaySilentError) Error() string {
 	msg := fmt.Sprintf("中转服务 %s 在%s%s%s", e.addr, waitText(e.wait), RelaySilentMarker, e.what)
-	if e.transport == TransportTCP {
-		msg += "（TCP 连接还在，但收不到它发回的数据，可能被网络干扰）"
+	switch {
+	case !e.afterConnect:
+		msg += "，连接可能已经断了"
+	case e.transport == TransportTCP:
+		msg += "（TCP 连接已经建立，但收不到它发回的数据，可能被网络干扰）"
 		if e.explicitTCP {
 			msg += "，可以改用 --transport quic 再试"
 		}
@@ -93,11 +109,12 @@ func waitText(d time.Duration) string {
 	return fmt.Sprintf(" %d 秒", int(d.Round(time.Second)/time.Second))
 }
 
-// quicRetryNote 是重试提示里传输那一段：TCP 收不到数据、这次改走 QUIC 时为「改走 QUIC（UDP）」，否则为空。
+// quicRetryNote 是重试提示里传输那一段：TCP 收不到数据、这次先拨 QUIC 时为「优先用 QUIC（UDP）」，否则为空。
+// 不说「改走」：UDP 也不通时 TCP 照样会在竞速里连上（logTransport 会说明）。
 func quicRetryNote(err error) string {
 	var se *relaySilentError
 	if errors.As(err, &se) && se.fallback {
-		return "改走 QUIC（UDP）"
+		return "优先用 QUIC（UDP）"
 	}
 	return ""
 }
@@ -190,7 +207,9 @@ type Client struct {
 	peerFP string
 	// pending 是 probeDownlink 顺带读到的消息（不是心跳回应的那些），之后的 ReadMessage 先返回它们。换连接时清空。
 	pending []*proto.Message
-	mu      sync.Mutex
+	// idle 不为零时（readIdle 里），解码器每次真去连接上读之前把读 deadline 推到这么久之后，见 idleReader。
+	idle atomic.Int64
+	mu   sync.Mutex
 	// stunMu/relaySTUN：relay 在注册/加入响应里下发的 STUN 服务器（每次注册/加入覆盖）。
 	// 写在注册/加入的 goroutine，读在后台启动 P2P 的 goroutine，单独加锁。
 	stunMu    sync.Mutex
@@ -281,12 +300,12 @@ func (c *Client) Connect() error {
 		}
 	}
 
-	conn, transport, tcpErr, err := c.dialRelay(tlsConfig, c.transport)
+	conn, transport, otherErr, err := c.dialRelay(tlsConfig, c.transport)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 	if c.config.Transport == "" || c.config.Transport == TransportAuto {
-		logTransport(c.config.ServerAddr, transport, c.transport, tcpErr)
+		logTransport(c.config.ServerAddr, transport, c.transport, otherErr)
 	}
 	c.transport = transport
 	c.installConnLocked(conn)
@@ -309,8 +328,25 @@ func (c *Client) installConnLocked(conn net.Conn) {
 	c.conn = conn
 	c.peerFP = connPeerFP(conn)
 	c.enc = json.NewEncoder(conn)
-	c.dec = json.NewDecoder(conn)
+	c.dec = json.NewDecoder(idleReader{conn: conn, idle: &c.idle})
 	c.pending = nil
+}
+
+// idleReader 是解码器读连接时经过的一层：idle 不为零时，每次真去连接上读之前把读 deadline 推到 idle 之后，超时于是
+// 意味着「这么久一个字节都没收到」，而不是「这么久没读完一条消息」。为零时不碰 deadline，按调用方设的算
+// （readReply、probeDownlink、P2P 协商）。
+//
+// 一次 Read 在 TLS 上最多读一个 TLS 记录（16 KiB），推 deadline 的粒度就是它。
+type idleReader struct {
+	conn net.Conn
+	idle *atomic.Int64
+}
+
+func (r idleReader) Read(p []byte) (int, error) {
+	if d := time.Duration(r.idle.Load()); d > 0 {
+		r.conn.SetReadDeadline(time.Now().Add(d))
+	}
+	return r.conn.Read(p)
 }
 
 // Close 关闭连接
@@ -411,23 +447,49 @@ func (c *Client) readReply(what string) (*proto.Message, error) {
 	msg, err := c.ReadMessage()
 	c.SetReadDeadline(time.Time{})
 	if err != nil {
-		return nil, c.silentErr(err, what, wait)
+		return nil, c.silentErr(err, what, wait, true)
 	}
 	return msg, nil
 }
 
-// probeDownlink 确认 relay 发来的数据真的收得到：发一个心跳，等 relay 发来任意一条消息（relay 对每个心跳都回一个，
+// probeDownlink 确认 relay 发来的数据真的收得到：发心跳，等 relay 发来任意一条消息（relay 对每个心跳都回一个，
 // 最早的版本就是这样；这时已经注册或加入，旧 relay 也不会把它当成连接前的未知消息计分）。收到的不是心跳回应
 // （比如 relay 保留了配对、协助端的消息先到了）就留给之后的 ReadMessage。超时返回 *relaySilentError。
+//
+// 等待期间一共发 probeHeartbeats 个心跳：relay 对心跳限流时（同一出口 IP 一下子来了很多连接，比如 relay 重启后
+// 公司出口后面的 share 一起重连）直接丢掉，不回也不断开。只发一个的话，正好被丢的那个会白等满 timeout、被当成
+// 收不到数据；补发时限流的令牌早就补回来了。多出来的心跳回应由之后的读者照常跳过。
 func (c *Client) probeDownlink(timeout time.Duration) error {
 	if err := c.SendHeartbeat(); err != nil {
 		return err
 	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	interval := timeout / probeHeartbeats
+	go func() {
+		defer close(done)
+		if interval <= 0 { // 只有测试会把等待调得这么短；NewTicker 的间隔不能是零
+			return
+		}
+		tick := time.NewTicker(interval)
+		defer tick.Stop()
+		for i := 1; i < probeHeartbeats; i++ {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				_ = c.SendHeartbeat()
+			}
+		}
+	}()
 	c.SetReadDeadline(time.Now().Add(timeout))
 	msg, err := c.ReadMessage()
+	// 等补发的 goroutine 退出再返回：失败时调用方会关掉连接、马上重连，迟到的心跳落到新连接上就成了注册前的消息，
+	// relay 会把新连接关掉。
+	close(stop)
+	<-done
 	c.SetReadDeadline(time.Time{})
 	if err != nil {
-		return c.silentErr(err, "心跳回应", timeout)
+		return c.silentErr(err, "心跳回应", timeout, true)
 	}
 	if msg.Type != proto.MsgHeartbeat {
 		c.mu.Lock()
@@ -437,23 +499,46 @@ func (c *Client) probeDownlink(timeout time.Duration) error {
 	return nil
 }
 
-// silentErr 把读超时换成 *relaySilentError（what、wait 是等的东西和等了多久），别的错误原样返回。当前连接是 auto
-// 模式下的 TCP 时，记下这个地址的 TCP 收不到数据（markTCPStalled），之后拨它先走 QUIC。
-func (c *Client) silentErr(err error, what string, wait time.Duration) error {
+// readIdle 读下一条消息，idle 内一个字节都没从 relay 收到才算超时，返回 *relaySilentError。常驻读循环用它。
+// 按「多久没收到数据」而不是「多久没读完一条」算：慢链路上一条大消息（MCP 经 relay 读文件，单条近 2 MiB）读上
+// 好几分钟也是一直在收数据，不是 relay 静默。
+func (c *Client) readIdle(idle time.Duration) (*proto.Message, error) {
+	c.idle.Store(int64(idle))
+	msg, err := c.ReadMessage()
+	c.idle.Store(0)
+	if err != nil {
+		return nil, c.silentErr(err, relaySilenceWhat, idle, false)
+	}
+	return msg, nil
+}
+
+// silentErr 把读超时换成 *relaySilentError（what、wait 是等的东西和等了多久；afterConnect 见 relaySilentError），
+// 别的错误原样返回。当前连接是 auto 模式下的 TCP 时，刚连上就等不到、或者常驻读循环里短时间内第二次静默
+// （repeatTCPSilence），记下这个地址的 TCP 收不到数据（markTCPStalled），之后拨它先走 QUIC。
+func (c *Client) silentErr(err error, what string, wait time.Duration, afterConnect bool) error {
 	if !isNetTimeout(err) {
 		return err
 	}
 	c.mu.Lock()
-	e := &relaySilentError{what: what, wait: wait, transport: c.transport, err: err}
+	e := &relaySilentError{what: what, wait: wait, transport: c.transport, afterConnect: afterConnect, err: err}
 	if c.config != nil {
 		e.addr = c.config.ServerAddr
 		e.explicitTCP = c.config.Transport == TransportTCP
 	}
 	auto := c.autoTransportLocked()
 	c.mu.Unlock()
-	if e.transport == TransportTCP && auto && e.addr != "" {
+	if e.transport != TransportTCP || !auto || e.addr == "" {
+		return e
+	}
+	switch {
+	case afterConnect:
 		if markTCPStalled(e.addr) {
 			log.Printf("relay %s 的 TCP 连接收不到它发回的数据，之后连它先走 QUIC（UDP）", e.addr)
+		}
+		e.fallback = true
+	case repeatTCPSilence(e.addr):
+		if markTCPStalled(e.addr) {
+			log.Printf("relay %s 的 TCP 连接连上之后又一次收不到它发回的数据，之后连它先走 QUIC（UDP）", e.addr)
 		}
 		e.fallback = true
 	}
@@ -496,7 +581,7 @@ func (c *Client) ResetDecoder() {
 	defer c.mu.Unlock()
 	if c.conn != nil && c.dec != nil {
 		buffered := c.dec.Buffered()
-		c.dec = json.NewDecoder(io.MultiReader(buffered, c.conn))
+		c.dec = json.NewDecoder(io.MultiReader(buffered, idleReader{conn: c.conn, idle: &c.idle}))
 	}
 }
 
