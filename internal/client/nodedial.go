@@ -51,8 +51,8 @@ type nodeConn struct {
 	Mode string
 	// FPs 是这个节点在列表里的证书指纹，Client 接管后重连时照样按它严格比对。
 	FPs []string
-	// TCPErr 是 auto 模式下 QUIC 胜出时 TCP 一路的失败原因（TCP 还没返回为 nil），见 dialRelayAddr。
-	TCPErr error
+	// OtherErr 是 auto 模式下没被选用的另一路的失败原因（它还没返回为 nil），见 dialRelayAddr。
+	OtherErr error
 	// Failed 是更早试过、没连上的地址。调用方据此处理本机专用地址（连不上就清掉）。
 	// 只含真的拨过且失败了的地址：被取消的、因为配置不能拨的都不在里面。
 	Failed []addrFailure
@@ -149,11 +149,11 @@ func dialNode(ctx context.Context, n directory.Node, local, userMode, preferred 
 			de.Skipped = append(de.Skipped, addrFailure{Addr: t.Addr, Err: err})
 			continue
 		}
-		conn, transport, tcpErr, err := dialStrict(ctx, t.Addr, mode, n.TLSFPs, preferred)
+		conn, transport, otherErr, err := dialStrict(ctx, t.Addr, mode, n.TLSFPs, preferred)
 		if err == nil {
 			return &nodeConn{
 				Conn: conn, Addr: t.Addr, Transport: transport, Mode: mode,
-				FPs: append([]string(nil), n.TLSFPs...), TCPErr: tcpErr, Failed: de.Failures,
+				FPs: append([]string(nil), n.TLSFPs...), OtherErr: otherErr, Failed: de.Failures,
 			}, nil
 		}
 		if ctx.Err() != nil {
@@ -200,7 +200,7 @@ func (c *Client) adoptNode(r *nodeConn) {
 		if !strings.EqualFold(r.Addr, c.config.ServerAddr) {
 			previous = ""
 		}
-		logTransport(r.Addr, r.Transport, previous, r.TCPErr)
+		logTransport(r.Addr, r.Transport, previous, r.OtherErr)
 	}
 	c.config.ServerAddr = r.Addr
 	c.node = &nodePin{fps: append([]string(nil), r.FPs...), mode: r.Mode}
@@ -218,12 +218,12 @@ func (c *Client) adoptNode(r *nodeConn) {
 
 // connectNodeLocked 是节点模式下的 Connect：重连 adoptNode 记下的地址。调用方持有 c.mu。
 func (c *Client) connectNodeLocked() error {
-	conn, transport, tcpErr, err := dialStrict(context.Background(), c.config.ServerAddr, c.node.mode, c.node.fps, c.transport)
+	conn, transport, otherErr, err := dialStrict(context.Background(), c.config.ServerAddr, c.node.mode, c.node.fps, c.transport)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 	if c.node.mode == TransportAuto {
-		logTransport(c.config.ServerAddr, transport, c.transport, tcpErr)
+		logTransport(c.config.ServerAddr, transport, c.transport, otherErr)
 	}
 	c.transport = transport
 	c.installConnLocked(conn)
@@ -269,7 +269,7 @@ func (c *Client) leaveNode(addr string) {
 
 // dialStrict 拨 addr，严格比对证书指纹。证书不符时返回 *CertMismatchError：QUIC 把握手错误转成文本，
 // errors.Is 认不出，所以靠 TLS 回调记下出示的指纹，再据此换掉传输层的错误。
-func dialStrict(ctx context.Context, addr, mode string, fps []string, preferred string) (conn net.Conn, transport string, tcpErr, err error) {
+func dialStrict(ctx context.Context, addr, mode string, fps []string, preferred string) (conn net.Conn, transport string, otherErr, err error) {
 	if len(fps) == 0 {
 		// 没有指纹时 TLS 配置会退回 PKI 校验，那就不是按列表认身份了。
 		return nil, "", nil, errors.New("没有证书指纹，不能按节点列表校验身份")
@@ -282,7 +282,7 @@ func dialStrict(ctx context.Context, addr, mode string, fps []string, preferred 
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("failed to create TLS config: %w", err)
 	}
-	conn, transport, tcpErr, err = dialRelayAddr(ctx, addr, mode, tlsConfig, preferred)
+	conn, transport, otherErr, err = dialRelayAddr(ctx, addr, mode, tlsConfig, preferred)
 	if err != nil {
 		// 封禁优先：auto 模式下一路出示了别的证书、另一路被封禁时，要让调用方认出封禁、不再拨同一台 relay。
 		if fp := mismatched.Load(); fp != nil && !errors.Is(err, proto.ErrBlocked) {
@@ -295,5 +295,5 @@ func dialStrict(ctx context.Context, addr, mode string, fps []string, preferred 
 		// 另一路要是在这之后才握手（竞速里还没返回），这里看不到，下次拨号时照样会发现。
 		log.Printf("[relay] 警告：%v；已改用 %s 连上", &CertMismatchError{Addr: addr, FP: *fp}, transport)
 	}
-	return conn, transport, tcpErr, nil
+	return conn, transport, otherErr, nil
 }

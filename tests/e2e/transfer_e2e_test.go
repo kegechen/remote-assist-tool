@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -303,15 +304,15 @@ func TestUploadResumeAfterRelayRestart(t *testing.T) {
 	t.Logf("断网重连后重传完整: md5=%s", wantMD5)
 }
 
-// extractCode 从 share 输出片段里抓协助码（形如 ABCD-EFGHIJ）。
+// bannerCodeRE 只认行首的「协助码: XXXX-XXXX-XXXX」（share 打出的新码横幅）：换码提示「原协助码 X 无法继续使用」
+// 里的是旧码，codeRE 也会认它。
+var bannerCodeRE = regexp.MustCompile(`(?m)^\s*协助码[:：]\s*([A-Za-z0-9]{4}(?:-[A-Za-z0-9]+)+)`)
+
+// extractCode 从 share 输出片段里抓新码横幅里的码，去掉连字符（同 waitCode）。原来按「11 个字符、第 5 个是连字符」
+// 认，只认得旧版 XXXX-XXXXXX 的显示，12 位码的三段显示认不出来。
 func extractCode(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		for _, tok := range strings.Fields(line) {
-			tok = strings.TrimSpace(tok)
-			if len(tok) == 11 && tok[4] == '-' {
-				return tok
-			}
-		}
+	if m := bannerCodeRE.FindStringSubmatch(s); len(m) > 1 {
+		return strings.ReplaceAll(m[1], "-", "")
 	}
 	return ""
 }

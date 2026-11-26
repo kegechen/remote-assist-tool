@@ -39,13 +39,20 @@ var quicRaceDelay = 3 * time.Second
 //
 // 进程级而不是每个 Client 一份：MCP 每次 connect 都新建 HelpMode 和 Client，记在 Client 上的话下一次 connect
 // 又要先在 TCP 上白等一轮。只记在进程内，理由同 Client.transport。
+//
+// idle 是常驻读循环里最近一次静默的时间（见 repeatTCPSilence），同样按小写地址记。
 var tcpStalls = struct {
 	sync.Mutex
 	addrs map[string]time.Time
-}{addrs: map[string]time.Time{}}
+	idle  map[string]time.Time
+}{addrs: map[string]time.Time{}, idle: map[string]time.Time{}}
 
 // tcpStallTTL 是「TCP 收不到数据」记录的有效期。var 仅为测试可调。
 var tcpStallTTL = 15 * time.Minute
+
+// tcpRepeatSilenceWindow：同一地址的 TCP 连接在常驻读循环里静默，上一次静默还不到这么久，就当成这个地址的 TCP
+// 收不到数据（见 repeatTCPSilence）。静默的 90 秒加上重连，干扰下两次之间三分钟左右。var 仅为测试可调。
+var tcpRepeatSilenceWindow = 10 * time.Minute
 
 // markTCPStalled 记下 addr 的 TCP 收不到数据，返回是不是新记下的（第一次记、或旧记录已过期后重记）。
 func markTCPStalled(addr string) bool {
@@ -68,6 +75,24 @@ func tcpStalled(addr string) bool {
 	return ok && time.Since(t) < tcpStallTTL
 }
 
+// repeatTCPSilence 记下 addr 的 TCP 连接在常驻读循环里静默了一次，报告离上一次是否不到 tcpRepeatSilenceWindow。
+//
+// 单独一次分不出是断网、换网络、relay 掉电，还是发回的数据被网络丢掉，不改传输。常驻读循环之前每条连接都确认过
+// 下行收得到（注册、加入之后的 probeDownlink），所以短时间里又静默一次，就是「连上、确认通过、过一阵又收不到」反复
+// 出现：干扰从连上一阵子之后才开始丢数据。真断网的话重连本身连不上，走不到第二次。报告 true 时清掉这次的记录，
+// 之后重新数。
+func repeatTCPSilence(addr string) bool {
+	key := strings.ToLower(addr)
+	tcpStalls.Lock()
+	defer tcpStalls.Unlock()
+	if t, ok := tcpStalls.idle[key]; ok && time.Since(t) < tcpRepeatSilenceWindow {
+		delete(tcpStalls.idle, key)
+		return true
+	}
+	tcpStalls.idle[key] = time.Now()
+	return false
+}
+
 // ValidTransport 报告 s 是否是合法的 --transport 取值（空串视作 auto）。
 func ValidTransport(s string) bool {
 	switch s {
@@ -84,9 +109,9 @@ type dialResult struct {
 }
 
 // dialRelay 按 Config.Transport 建立到 Config.ServerAddr 的连接（含 TLS 握手），返回实际使用的传输。
-// preferred 是上一次成功的传输（空=TCP），auto 模式下它先拨。auto 模式下 QUIC 胜出时，
-// tcpErr 是 TCP 一路的失败原因（TCP 还没返回为 nil），供 logTransport 如实说明为什么改用 QUIC。
-func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, tcpErr, err error) {
+// preferred 是上一次成功的传输（空=TCP），auto 模式下它先拨。auto 模式下 otherErr 是没被选用的另一路的失败原因
+// （它还没返回、没起跑为 nil），供 logTransport 如实说明为什么用了这一路。
+func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, otherErr, err error) {
 	return dialRelayAddr(context.Background(), c.config.ServerAddr, c.config.Transport, tlsConfig, preferred)
 }
 
@@ -94,7 +119,7 @@ func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Co
 // 整个拨号（TCP/QUIC 竞速、各自的 TLS 握手）受 dialTimeout 限制。已经建好的连接不受 parent 之后取消的影响。
 // 自动选节点要同时拨几个节点、各自带着不同的地址与证书指纹，所以不能走 Client 里的单一配置。
 // auto 模式下 preferred 是 QUIC、或者本进程里发现过 addr 的 TCP 收不到数据（tcpStalls）时，先拨 QUIC。
-func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, tcpErr, err error) {
+func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, otherErr, err error) {
 	if mode == "" {
 		mode = TransportAuto
 	}
@@ -137,6 +162,7 @@ func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Con
 	timer := time.NewTimer(quicRaceDelay)
 	defer timer.Stop()
 	var errs []error
+	failed := map[string]error{} // 已经失败的那几路
 	for {
 		select {
 		case <-timer.C:
@@ -150,7 +176,11 @@ func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Con
 			if r.err == nil {
 				cancel()
 				closeLosers(results, started-received)
-				return r.conn, r.transport, tcpErr, nil
+				other := TransportQUIC
+				if r.transport == TransportQUIC {
+					other = TransportTCP
+				}
+				return r.conn, r.transport, failed[other], nil
 			}
 			if errors.Is(r.err, proto.ErrBlocked) {
 				// relay 已明确拒绝本机：封禁与传输无关，换 QUIC 也一样被拒，还会让用户
@@ -159,9 +189,7 @@ func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Con
 				closeLosers(results, started-received)
 				return nil, "", nil, r.err
 			}
-			if r.transport == TransportTCP {
-				tcpErr = r.err
-			}
+			failed[r.transport] = r.err
 			errs = append(errs, fmt.Errorf("%s: %w", r.transport, r.err))
 			if started == 1 {
 				if ctx.Err() != nil {
@@ -251,10 +279,12 @@ func abortConn(conn net.Conn) {
 	conn.Close()
 }
 
-// logTransport 只在实际走了 QUIC、或传输与上次不同时打一行：TCP 是常态，每次重连都打
-// 只会刷屏。tcpErr 是 TCP 一路的失败原因（见 dialRelay）。
-func logTransport(addr, transport, previous string, tcpErr error) {
-	if transport == TransportQUIC && previous != TransportQUIC {
+// logTransport 只在实际走了 QUIC、传输与上次不同、或者先拨了 QUIC 最后却是 TCP 时打一行：TCP 是常态，每次重连都打
+// 只会刷屏。otherErr 是没被选用的另一路的失败原因（见 dialRelay）。
+func logTransport(addr, transport, previous string, otherErr error) {
+	switch {
+	case transport == TransportQUIC && previous != TransportQUIC:
+		tcpErr := otherErr
 		if tcpErr == nil && tcpStalled(addr) {
 			// 是因为 TCP 收不到数据才先拨的 QUIC，记下的时候已经说过了；说「TCP 不可达」是错的。
 			return
@@ -264,7 +294,15 @@ func logTransport(addr, transport, previous string, tcpErr error) {
 		} else {
 			log.Printf("relay %s 的 TCP 连接失败（%v），已改用 QUIC（UDP）连接", addr, tcpErr)
 		}
-	} else if transport == TransportTCP && previous == TransportQUIC {
+	case transport == TransportTCP && tcpStalled(addr):
+		// 记着这个地址的 TCP 收不到数据、先拨的 QUIC，连上的却还是 TCP（UDP 也不通）：要说清楚，不然重试提示里的
+		// 「优先用 QUIC」看着像是没起作用，这条 TCP 也可能还是收不到数据。
+		if otherErr != nil {
+			log.Printf("relay %s 的 QUIC（UDP）连不上（%v），仍用 TCP 连接", addr, otherErr)
+		} else {
+			log.Printf("relay %s 的 QUIC（UDP）没能先连上，仍用 TCP 连接", addr)
+		}
+	case transport == TransportTCP && previous == TransportQUIC:
 		log.Printf("relay %s 已恢复走 TCP 连接", addr)
 	}
 }

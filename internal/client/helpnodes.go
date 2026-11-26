@@ -214,7 +214,7 @@ func (h *HelpMode) connectAndJoin() (*proto.JoinResponse, error) {
 	return resp, nil
 }
 
-// stalledRetryDelay 是 TCP 上等不到加入应答、关掉连接之后，隔多久再改走 QUIC 加入。var 仅为测试可调。
+// stalledRetryDelay 是 TCP 上等不到加入应答、关掉连接之后，隔多久再优先用 QUIC 加入。var 仅为测试可调。
 var stalledRetryDelay = time.Second
 
 // joinVia 用 connect 让 h.client 连上 relay（c 应处于已 Close 的状态），然后加入会话。连 relay 失败返回
@@ -232,13 +232,14 @@ func (h *HelpMode) joinVia(connect func() error) (*proto.JoinResponse, error) {
 	if err == nil || !errors.As(err, &silent) || !silent.fallback {
 		return resp, err
 	}
-	fmt.Fprintf(stderrLog(), "[relay] %v；改走 QUIC（UDP）重试\n", err)
+	fmt.Fprintf(stderrLog(), "[relay] %v；优先用 QUIC（UDP）重试\n", err)
 	// 发出去的方向是通的：relay 多半收下了这次加入，协助端的位置由刚才那条 TCP 连接占着。joinOrClose 已经关掉它，
 	// relay 读到关闭才把位置腾出来（之后 5 秒内新来的协助端可以顶替）；QUIC 上的加入抢在前面到，会被当成「已有
 	// 协助端」拒掉。
 	time.Sleep(stalledRetryDelay)
+	// 下面的提示不说「改走 QUIC」：UDP 也不通时 TCP 照样会在竞速里连上（logTransport 会说明）。
 	if cerr := connect(); cerr != nil {
-		return nil, &relayConnectError{fmt.Errorf("%v；改走 QUIC 重连失败：%w", err, cerr)}
+		return nil, &relayConnectError{fmt.Errorf("%v；重连失败：%w", err, cerr)}
 	}
 	resp, rerr := h.joinOrClose()
 	switch {
@@ -247,7 +248,7 @@ func (h *HelpMode) joinVia(connect func() error) (*proto.JoinResponse, error) {
 	case isJoinRejected(rerr) || errors.Is(rerr, proto.ErrBlocked):
 		return nil, rerr // relay 这次答复了，按它的答复报
 	}
-	return nil, fmt.Errorf("%v；改走 QUIC 重试后：%w", err, rerr)
+	return nil, fmt.Errorf("%v；重试后：%w", err, rerr)
 }
 
 // joinOrClose 加入会话，失败时关掉连接。

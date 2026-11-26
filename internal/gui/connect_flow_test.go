@@ -127,10 +127,10 @@ func TestClassifyConnectError(t *testing.T) {
 		{errors.New("connect failed: join failed: join failed"), reasonBadCode},
 		{errors.New("relay connect failed: failed to connect: dial tcp 1.2.3.4:5: i/o timeout"), reasonTimeout},
 		// 中转服务收不到回应（下行被干扰、静默超时）：是超时类，不能落到 join failed 被说成协助码错误。
-		{errors.New("join failed: 中转服务 relay.example.test:8443 在 15 秒内没有发来加入应答（TCP 连接还在，但收不到它发回的数据，可能被网络干扰）"), reasonTimeout},
-		{errors.New("join failed: 中转服务 relay.example.test:8443 在 90 秒内没有发来任何消息（心跳也没有回应）"), reasonTimeout},
-		// 主因是收不到回应：后面附带的 QUIC 重连失败原因不改变归类。
-		{errors.New("join failed: 中转服务 relay.example.test:8443 在 15 秒内没有发来加入应答；改走 QUIC 重连失败：dial tcp 127.0.0.1:1: refused"), reasonTimeout},
+		{errors.New("join failed: 中转服务 relay.example.test:8443 在 15 秒内没有发来加入应答（TCP 连接已经建立，但收不到它发回的数据，可能被网络干扰）"), reasonTimeout},
+		{errors.New("join failed: 中转服务 relay.example.test:8443 在 90 秒内没有发来任何数据（心跳也没有回应），连接可能已经断了"), reasonTimeout},
+		// 主因是收不到回应：后面附带的重连失败原因不改变归类。
+		{errors.New("join failed: 中转服务 relay.example.test:8443 在 15 秒内没有发来加入应答；重连失败：dial tcp 127.0.0.1:1: refused"), reasonTimeout},
 		{errors.New("relay connect failed: failed to connect: dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it."), reasonRefused},
 		{errors.New("relay connect failed: failed to connect: dial tcp: lookup x: no such host"), reasonUnreach},
 		{errors.New("handshake failed: 对端拒绝工具通道握手：x"), reasonRejected},
