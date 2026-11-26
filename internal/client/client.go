@@ -3,6 +3,7 @@ package client
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,6 +37,70 @@ var dialTimeout = 20 * time.Second
 //
 // dialTimeout/joinTimeout 用 var 而非 const，仅为让测试能调小到毫秒级；运行期不改。
 var joinTimeout = 15 * time.Second
+
+// downlinkProbeTimeout 是 share 注册、help 加入之后确认还收得到 relay 数据（probeDownlink）时最多等多久。relay 收到心跳立刻回，
+// 正常是一个往返；留够丢包重传的余量。var 仅为测试可调。
+var downlinkProbeTimeout = 10 * time.Second
+
+// relaySilenceTimeout 是连着 relay 时最多多久收不到它的任何消息，超过就当连接已经不通。两端每 30 秒发一次心跳，
+// relay 每个都回（最早的版本就是这样），正常时最多隔 30 秒就有一条；这里留出三个心跳周期。
+//
+// TCP 连得上、relay 发来的数据却被网络丢掉时（下行被干扰），只有这样才发现得了：心跳照常发得出去（写不失败），
+// relay 回的不带数据的 ACK 也照常过得来，TCP keepalive 一切正常。var 仅为测试可调。
+var relaySilenceTimeout = 90 * time.Second
+
+// relaySilenceWhat 是 relaySilentError 里等的东西：连着 relay 时一条消息都没等到。
+const relaySilenceWhat = "任何消息（心跳也没有回应）"
+
+// RelaySilentMarker 是 relaySilentError 文案里稳定的片段（Error 拼出「中转服务 X 在 N 秒内没有发来…」）。
+// 错误经 MCP 传到 GUI 时只剩文本，GUI 的错误分类靠它认出这是「中转服务收不到回应」的超时类，
+// 不然会落到 join failed 被说成协助码错误。
+const RelaySilentMarker = "内没有发来"
+
+// relaySilentError 表示 relay 在时限内一条消息都没发来：请求或心跳发出去了，等的回应没有到。
+// TCP 握手成功、请求的应答也到过，不代表之后的数据还过得来：被网络干扰时，relay 发回的数据可能从某一刻起
+// 全被丢掉，而发出去的方向一切正常。
+type relaySilentError struct {
+	addr      string
+	transport string // 当时连接用的传输
+	what      string // 等的是什么
+	wait      time.Duration
+	// explicitTCP：用户用 --transport tcp 限定了只走 TCP，提示可以改用 QUIC。
+	explicitTCP bool
+	// fallback：当时是 auto 模式下的 TCP，已经记下这个地址的 TCP 收不到数据（markTCPStalled），之后拨它先走 QUIC。
+	fallback bool
+	err      error // 底层的读超时
+}
+
+func (e *relaySilentError) Error() string {
+	msg := fmt.Sprintf("中转服务 %s 在%s%s%s", e.addr, waitText(e.wait), RelaySilentMarker, e.what)
+	if e.transport == TransportTCP {
+		msg += "（TCP 连接还在，但收不到它发回的数据，可能被网络干扰）"
+		if e.explicitTCP {
+			msg += "，可以改用 --transport quic 再试"
+		}
+	}
+	return msg
+}
+
+func (e *relaySilentError) Unwrap() error { return e.err }
+
+// waitText 是提示里「在…内」中间的时长：整秒写「 15 秒」，不到一秒（只有测试会这样）照 Duration 的写法、两边带空格。
+func waitText(d time.Duration) string {
+	if d < time.Second {
+		return " " + d.String() + " "
+	}
+	return fmt.Sprintf(" %d 秒", int(d.Round(time.Second)/time.Second))
+}
+
+// quicRetryNote 是重试提示里传输那一段：TCP 收不到数据、这次改走 QUIC 时为「改走 QUIC（UDP）」，否则为空。
+func quicRetryNote(err error) string {
+	var se *relaySilentError
+	if errors.As(err, &se) && se.fallback {
+		return "改走 QUIC（UDP）"
+	}
+	return ""
+}
 
 // Config 客户端配置
 type Config struct {
@@ -123,7 +188,9 @@ type Client struct {
 	listed []string
 	// peerFP 当前连接上 relay 出示的叶子证书指纹，没有 TLS 时为空。share 据此判断重连后连的是不是同一台 relay。
 	peerFP string
-	mu     sync.Mutex
+	// pending 是 probeDownlink 顺带读到的消息（不是心跳回应的那些），之后的 ReadMessage 先返回它们。换连接时清空。
+	pending []*proto.Message
+	mu      sync.Mutex
 	// stunMu/relaySTUN：relay 在注册/加入响应里下发的 STUN 服务器（每次注册/加入覆盖）。
 	// 写在注册/加入的 goroutine，读在后台启动 P2P 的 goroutine，单独加锁。
 	stunMu    sync.Mutex
@@ -243,6 +310,7 @@ func (c *Client) installConnLocked(conn net.Conn) {
 	c.peerFP = connPeerFP(conn)
 	c.enc = json.NewEncoder(conn)
 	c.dec = json.NewDecoder(conn)
+	c.pending = nil
 }
 
 // Close 关闭连接
@@ -260,6 +328,7 @@ func (c *Client) Close() {
 	c.peerFP = ""
 	c.enc = nil
 	c.dec = nil
+	c.pending = nil
 	c.hbStop = nil
 	c.mu.Unlock()
 
@@ -313,6 +382,12 @@ func (c *Client) ReadMessage() (*proto.Message, error) {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("connection closed")
 	}
+	if len(c.pending) > 0 {
+		msg := c.pending[0]
+		c.pending = c.pending[1:]
+		c.mu.Unlock()
+		return msg, nil
+	}
 	dec := c.dec
 	c.mu.Unlock()
 
@@ -326,6 +401,75 @@ func (c *Client) ReadMessage() (*proto.Message, error) {
 // SendHeartbeat 发送心跳
 func (c *Client) SendHeartbeat() error {
 	return c.SendMessage(proto.MsgHeartbeat, &proto.Heartbeat{Timestamp: time.Now().Unix()})
+}
+
+// readReply 读 relay 对注册、加入请求的应答（what 是提示里应答的叫法），最多等 joinTimeout。relay 收下请求却
+// 不应答（进程假死、被中间盒吞掉、发回的数据被网络丢掉）时，裸 ReadMessage 会永久阻塞。超时返回 *relaySilentError。
+func (c *Client) readReply(what string) (*proto.Message, error) {
+	wait := joinTimeout
+	c.SetReadDeadline(time.Now().Add(wait))
+	msg, err := c.ReadMessage()
+	c.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil, c.silentErr(err, what, wait)
+	}
+	return msg, nil
+}
+
+// probeDownlink 确认 relay 发来的数据真的收得到：发一个心跳，等 relay 发来任意一条消息（relay 对每个心跳都回一个，
+// 最早的版本就是这样；这时已经注册或加入，旧 relay 也不会把它当成连接前的未知消息计分）。收到的不是心跳回应
+// （比如 relay 保留了配对、协助端的消息先到了）就留给之后的 ReadMessage。超时返回 *relaySilentError。
+func (c *Client) probeDownlink(timeout time.Duration) error {
+	if err := c.SendHeartbeat(); err != nil {
+		return err
+	}
+	c.SetReadDeadline(time.Now().Add(timeout))
+	msg, err := c.ReadMessage()
+	c.SetReadDeadline(time.Time{})
+	if err != nil {
+		return c.silentErr(err, "心跳回应", timeout)
+	}
+	if msg.Type != proto.MsgHeartbeat {
+		c.mu.Lock()
+		c.pending = append(c.pending, msg)
+		c.mu.Unlock()
+	}
+	return nil
+}
+
+// silentErr 把读超时换成 *relaySilentError（what、wait 是等的东西和等了多久），别的错误原样返回。当前连接是 auto
+// 模式下的 TCP 时，记下这个地址的 TCP 收不到数据（markTCPStalled），之后拨它先走 QUIC。
+func (c *Client) silentErr(err error, what string, wait time.Duration) error {
+	if !isNetTimeout(err) {
+		return err
+	}
+	c.mu.Lock()
+	e := &relaySilentError{what: what, wait: wait, transport: c.transport, err: err}
+	if c.config != nil {
+		e.addr = c.config.ServerAddr
+		e.explicitTCP = c.config.Transport == TransportTCP
+	}
+	auto := c.autoTransportLocked()
+	c.mu.Unlock()
+	if e.transport == TransportTCP && auto && e.addr != "" {
+		if markTCPStalled(e.addr) {
+			log.Printf("relay %s 的 TCP 连接收不到它发回的数据，之后连它先走 QUIC（UDP）", e.addr)
+		}
+		e.fallback = true
+	}
+	return e
+}
+
+// autoTransportLocked 报告当前连接能不能改走 QUIC：没用 --transport 限定（auto），而且是 TLS（QUIC 强制 TLS）。
+// 节点模式看接管时这个地址的拨号方式：地址只声明了一种传输时不是 auto。调用方持有 c.mu。
+func (c *Client) autoTransportLocked() bool {
+	if c.node != nil {
+		return c.node.mode == TransportAuto
+	}
+	if c.config == nil || !c.config.UseTLS {
+		return false
+	}
+	return c.config.Transport == "" || c.config.Transport == TransportAuto
 }
 
 // IsClosed 是否已关闭
@@ -403,10 +547,8 @@ func pipeConn(conn1, conn2 net.Conn) {
 	conn2.Close()
 }
 
-// isNetTimeout 检查错误是否为网络超时
+// isNetTimeout 检查错误是否为网络超时（包了几层也认得出，比如 *relaySilentError）
 func isNetTimeout(err error) bool {
-	if netErr, ok := err.(net.Error); ok {
-		return netErr.Timeout()
-	}
-	return false
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }

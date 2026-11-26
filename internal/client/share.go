@@ -550,7 +550,7 @@ func (s *ShareMode) serveRound(rapidFails int) int {
 	case codeExpired:
 		s.println("\n连接中断且协助码已过期，正在重连获取新协助码...")
 	default:
-		s.printf("\n连接中断: %v，协助码仍有效: %s，正在重连...\n", tunnelErr, formatCode(s.code))
+		s.printf("\n连接中断: %v，协助码仍有效: %s，正在%s重连...\n", tunnelErr, formatCode(s.code), quicRetryNote(tunnelErr))
 	}
 	if s.p2pHeldForResume() {
 		s.println("（P2P 直连仍在，重连期间工具调用继续走直连）")
@@ -679,7 +679,7 @@ func reconnectFailure(attempt int, err error, delay time.Duration) (line string,
 	if next > reconnectMaxDelay {
 		next = reconnectMaxDelay
 	}
-	return fmt.Sprintf("连接失败(第 %d 次): %v；%s 后重试...\n", attempt, err, delay), delay, next
+	return fmt.Sprintf("连接失败(第 %d 次): %v；%s 后%s重试...\n", attempt, err, delay, quicRetryNote(err)), delay, next
 }
 
 // rapidReconnectBackoff 根据上一会话存活时长与连续快速失败次数，决定重连前的退避。
@@ -733,9 +733,7 @@ func (s *ShareMode) register() error {
 	// 同 HelpMode.join：relay 收下请求却不应答时，裸 ReadMessage 会永久阻塞。share 的
 	// reconnectWithBackoff 靠 register 返回 error 才会进下一轮重试，卡在这里就等于整个
 	// 重连循环停摆，协助码再也不刷新。
-	s.client.SetReadDeadline(time.Now().Add(joinTimeout))
-	msg, err := s.client.ReadMessage()
-	s.client.SetReadDeadline(time.Time{})
+	msg, err := s.client.readReply("注册应答")
 	if err != nil {
 		return err
 	}
@@ -759,6 +757,13 @@ func (s *ShareMode) register() error {
 
 	var resp proto.RegisterResponse
 	if err := proto.DecodePayload(msg, &resp); err != nil {
+		return err
+	}
+	// 收到应答只说明那一刻 relay 发来的数据还过得来。协助码一显示出来，用户就会把它交给协助端；这条连接要是已经
+	// 收不到 relay 发来的数据（被网络干扰时可能从握手、注册之后就开始丢），会话就绪、协助端的请求都到不了，显示出来
+	// 的协助码根本用不了。所以先确认一次再显示，不通就当这次注册失败：什么都不显示、不写协助码文件，退避后重连
+	// （auto 模式下 TCP 收不到数据时改走 QUIC）。放在改任何状态之前：失败的这一次不留痕迹，换码提示等下一次照常给。
+	if err := s.client.probeDownlink(downlinkProbeTimeout); err != nil {
 		return err
 	}
 	switch {
@@ -1179,11 +1184,14 @@ var errRelayServer = errors.New("server error")
 
 // waitSessionReady 等待会话就绪。onToolHello 在处理 relay 上的 ToolHello 之前调用（可为 nil）。
 func (s *ShareMode) waitSessionReady(onToolHello func()) (*proto.SessionReady, error) {
-	// 清掉上一轮 handleTunnel 留下的 2 分钟读 deadline。等新协助端本来就是无限期的
-	// （首次注册后进到这里时同样没有 deadline），不清的话「协助端断开→协助码仍有效→
-	// 回来等新协助端」这条路会在两分钟后被残留 deadline 打断，白白丢掉一个还没过期的
-	// 协助码去做整轮重连。relay 掉线仍由 30s 心跳的写失败 + TCP keepalive 兜住。
-	s.client.SetReadDeadline(time.Time{})
+	// 等新协助端本来就是无限期的，但连接得是通的：relay 对每个心跳都回一个（约 30 秒一次），超过 relaySilenceTimeout
+	// 一条消息都没收到，就是连接已经不通了，返回 *relaySilentError 去重连（auto 模式下 TCP 收不到数据时改走 QUIC）。
+	// 否则 relay 发来的数据被网络丢掉时，share 会一直停在「等待协助端连接...」，而协助端加入的消息永远到不了：
+	// 心跳照常发得出去（写不失败），TCP keepalive 也照常有回应，别的办法都发现不了。
+	//
+	// 读 deadline 每读一条消息之前重新设，不会打断健康的等待。不能沿用上一轮 handleTunnel 留下、不再往后推的那个：
+	// 「协助端断开→协助码仍有效→回来等新协助端」这条路会被它在到点时打断，白白做一整轮重连。
+	//
 	// 排空迁移（spec 6.3）只在这里做：没有协助端连着。进来时看一次，之后每收到心跳回应（约 30 秒一次）再看一次，
 	// 不另起定时器，也不打断读：json 解码器读超时后就不能再用了。迁移时要拨别的节点，这期间不读当前连接；
 	// 恰好此时加入的协助端会随旧连接一起断开，要用新码重新加入。
@@ -1193,9 +1201,10 @@ func (s *ShareMode) waitSessionReady(onToolHello func()) (*proto.SessionReady, e
 			return nil, errNodeMigrated
 		}
 		check = false
+		s.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
 		msg, err := s.client.ReadMessage()
 		if err != nil {
-			return nil, err
+			return nil, s.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
 		}
 
 		switch msg.Type {
@@ -1493,15 +1502,15 @@ func (s *ShareMode) handleTunnel() error {
 
 	// Main loop: read from relay, forward to SSH (connecting on demand)
 	for {
-		// Set read timeout to detect dead connections (reset after each successful read)
-		s.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		// 每读一条消息之前重新设读 deadline：relay 对每个心跳都回一个，太久一条都没有就是连接不通了（见 waitSessionReady）。
+		s.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
 		msg, err := s.client.ReadMessage()
 		if err != nil {
 			closeSSH()
 			if err.Error() == "EOF" {
 				return nil
 			}
-			return err
+			return s.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
 		}
 
 		switch msg.Type {

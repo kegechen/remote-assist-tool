@@ -49,6 +49,11 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 				if enc.Encode(resp) != nil {
 					return
 				}
+			case proto.MsgHeartbeat:
+				// 同真 relay：每个心跳都回一个，help 加入之后要等到它（probeDownlink）。
+				if enc.Encode(&msg) != nil {
+					return
+				}
 			case proto.MsgToolHello:
 				var hello proto.Hello
 				proto.DecodePayload(&msg, &hello)

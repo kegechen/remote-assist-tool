@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -27,6 +29,44 @@ const (
 // TCP 的 relay（SYN 到得了、SYN-ACK 回不来）会让 TCP 一直挂到 dialTimeout，这时 3s 后
 // QUIC 接手，用户只多等 3s 而不是 20s。var 仅为测试可调。
 var quicRaceDelay = 3 * time.Second
+
+// tcpStalls 是本进程里发现 TCP 连得上、relay 发来的数据却收不到的地址（小写），见 Client.silentErr。auto 模式下
+// 再拨这些地址时先拨 QUIC；TCP 照旧在 quicRaceDelay 之后起跑（QUIC 先失败时马上起跑），UDP 也不通时还连得上。
+// 只看竞速里握手谁先完成的话，这种 TCP 永远赢：握手的包都过得来，过不来的是之后的数据。
+//
+// 记录在 tcpStallTTL 内有效：Wi-Fi 切换、休眠唤醒这类一过性原因也会记下，不该让进程余生都先拨 QUIC。
+// 过期后照旧先拨 TCP，再静默会重新记下（并再打一行说明）。
+//
+// 进程级而不是每个 Client 一份：MCP 每次 connect 都新建 HelpMode 和 Client，记在 Client 上的话下一次 connect
+// 又要先在 TCP 上白等一轮。只记在进程内，理由同 Client.transport。
+var tcpStalls = struct {
+	sync.Mutex
+	addrs map[string]time.Time
+}{addrs: map[string]time.Time{}}
+
+// tcpStallTTL 是「TCP 收不到数据」记录的有效期。var 仅为测试可调。
+var tcpStallTTL = 15 * time.Minute
+
+// markTCPStalled 记下 addr 的 TCP 收不到数据，返回是不是新记下的（第一次记、或旧记录已过期后重记）。
+func markTCPStalled(addr string) bool {
+	key := strings.ToLower(addr)
+	tcpStalls.Lock()
+	defer tcpStalls.Unlock()
+	if t, ok := tcpStalls.addrs[key]; ok && time.Since(t) < tcpStallTTL {
+		return false
+	}
+	tcpStalls.addrs[key] = time.Now()
+	return true
+}
+
+// tcpStalled 报告本进程里是否记着（未过期的）addr 的 TCP 收不到数据。
+func tcpStalled(addr string) bool {
+	key := strings.ToLower(addr)
+	tcpStalls.Lock()
+	defer tcpStalls.Unlock()
+	t, ok := tcpStalls.addrs[key]
+	return ok && time.Since(t) < tcpStallTTL
+}
 
 // ValidTransport 报告 s 是否是合法的 --transport 取值（空串视作 auto）。
 func ValidTransport(s string) bool {
@@ -53,6 +93,7 @@ func (c *Client) dialRelay(tlsConfig *tls.Config, preferred string) (conn net.Co
 // dialRelayAddr 是 dialRelay 的无状态版本：拨 addr，传输模式 mode（空串=auto），parent 取消时拨号中止。
 // 整个拨号（TCP/QUIC 竞速、各自的 TLS 握手）受 dialTimeout 限制。已经建好的连接不受 parent 之后取消的影响。
 // 自动选节点要同时拨几个节点、各自带着不同的地址与证书指纹，所以不能走 Client 里的单一配置。
+// auto 模式下 preferred 是 QUIC、或者本进程里发现过 addr 的 TCP 收不到数据（tcpStalls）时，先拨 QUIC。
 func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Config, preferred string) (conn net.Conn, transport string, tcpErr, err error) {
 	if mode == "" {
 		mode = TransportAuto
@@ -80,7 +121,7 @@ func dialRelayAddr(parent context.Context, addr, mode string, tlsConfig *tls.Con
 	}
 
 	first, second := TransportTCP, TransportQUIC
-	if preferred == TransportQUIC {
+	if preferred == TransportQUIC || tcpStalled(addr) {
 		first, second = TransportQUIC, TransportTCP
 	}
 	results := make(chan dialResult, 2)
@@ -214,6 +255,10 @@ func abortConn(conn net.Conn) {
 // 只会刷屏。tcpErr 是 TCP 一路的失败原因（见 dialRelay）。
 func logTransport(addr, transport, previous string, tcpErr error) {
 	if transport == TransportQUIC && previous != TransportQUIC {
+		if tcpErr == nil && tcpStalled(addr) {
+			// 是因为 TCP 收不到数据才先拨的 QUIC，记下的时候已经说过了；说「TCP 不可达」是错的。
+			return
+		}
 		if tcpErr == nil || tcpUnreachable(tcpErr) {
 			log.Printf("relay %s 的 TCP 不可达，已改用 QUIC（UDP）连接", addr)
 		} else {

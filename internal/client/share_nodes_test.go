@@ -21,8 +21,8 @@ import (
 	"github.com/remote-assist/tool/internal/version"
 )
 
-// regRelay 是只会注册的假 relay（TLS，只开 TCP）：每条连接上的注册请求交给 reply 决定怎么回，
-// 别的消息不理；push 往最近一条连接上发消息（心跳回应、会话就绪）。
+// regRelay 是只会注册的假 relay（TLS，只开 TCP）：每条连接上的注册请求交给 reply 决定怎么回，心跳照真 relay
+// 回一个，别的消息不理；push 往最近一条连接上发消息（心跳回应、会话就绪）。
 type regRelay struct {
 	t        *testing.T
 	addr, fp string
@@ -90,6 +90,14 @@ func (f *regRelay) serve(c net.Conn) {
 		var msg proto.Message
 		if err := dec.Decode(&msg); err != nil {
 			return
+		}
+		if msg.Type == proto.MsgHeartbeat {
+			// 同真 relay：每个心跳都回一个。share 注册之后要等到它才显示协助码（probeDownlink）。
+			echo, _ := proto.NewMessage(proto.MsgHeartbeat, &proto.Heartbeat{Timestamp: time.Now().Unix()})
+			f.mu.Lock()
+			_ = enc.Encode(echo)
+			f.mu.Unlock()
+			continue
 		}
 		if msg.Type != proto.MsgRegisterRequest {
 			continue

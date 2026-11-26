@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/remote-assist/tool/internal/directory"
 	"github.com/remote-assist/tool/internal/proto"
@@ -188,32 +189,22 @@ func (h *HelpMode) p2pSTUN() string {
 func (h *HelpMode) connectAndJoin() (*proto.JoinResponse, error) {
 	hn := h.nodes
 	if hn == nil {
-		if err := h.client.Connect(); err != nil {
-			return nil, &relayConnectError{err}
-		}
-		return h.joinOrClose()
+		return h.joinVia(h.client.Connect)
 	}
 	r := hn.route(h.code)
-	if err := hn.connect(h.client, r.node, r, h.defaultAddr); err != nil {
-		return nil, &relayConnectError{err}
-	}
-	resp, err := h.joinOrClose()
+	resp, err := h.joinVia(func() error { return hn.connect(h.client, r.node, r, h.defaultAddr) })
 	if err == nil {
 		h.node = r.node
 		return resp, nil
 	}
 	d := defaultNodeForHelp(r.v)
-	// 过渡期回退只接 relay 不说原因的拒绝（ErrJoinFailed：码不对、已过期、节点停用等）。读写失败、封禁不回退；
+	// 过渡期回退只接 relay 不说原因的拒绝（ErrJoinFailed：码不对、已过期、节点停用等）。连不上、读写失败、封禁不回退；
 	// 「同源已有协助端」（ErrSessionBusySameAddr）说明会话就在这台上，去默认节点只会多记一次失败。
 	if !r.routed || !errors.Is(err, ErrJoinFailed) || (d != nil && d.Prefix == r.node.Prefix) {
 		return nil, err
 	}
 	hn.logf("[relay] 在节点 %s上加入失败（%v），到默认节点再试一次（节点列表启用之前发的协助码在默认节点上）", nodeLabel(*r.node), err)
-	if cerr := hn.connect(h.client, d, r, h.defaultAddr); cerr != nil {
-		hn.logf("[relay] 默认节点上也没能加入（%v）", cerr)
-		return nil, err
-	}
-	resp, ferr := h.joinOrClose()
+	resp, ferr := h.joinVia(func() error { return hn.connect(h.client, d, r, h.defaultAddr) })
 	if ferr != nil {
 		hn.logf("[relay] 默认节点上也没能加入（%v）", ferr)
 		// 报按前缀找到的节点上的错误：码的首位说它属于那里。
@@ -221,6 +212,42 @@ func (h *HelpMode) connectAndJoin() (*proto.JoinResponse, error) {
 	}
 	h.node = d
 	return resp, nil
+}
+
+// stalledRetryDelay 是 TCP 上等不到加入应答、关掉连接之后，隔多久再改走 QUIC 加入。var 仅为测试可调。
+var stalledRetryDelay = time.Second
+
+// joinVia 用 connect 让 h.client 连上 relay（c 应处于已 Close 的状态），然后加入会话。连 relay 失败返回
+// *relayConnectError；加入失败时已经 Close。
+//
+// auto 模式下 TCP 连上了、加入请求也发出去了，应答却等不到（relay 发回的数据被网络丢掉，见 relaySilentError），
+// 按同样的方式再连一次，只再试这一次：这时这个地址先拨 QUIC（tcpStalls）。握手成功不代表数据通，竞速只比握手，
+// 不这样的话每次都会选中这条 TCP。
+func (h *HelpMode) joinVia(connect func() error) (*proto.JoinResponse, error) {
+	if err := connect(); err != nil {
+		return nil, &relayConnectError{err}
+	}
+	resp, err := h.joinOrClose()
+	var silent *relaySilentError
+	if err == nil || !errors.As(err, &silent) || !silent.fallback {
+		return resp, err
+	}
+	fmt.Fprintf(stderrLog(), "[relay] %v；改走 QUIC（UDP）重试\n", err)
+	// 发出去的方向是通的：relay 多半收下了这次加入，协助端的位置由刚才那条 TCP 连接占着。joinOrClose 已经关掉它，
+	// relay 读到关闭才把位置腾出来（之后 5 秒内新来的协助端可以顶替）；QUIC 上的加入抢在前面到，会被当成「已有
+	// 协助端」拒掉。
+	time.Sleep(stalledRetryDelay)
+	if cerr := connect(); cerr != nil {
+		return nil, &relayConnectError{fmt.Errorf("%v；改走 QUIC 重连失败：%w", err, cerr)}
+	}
+	resp, rerr := h.joinOrClose()
+	switch {
+	case rerr == nil:
+		return resp, nil
+	case isJoinRejected(rerr) || errors.Is(rerr, proto.ErrBlocked):
+		return nil, rerr // relay 这次答复了，按它的答复报
+	}
+	return nil, fmt.Errorf("%v；改走 QUIC 重试后：%w", err, rerr)
 }
 
 // joinOrClose 加入会话，失败时关掉连接。
