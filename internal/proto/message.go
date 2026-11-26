@@ -126,6 +126,10 @@ type JoinRequest struct {
 	// DirectorySerial、DirectoryKeySerial 同 RegisterRequest 的同名字段。
 	DirectorySerial    *uint64 `json:"directory_serial,omitempty"`
 	DirectoryKeySerial uint64  `json:"directory_key_serial,omitempty"`
+	// ClientID 设备标识：由本机持久 ClientID 与 relay 证书指纹单向派生，不是 share 的 RegisterRequest.ClientID
+	// 原文（原文能让 relay 接管 share 的会话），每个 relay 收到的值都不同。relay 只用它派生黑名单的设备键：
+	// join 失败按设备计分、按设备封禁。客户端自报，可伪造，不作身份凭据。旧 relay 忽略本字段。
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // JoinResponse 加入响应

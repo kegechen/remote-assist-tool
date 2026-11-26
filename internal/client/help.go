@@ -113,6 +113,10 @@ func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinRespon
 		serial, keySerial := dm.Position()
 		req.DirectorySerial, req.DirectoryKeySerial = &serial, keySerial
 	}
+	// 设备标识（由本机持久 ClientID 和这个 relay 的证书指纹单向派生，不是原文，见 helpDeviceID）：relay 据此
+	// 按设备计 join 失败、按设备封禁，同一出口后面的其他设备不受牵连。ClientID 落不了盘时不带，relay 退回按
+	// 身份串加来源计。
+	req.ClientID = helpDeviceID(h.client.peerFingerprint())
 	if err := h.client.SendMessage(proto.MsgJoinRequest, req); err != nil {
 		return nil, err
 	}
