@@ -149,6 +149,9 @@ type Config struct {
 	// Blocklist 内置 IP 黑名单（nil = 停用）。DisableSourceIPLimits 时强制停用：源 IP
 	// 不可信，封一个等于封全部。
 	Blocklist *blocklist.List
+	// DeviceBlocklist 设备黑名单（键空间 blocklist.DeviceKeyer；nil = 不按设备计分，join 失败照旧记到 IP）。
+	// 随 Blocklist 一起停用：旧版 help 的设备键要用来源 IP，防轮换设备标识的兜底也记在 IP 名单上。
+	DeviceBlocklist *blocklist.List
 	// BlocklistVerifyAfter 配对持续多久后才把两端记为"成功加入"（授予 7 天握手类计分豁免）。
 	// 零值 = 10 分钟。只在测试里调小。
 	BlocklistVerifyAfter time.Duration
@@ -239,6 +242,8 @@ type Server struct {
 	// reuse 复用令牌签名器（持有证明），NewServer 装配后只读。
 	reuse                *reuseSigner
 	blocklist            *blocklist.List
+	deviceBlocklist      *blocklist.List // 非 nil 时 blocklist 也非 nil
+	deviceFallback       deviceFallback
 	blocklistVerifyAfter time.Duration
 	verifyMu             sync.Mutex
 	pendingVerify        map[string]*pendingVerify // sessionID -> 待验证配对
@@ -314,6 +319,7 @@ func NewServer(cfg *Config) (*Server, error) {
 		updateInfoPollInterval:   cfg.UpdateInfoPollInterval,
 		updateInfoBase:           baseUpdate,
 		blocklist:                cfg.Blocklist,
+		deviceBlocklist:          cfg.DeviceBlocklist,
 		blocklistVerifyAfter:     cfg.BlocklistVerifyAfter,
 		pendingVerify:            make(map[string]*pendingVerify),
 		verifyByConn:             make(map[string]string),
@@ -347,6 +353,11 @@ func NewServer(cfg *Config) (*Server, error) {
 		} else {
 			cfg.Blocklist.SetOnManualBan(srv.closeConnsFromIP)
 		}
+	}
+	if srv.blocklist == nil && srv.deviceBlocklist != nil {
+		// 没有 IP 名单就没有兜底：轮换设备标识的爆破谁也封不到。旧版 help 的设备键也要用来源 IP。
+		log.Printf("WARNING: device blocklist disabled together with the IP blocklist")
+		srv.deviceBlocklist = nil
 	}
 	srv.directory = nodeDir
 	return srv, nil
@@ -1302,6 +1313,12 @@ func (s *Server) handleJoin(client *ClientConn, req proto.JoinRequest) (closeCon
 	}
 	host := clientHost(client)
 
+	// 被封设备最先拦下（先于限流与 JoinSession）：回「访问受限」后断开，不进会话、不再计分。
+	client.deviceKey = s.joinDeviceKey(client, req.ClientID)
+	if client.deviceKey != "" && !s.deviceBlocklist.CheckAccept(client.deviceKey) {
+		return s.rejectBlockedDevice(client)
+	}
+
 	// per-IP 限流（可旁路）：拒绝后不扣全局令牌，但仍计一次失败。
 	if !s.sourceIPLimitsDisabled() && s.joinLimiterPerIP != nil && !s.joinLimiterPerIP.Allow(host) {
 		return s.rejectJoin(client, code, "rate_limited_ip", true)
@@ -1395,7 +1412,7 @@ func (s *Server) rejectJoinWithMessage(client *ClientConn, code, reason, publicE
 	switch reason {
 	case "code_invalid", "code_expired", "not_found":
 		client.realJoinFailures++
-		s.flagViolation(client, blocklist.KindJoinFailed, reason)
+		s.flagJoinFailure(client, blocklist.KindJoinFailed, reason)
 	}
 
 	n := atomic.AddUint64(&s.rejectSampleCtr, 1)
@@ -1423,7 +1440,7 @@ func (s *Server) rejectJoinWithMessage(client *ClientConn, code, reason, publicE
 
 	closeConn = client.joinFailures >= s.limits.MaxJoinFailures
 	if closeConn && client.realJoinFailures > 0 {
-		s.flagViolation(client, blocklist.KindJoinFailuresExceeded, fmt.Sprintf("%d/%d", client.realJoinFailures, client.joinFailures))
+		s.flagJoinFailure(client, blocklist.KindJoinFailuresExceeded, fmt.Sprintf("%d/%d", client.realJoinFailures, client.joinFailures))
 	}
 	return closeConn
 }
@@ -1564,6 +1581,10 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 			if s.blocklist != nil {
 				s.blocklist.Sweep()
 			}
+			if s.deviceBlocklist != nil {
+				s.deviceBlocklist.Sweep()
+				s.deviceFallback.prune(time.Now())
+			}
 			expired := s.sessions.CleanupExpired()
 			for _, id := range expired {
 				// 过期清理时主动失效对应 UDP relay entry。
@@ -1605,6 +1626,11 @@ func (s *Server) registerClient(client *ClientConn) string {
 // Blocklist 返回生效的黑名单；停用（未配置或源 IP 不可信）时为 nil。
 func (s *Server) Blocklist() *blocklist.List {
 	return s.blocklist
+}
+
+// DeviceBlocklist 返回生效的设备黑名单（停用时为 nil）。
+func (s *Server) DeviceBlocklist() *blocklist.List {
+	return s.deviceBlocklist
 }
 
 // Addr 返回实际监听地址（监听建立前为 nil），供 ":0" 随机端口的测试使用。

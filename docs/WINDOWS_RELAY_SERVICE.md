@@ -29,7 +29,7 @@ Windows 版本的 relay 同时支持前台模式和原生 Windows 服务模式�
 | 服务配置 | `C:\ProgramData\RemoteAssistRelay\config.json` |
 | 自动证书 | `C:\ProgramData\RemoteAssistRelay\certs` |
 | 审计日志 | `C:\ProgramData\RemoteAssistRelay\logs\audit.jsonl` |
-| IP 黑名单 | `C:\ProgramData\RemoteAssistRelay\blocklist.json`（封禁记录在同目录的 `blocklist-records.json`） |
+| IP 黑名单 | `C:\ProgramData\RemoteAssistRelay\blocklist.json`（设备名单在同目录的 `blocklist-devices.json`，封禁记录在 `blocklist-records.json`） |
 | 服务账户 | `NT AUTHORITY\LocalService` |
 | 启动方式 | 自动（延迟启动） |
 | 故障恢复 | 5 秒、30 秒、60 秒后依次重启；24 小时无故障后清零 |

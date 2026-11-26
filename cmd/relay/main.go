@@ -133,9 +133,9 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 		return err
 	}
 
-	bl, blRecords := openBlocklist(opts)
+	bl, devBl, blRecords := openBlocklist(opts)
 	if blRecords != nil {
-		// 先注册、后执行：名单关闭（最后一次写盘）之后才关记录。
+		// 先注册、后执行：两本名单都关闭（最后一次写盘）之后才关记录。
 		defer func() {
 			if err := blRecords.Close(); err != nil {
 				log.Printf("blocklist records close failed: %v", err)
@@ -149,8 +149,15 @@ func runRelayWithReady(ctx context.Context, args []string, stdout, stderr io.Wri
 			}
 		}()
 	}
+	if devBl != nil {
+		defer func() {
+			if err := devBl.Close(); err != nil {
+				log.Printf("device blocklist close failed: %v", err)
+			}
+		}()
+	}
 	cfg := newRelayConfig(opts, limits, updateInfo)
-	cfg.Blocklist = bl
+	cfg.Blocklist, cfg.DeviceBlocklist = bl, devBl
 
 	if opts.noAuth {
 		log.Printf("WARNING: NO-AUTH mode enabled. Any device that can reach this relay can connect and fully control the share side. Use ONLY on a fully trusted private LAN.")
@@ -422,17 +429,17 @@ func blocklistConfigFromOptions(opts relayOptions) blocklist.Config {
 	}
 }
 
-// openBlocklist 按配置创建黑名单及其封禁记录（记录文件由 --blocklist-db 派生：blocklist.json →
-// blocklist-records.json）。停用时都返回 nil。持久化打开失败不阻止 relay 启动：黑名单以纯内存模式运行，
-// 原文件保持不动；记录同理，且不影响名单本体。
-func openBlocklist(opts relayOptions) (*blocklist.List, *blocklist.Records) {
+// openBlocklist 按配置创建 IP 黑名单、设备黑名单及两者共用的封禁记录（文件都由 --blocklist-db 派生：
+// blocklist.json → blocklist-devices.json、blocklist-records.json，不新增标志）。停用时都返回 nil。
+// 持久化打开失败不阻止 relay 启动：对应的名单以纯内存模式运行，原文件保持不动；记录同理，且不影响名单本体。
+func openBlocklist(opts relayOptions) (ip, dev *blocklist.List, recs *blocklist.Records) {
 	if !opts.blocklistEnabled {
 		log.Printf("IP blocklist disabled by --blocklist-enabled=false")
-		return nil, nil
+		return nil, nil, nil
 	}
 	if !opts.trustSourceIP {
 		log.Printf("WARNING: IP blocklist disabled: source IP is not trusted (--trust-source-ip=false)")
-		return nil, nil
+		return nil, nil, nil
 	}
 	// 先加载记录，再加载名单（Open 里对账）。
 	recPath := blocklist.SiblingPath(opts.blocklistDB, "records")
@@ -455,7 +462,25 @@ func openBlocklist(opts relayOptions) (*blocklist.List, *blocklist.Records) {
 	if n := len(opts.blocklistAllow); n > 0 {
 		log.Printf("IP blocklist: %d --blocklist-allow entr(ies) are never banned or rejected", n)
 	}
-	return bl, recs
+	return bl, openDeviceBlocklist(opts, recs), recs
+}
+
+// openDeviceBlocklist 设备黑名单：参数与 IP 名单同值，键空间换成设备键。--blocklist-allow 不放进来——它是
+// IP/CIDR，relay 在算设备键之前按 IP 名单判断放行来源。
+func openDeviceBlocklist(opts relayOptions, recs *blocklist.Records) *blocklist.List {
+	cfg := blocklistConfigFromOptions(opts)
+	cfg.Path = blocklist.SiblingPath(opts.blocklistDB, "devices")
+	cfg.StaticAllow = nil
+	cfg.Keyer = blocklist.DeviceKeyer
+	cfg.Records = recs
+	dev, err := blocklist.Open(cfg)
+	switch {
+	case err != nil:
+		log.Printf("ERROR: device blocklist persistence unavailable (%v); running in memory-only mode, device bans will not survive restart", err)
+	case dev.Persistent():
+		log.Printf("Device blocklist enabled (file: %s)", cfg.Path)
+	}
+	return dev
 }
 
 func configureTLS(cfg *relay.Config, opts relayOptions) error {

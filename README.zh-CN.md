@@ -316,10 +316,12 @@ relay 内置 IP 黑名单，**默认开启**，不需要额外配置；它只按
 
 10 分钟内累计满 20 分即自动封禁：首次 1 小时，再犯依次翻倍，最长 24 小时；7 天没有再被封则次数清零。IPv4 按单个地址计，IPv6 按 /64 计。自动封禁不断开已有连接，只拒绝新连接；被拒的新版客户端会提示「访问受限，请联系管理员。」。同一出口 IP 下的其他用户也会一起被拒，所以办公网出口这类共享 IP 建议加入放行名单。
 
+**按设备计分**：上表最后两项（协助码错误导致的 join 失败、单连接失败超限）能认出是哪台设备时记到设备上，按同样的阈值和时长封这一台设备，同一出口下的其他设备照常使用。新版 help 加入时带上设备标识，它由本机持久 ClientID 和该 relay 的证书指纹单向哈希得到（不发 ClientID 本身，它能用来接管同一台机器上 share 的会话；每个 relay 收到的值都不同）；旧版 help 没有，就按「身份串 + 来源地址」算一台设备；两者都没有仍记到 IP。被封设备再加入会直接收到「访问受限，请联系管理员。」并被断开，不影响它作为被协助端注册。设备标识是客户端自报的，可以伪造，所以已识别设备的失败每 5 次仍给来源 IP 记 1 分：不停更换标识的爆破约 100 次后照样封掉来源 IP。放行名单里的来源不按设备计分，也不按设备拦截。设备名单与 IP 名单共用开关和参数，文件由 `--blocklist-db` 派生（`blocklist.json` 对应 `blocklist-devices.json`），里面只存 `dev-` 开头的派生键，不存原始 ClientID。
+
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
 | `--blocklist-enabled` | `true` | 总开关；`--trust-source-ip=false` 时强制关闭（源 IP 不可信，封一个等于封全部） |
-| `--blocklist-db` | `~/.remote_assist_relay_default_blocklist.json` | 封禁名单文件（权限 0600），重启后封禁仍然有效；每次封禁的记录写在同目录的 `*-records.json`（如 `blocklist.json` 对应 `blocklist-records.json`）。显式传空（`--blocklist-db=`）为纯内存模式。同一台机器跑多个 relay 时给每个实例指定不同文件 |
+| `--blocklist-db` | `~/.remote_assist_relay_default_blocklist.json` | 封禁名单文件（权限 0600），重启后封禁仍然有效；设备名单和每次封禁的记录写在同目录的 `*-devices.json`、`*-records.json`（如 `blocklist.json` 对应 `blocklist-devices.json`、`blocklist-records.json`）。显式传空（`--blocklist-db=`）为纯内存模式。同一台机器跑多个 relay 时给每个实例指定不同文件 |
 | `--blocklist-allow` | 空 | 放行名单：逗号分隔的 IP 或 CIDR（如 `203.0.113.7,198.51.100.0/24,2001:db8::/48`），命中的来源不计分、不被拒绝；启动时自动解除范围内已有的封禁。最多 256 条，不接受 `/0`。修改后需重启 relay |
 | `--blocklist-threshold` | `20` | 窗口内触发自动封禁的分值 |
 | `--blocklist-window` | `10m` | 计分滑动窗口 |
@@ -329,9 +331,9 @@ relay 内置 IP 黑名单，**默认开启**，不需要额外配置；它只按
 | `--blocklist-unban-grace` | `24h` | 解除封禁后多长时间内不再自动封禁 |
 | `--blocklist-max-tracked` | `4096` | 内存中跟踪的来源上限（64–8192） |
 
-时长类参数都不能小于 `1m`。封禁、到期解除、放行解除都会写入 `--audit` 审计日志（事件 `ip_banned`、`ip_ban_expired`、`ip_unbanned` 等，含 IP、时长、分值和操作人）；每次封禁的起止时间和触发原因另存于封禁记录文件。
+时长类参数都不能小于 `1m`。封禁、到期解除、放行解除都会写入 `--audit` 审计日志（事件 `ip_banned`、`ip_ban_expired`、`ip_unbanned` 等，含 IP、时长、分值和操作人；设备对应 `device_banned`、`device_ban_expired` 等，含设备键，自动封禁的 `device_banned` 另带触发时的来源地址 `via`）；每次封禁的起止时间和触发原因另存于封禁记录文件。
 
-误封时把该地址加入 `--blocklist-allow` 后重启 relay：启动时会解除它的封禁并写审计日志（操作人记为 `config`）。注意重启会让在线的 share 断开重连，未设置 `--state-dir` 时它们会换新协助码。Windows 服务的封禁名单默认在 `C:\ProgramData\RemoteAssistRelay\blocklist.json`，可在 `config.json` 中用 `blocklist_enabled`、`blocklist_db` 调整。
+误封时把该地址加入 `--blocklist-allow` 后重启 relay：启动时会解除它的封禁并写审计日志（操作人记为 `config`）。误封设备时同样可以把它的来源地址加入放行名单（审计日志里的 `via`），或者等封禁到期。注意重启会让在线的 share 断开重连，未设置 `--state-dir` 时它们会换新协助码。Windows 服务的封禁名单默认在 `C:\ProgramData\RemoteAssistRelay\blocklist.json`，可在 `config.json` 中用 `blocklist_enabled`、`blocklist_db` 调整。
 
 Windows 下直接双击无参数的 relay 会打开服务管理菜单。也可以使用非交互命令安装和管理原生 Windows 服务：
 

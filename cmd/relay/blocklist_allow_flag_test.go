@@ -54,11 +54,11 @@ func TestOpenBlocklistAppliesAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bl, recs := openBlocklist(opts)
+	bl, dev, recs := openBlocklist(opts)
 	if bl == nil {
 		t.Fatal("名单应已开启")
 	}
-	defer func() { _ = bl.Close(); _ = recs.Close() }()
+	defer func() { _ = dev.Close(); _ = bl.Close(); _ = recs.Close() }()
 	for i := 0; i < 5*opts.blocklistThreshold; i++ {
 		if bl.RecordViolation("198.51.100.7", "join_failed", "x") {
 			t.Fatal("放行范围内的来源不应被封")

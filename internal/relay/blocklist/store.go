@@ -52,7 +52,7 @@ type loadedData struct {
 
 // openStore 取得进程锁、清理上次崩溃残留的临时文件并加载文件。文件不存在返回 (lock, nil, nil)。
 // 任何错误都会释放锁，且绝不修改原文件。
-func openStore(path string) (*fileLock, *loadedData, error) {
+func openStore(path string, k *Keyer) (*fileLock, *loadedData, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve blocklist path: %w", err)
@@ -61,8 +61,8 @@ func openStore(path string) (*fileLock, *loadedData, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanStaleTemps(filepath.Dir(abs))
-	data, err := loadFile(abs)
+	cleanStaleTemps(filepath.Dir(abs), k.tmpPrefix)
+	data, err := loadFile(abs, k)
 	if err != nil {
 		_ = lock.Close()
 		return nil, nil, err
@@ -70,18 +70,19 @@ func openStore(path string) (*fileLock, *loadedData, error) {
 	return lock, data, nil
 }
 
-// cleanStaleTemps 删除写盘中途崩溃留下的 .blocklist-*.tmp（只匹配本包自己的命名）。
-func cleanStaleTemps(dir string) {
-	matches, _ := filepath.Glob(filepath.Join(dir, tmpPrefix+"*"+tmpSuffix))
+// cleanStaleTemps 删除写盘中途崩溃留下的 <prefix>*.tmp（只匹配本名单自己的命名：IP 名单 .blocklist-，
+// 设备名单 .bldev-）。
+func cleanStaleTemps(dir, prefix string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, prefix+"*"+tmpSuffix))
 	for _, m := range matches {
 		base := filepath.Base(m)
-		if strings.HasPrefix(base, tmpPrefix) && strings.HasSuffix(base, tmpSuffix) {
+		if strings.HasPrefix(base, prefix) && strings.HasSuffix(base, tmpSuffix) {
 			_ = os.Remove(m)
 		}
 	}
 }
 
-func loadFile(path string) (*loadedData, error) {
+func loadFile(path string, k *Keyer) (*loadedData, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -130,7 +131,7 @@ func loadFile(path string) (*loadedData, error) {
 			dropped = append(dropped, "<null>")
 			continue
 		}
-		key, err := NormalizeKey(e.IP)
+		key, err := k.normalize(e.IP)
 		if err != nil || key != e.IP || seen[key] {
 			dropped = append(dropped, e.IP)
 			continue
@@ -146,7 +147,7 @@ func loadFile(path string) (*loadedData, error) {
 			droppedMem++
 			continue
 		}
-		key, err := NormalizeKey(r.Key)
+		key, err := k.normalize(r.Key)
 		if err != nil || key != r.Key || memSeen[key] {
 			droppedMem++
 			continue
@@ -272,7 +273,7 @@ func snapshotEntry(e *entry, maxEvents, maxClients, maxHistory int, a *snapArena
 	} else {
 		cp = &entry{}
 	}
-	cp.IP, cp.FirstSeen, cp.LastSeen, cp.Connections = e.IP, e.FirstSeen, e.LastSeen, e.Connections
+	cp.IP, cp.Via, cp.FirstSeen, cp.LastSeen, cp.Connections = e.IP, e.Via, e.FirstSeen, e.LastSeen, e.Connections
 	cp.Rejected = atomic.LoadInt64(&e.Rejected)
 	cp.GraceUntil, cp.BanCount, cp.heapIdx = e.GraceUntil, e.BanCount, -1
 	events := e.Events
@@ -428,14 +429,18 @@ func (l *List) saveNow() error {
 	if budget <= 0 {
 		budget = maxSaveBytes
 	}
-	data, report, err := encodeWithBudget(hex.EncodeToString(l.salt), now, manual, autos, mems, others, budget)
+	data, report, err := encodeWithBudget(l.keyer, hex.EncodeToString(l.salt), now, manual, autos, mems, others, budget)
 	if err != nil {
 		return err
 	}
 	if report.any() {
 		log.Printf("blocklist: persisted state exceeds the %d-byte budget; %s", budget, report)
 	}
-	if err := writeFileAtomic(l.path, data); err != nil {
+	write := l.cfg.atomicWrite
+	if write == nil {
+		write = writeFileAtomicPattern
+	}
+	if err := write(l.path, data, l.keyer.tmpPrefix+"*"+tmpSuffix); err != nil {
 		return err
 	}
 	l.saveCount.Add(1)
@@ -467,10 +472,10 @@ func marshalNoEscape(v any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-func validKeys(es []*entry) []*entry {
+func validKeys(kr *Keyer, es []*entry) []*entry {
 	out := es[:0]
 	for _, e := range es {
-		if k, err := NormalizeKey(e.IP); err != nil || k != e.IP {
+		if k, err := kr.normalize(e.IP); err != nil || k != e.IP {
 			log.Printf("blocklist: skipping non-canonical key %q on save", truncateBytes(e.IP, 64))
 			continue
 		}
@@ -479,10 +484,10 @@ func validKeys(es []*entry) []*entry {
 	return out
 }
 
-func validMemKeys(ms []memRec) []memRec {
+func validMemKeys(kr *Keyer, ms []memRec) []memRec {
 	out := ms[:0]
 	for _, m := range ms {
-		if k, err := NormalizeKey(m.Key); err != nil || k != m.Key {
+		if k, err := kr.normalize(m.Key); err != nil || k != m.Key {
 			log.Printf("blocklist: skipping non-canonical memory key %q on save", truncateBytes(m.Key, 64))
 			continue
 		}
@@ -492,7 +497,7 @@ func validMemKeys(ms []memRec) []memRec {
 }
 
 // encodeWithBudget 按优先级把各部分装入 budget 字节内并拼出完整文件。
-func encodeWithBudget(salt string, now int64, manual, autos []*entry, mems []memRec, others []*entry, budget int) ([]byte, budgetReport, error) {
+func encodeWithBudget(kr *Keyer, salt string, now int64, manual, autos []*entry, mems []memRec, others []*entry, budget int) ([]byte, budgetReport, error) {
 	var rep budgetReport
 	head := fmt.Sprintf(`{"schema":%d,"salt":%q,"saved_at":%d,"entries":[`, fileSchema, salt, now)
 	const mid, tail = `],"memory":[`, `]}`
@@ -504,10 +509,10 @@ func encodeWithBudget(salt string, now int64, manual, autos []*entry, mems []mem
 		used += len(b) + 1
 	}
 
-	// 写盘前自检：每个键都必须能被 NormalizeKey 原样接受，否则下次启动会被丢弃——在这里先跳过并记日志，
+	// 写盘前自检：每个键都必须能被本名单的键规则原样接受，否则下次启动会被丢弃——在这里先跳过并记日志，
 	// 便于尽早发现键规则不一致。
-	manual, autos, others = validKeys(manual), validKeys(autos), validKeys(others)
-	mems = validMemKeys(mems)
+	manual, autos, others = validKeys(kr, manual), validKeys(kr, autos), validKeys(kr, others)
+	mems = validMemKeys(kr, mems)
 	sort.Slice(manual, func(i, j int) bool { return manual[i].lastManualTS() > manual[j].lastManualTS() })
 	for _, e := range manual {
 		b, err := marshalNoEscape(e)
@@ -595,11 +600,8 @@ func encodeWithBudget(salt string, now int64, manual, autos []*entry, mems []mem
 	return out.Bytes(), rep, nil
 }
 
-func writeFileAtomic(path string, data []byte) error {
-	return writeFileAtomicPattern(path, data, tmpPrefix+"*"+tmpSuffix)
-}
-
-// writeFileAtomicPattern 同 writeFileAtomic，临时文件按 pattern（os.CreateTemp 的命名模式）创建。
+// writeFileAtomicPattern 原子写文件（同目录临时文件 + fsync + rename + 目录 fsync，权限 0600），
+// 临时文件按 pattern（os.CreateTemp 的命名模式）创建。
 func writeFileAtomicPattern(path string, data []byte, pattern string) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, pattern)

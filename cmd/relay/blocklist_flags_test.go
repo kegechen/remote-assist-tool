@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/remote-assist/tool/internal/relay/blocklist"
 )
 
 func TestBlocklistFlagDefaults(t *testing.T) {
@@ -76,7 +78,7 @@ func TestOpenBlocklistDerivesRecordsFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bl, recs := openBlocklist(opts)
+	bl, dev, recs := openBlocklist(opts)
 	if bl == nil || recs == nil || !bl.Persistent() || !recs.Persistent() {
 		t.Fatalf("名单与记录都应以持久化模式打开: %v %v", bl, recs)
 	}
@@ -85,6 +87,9 @@ func TestOpenBlocklistDerivesRecordsFile(t *testing.T) {
 	}
 	if n := len(recs.Snapshot()); n != 1 {
 		t.Fatalf("名单应接上记录，实际 %d 条", n)
+	}
+	if err := dev.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if err := bl.Close(); err != nil {
 		t.Fatal(err)
@@ -100,10 +105,11 @@ func TestOpenBlocklistDerivesRecordsFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bl, recs = openBlocklist(memOnly)
-	if bl == nil || recs == nil || recs.Persistent() {
-		t.Fatal("名单纯内存时记录也应纯内存")
+	bl, dev, recs = openBlocklist(memOnly)
+	if bl == nil || dev == nil || recs == nil || dev.Persistent() || recs.Persistent() {
+		t.Fatal("名单纯内存时设备名单与记录也应纯内存")
 	}
+	_ = dev.Close()
 	_ = bl.Close()
 	_ = recs.Close()
 
@@ -111,8 +117,56 @@ func TestOpenBlocklistDerivesRecordsFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bl, recs = openBlocklist(off); bl != nil || recs != nil {
-		t.Fatal("名单关闭时不应打开记录")
+	if bl, dev, recs = openBlocklist(off); bl != nil || dev != nil || recs != nil {
+		t.Fatal("名单关闭时不应打开设备名单与记录")
+	}
+}
+
+// 设备名单（设计 2026-11-23 §3.5）：文件同样由 --blocklist-db 派生（blocklist.json → blocklist-devices.json），
+// 不新增标志，参数与 IP 名单同值，与 IP 名单共用封禁记录。
+func TestOpenBlocklistDerivesDeviceFile(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "bl.json")
+	opts, err := parseRelayOptions([]string{"--blocklist-db", db, "--blocklist-threshold", "7"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bl, dev, recs := openBlocklist(opts)
+	if bl == nil || dev == nil || recs == nil || !dev.Persistent() {
+		t.Fatalf("设备名单应以持久化模式打开: %v %v %v", bl, dev, recs)
+	}
+	key := dev.DeviceKey(blocklist.DeviceByClientID, "cid_test")
+	if key == "" {
+		t.Fatal("第二本名单应是设备名单")
+	}
+	if got := dev.Config().Threshold; got != 7 {
+		t.Fatalf("设备名单参数应与 IP 名单同值，阈值 %d", got)
+	}
+	if _, err := dev.Ban(key, time.Hour, false, "op", ""); err != nil {
+		t.Fatal(err)
+	}
+	snap := recs.Snapshot()
+	if len(snap) != 1 || snap[0].Target != blocklist.TargetDevice {
+		t.Fatalf("设备封禁应记进共用的封禁记录：%+v", snap)
+	}
+	if err := dev.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := bl.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := recs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "bl-devices.json"))
+	if err != nil {
+		t.Fatalf("设备名单文件应写在名单文件旁边: %v", err)
+	}
+	if !bytes.Contains(data, []byte(key)) {
+		t.Fatal("设备名单文件里应有这条封禁")
+	}
+	if ipData, err := os.ReadFile(db); err == nil && bytes.Contains(ipData, []byte(key)) {
+		t.Fatal("设备封禁不应写进 IP 名单文件")
 	}
 }
 

@@ -483,20 +483,25 @@ func (r *Records) checkAgainst(target string, entries map[string]*entry) error {
 // ---------- 名单侧挂钩（List 持有写锁时调用） ----------
 
 // recordTarget 本名单在封禁记录里的对象类型。
-func (l *List) recordTarget() string { return TargetIP }
+func (l *List) recordTarget() string { return l.keyer.target }
 
-// recordBanStart 为 e 上刚生效的封禁开一条记录。
+// recordBanStart 为 e 上刚生效的封禁开一条记录。设备的记录带上最近来源 IP（via）与身份串（label），
+// 键本身是不可逆的 dev- 键，没有这两项就认不出是哪台设备。
 func (l *List) recordBanStart(e *entry, offense int, trigger []TriggerItem, partial bool) {
 	r, b := l.cfg.Records, e.Ban
 	if r == nil || b == nil {
 		return
 	}
-	r.start(Record{
+	rec := Record{
 		Target: l.recordTarget(), Key: e.IP,
 		Reason: b.Reason, Actor: b.Actor, Note: b.Note,
 		Trigger: trigger, TriggerPartial: partial, Clients: recordClients(e.Clients), Offense: offense,
 		Since: b.Since, Until: b.Until, Permanent: b.Permanent,
-	})
+	}
+	if l.keyer.device {
+		rec.Via, rec.Label = e.Via, latestHost(e.Clients)
+	}
+	r.start(rec)
 }
 
 // recordBanEnd 结束 e 当前封禁对应的记录。必须在清掉或替换 e.Ban 之前调用。

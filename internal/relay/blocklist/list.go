@@ -117,9 +117,13 @@ type Config struct {
 	Records *Records
 	// StaticAllow 启动参数 --blocklist-allow 的放行范围（见 static_allow.go）：命中的来源不计分、不被拒绝、不能手动封禁。
 	StaticAllow []netip.Prefix
+	// Keyer 键空间：nil = IP 名单（键为 IPv4 地址或 IPv6 /64），DeviceKeyer = 设备名单（见 device.go）。
+	Keyer *Keyer
 	// retryBackoff 写盘失败后的重试间隔（逐次递增，最后一个封顶），空 = defaultRetryBackoff。
 	// 只能在 Open 之前设置（测试用）：saver 协程在 Open 里启动，之后再改会与它的读取竞争。
 	retryBackoff []time.Duration
+	// atomicWrite 写盘函数，测试用来观察实际使用的临时文件命名；nil = writeFileAtomicPattern。
+	atomicWrite func(path string, data []byte, pattern string) error
 }
 
 // MaxTrackedLimit MaxTracked 的上限。按此上限、两族自动封禁全满的正常数据估算持久化文件约 22 MB，
@@ -249,7 +253,10 @@ type historyRec struct {
 }
 
 type entry struct {
-	IP          string       `json:"ip"` // 键：IPv4 地址或 IPv6 /64 前缀
+	IP string `json:"ip"` // 键：IPv4 地址或 IPv6 /64 前缀；设备名单为 dev- 键
+	// Via 设备条目最近一次违规的来源 IP，只用于展示。IP 条目永不设置（加载时也丢掉）：omitempty 让
+	// blocklist.json 与加入设备名单之前同构——旧版 relay 用 DisallowUnknownFields 加载，多一个字段就整份拒绝。
+	Via         string       `json:"via,omitempty"`
 	FirstSeen   int64        `json:"first_seen"`
 	LastSeen    int64        `json:"last_seen"`
 	Connections int64        `json:"connections"`
@@ -432,8 +439,9 @@ type auditRec struct {
 
 // List 是并发安全的黑名单。accept 热路径（CheckAccept）只取读锁。
 type List struct {
-	cfg  Config
-	salt []byte
+	cfg   Config
+	salt  []byte
+	keyer *Keyer // 非 nil：cfg.Keyer 或 ipKeyer
 
 	mu      sync.RWMutex
 	entries map[string]*entry
@@ -485,13 +493,17 @@ func Open(cfg Config) (*List, error) {
 		scoring: list.New(),
 		mem:     [2]*memLRU{newMemLRU(cfg.MaxMemory), newMemLRU(cfg.MaxMemory)},
 		per48:   make(map[string]map[*entry]struct{}),
+		keyer:   cfg.Keyer,
+	}
+	if l.keyer == nil {
+		l.keyer = ipKeyer
 	}
 	if cfg.Path == "" {
 		l.salt = newSalt()
 		l.reconcileRecords()
 		return l, nil
 	}
-	lock, data, err := openStore(cfg.Path)
+	lock, data, err := openStore(cfg.Path, l.keyer)
 	if err != nil {
 		l.salt = newSalt()
 		// 名单没加载成功时不对账：否则记录里仍生效的封禁会被当成丢失结束掉，而修好名单文件重启后它们会回来。
@@ -534,6 +546,11 @@ func (l *List) loadLocked(data *loadedData) {
 		for i := range e.Clients {
 			e.Clients[i].Host = cleanField(e.Clients[i].Host)
 			e.Clients[i].Version = cleanField(e.Clients[i].Version)
+		}
+		if l.keyer.device {
+			e.Via = validVia(e.Via)
+		} else {
+			e.Via = "" // IP 条目不该有 via（被篡改的文件）：丢掉，写回时也就没有
 		}
 		l.entries[e.IP] = e
 		if e.Ban.active(now) && e.Ban.Reason == "auto" {
@@ -776,7 +793,7 @@ func (l *List) refresh(e *entry, now int64) ([]auditRec, bool) {
 	if e.Ban != nil && !e.Ban.active(now) {
 		l.removeAutoBan(e)
 		e.addHistory(historyRec{TS: now, Action: "ban_expired", Actor: autoActor, Detail: reasonText(e.Ban.Reason) + "封禁到期自动解除"})
-		audits = append(audits, auditRec{logger.AuditLevelInfo, "ip_ban_expired", fmt.Sprintf("IP %s %s封禁到期解除", e.IP, reasonText(e.Ban.Reason)), map[string]interface{}{"ip": e.IP, "actor": autoActor, "reason": e.Ban.Reason}})
+		audits = append(audits, auditRec{logger.AuditLevelInfo, l.keyer.event + "ban_expired", fmt.Sprintf("%s %s %s封禁到期解除", l.keyer.noun, e.IP, reasonText(e.Ban.Reason)), map[string]interface{}{l.keyer.field: e.IP, "actor": autoActor, "reason": e.Ban.Reason}})
 		// 记录的结束时间取计划到期时间，而不是被惰性发现的这一刻。
 		l.recordBanEnd(e, EndExpired, e.Ban.Until, autoActor)
 		e.Ban = nil
@@ -784,7 +801,7 @@ func (l *List) refresh(e *entry, now int64) ([]auditRec, bool) {
 	}
 	if e.Allow != nil && !e.Allow.active(now) {
 		e.addHistory(historyRec{TS: now, Action: "allow_expired", Actor: autoActor, Detail: "白名单到期自动移除"})
-		audits = append(audits, auditRec{logger.AuditLevelInfo, "ip_allow_expired", fmt.Sprintf("IP %s 白名单到期移除", e.IP), map[string]interface{}{"ip": e.IP, "actor": autoActor}})
+		audits = append(audits, auditRec{logger.AuditLevelInfo, l.keyer.event + "allow_expired", fmt.Sprintf("%s %s 白名单到期移除", l.keyer.noun, e.IP), map[string]interface{}{l.keyer.field: e.IP, "actor": autoActor}})
 		e.Allow = nil
 		changed = true
 	}
@@ -809,7 +826,7 @@ func (l *List) CheckAccept(ip string) bool {
 	if l.staticAllowed(ip) {
 		return true
 	}
-	key, err := KeyOf(ip)
+	key, err := l.keyer.keyOf(ip)
 	if err != nil {
 		return true
 	}
@@ -829,7 +846,7 @@ func (l *List) IsBanned(ip string) bool {
 	if l == nil {
 		return false
 	}
-	key, err := NormalizeKey(ip)
+	key, err := l.keyer.normalize(ip)
 	if err != nil {
 		return false
 	}
@@ -842,7 +859,7 @@ func (l *List) IsBanned(ip string) bool {
 
 // ObserveConnect 记录一次通过准入的连接。
 func (l *List) ObserveConnect(ip string) {
-	key, err := KeyOf(ip)
+	key, err := l.keyer.keyOf(ip)
 	if err != nil {
 		return
 	}
@@ -880,7 +897,7 @@ type ClientInfo struct {
 
 // ObserveClient 记录一个在该 IP 上成功完成注册/加入的客户端。
 func (l *List) ObserveClient(ip string, c ClientInfo) {
-	key, err := KeyOf(ip)
+	key, err := l.keyer.keyOf(ip)
 	if err != nil {
 		return
 	}
@@ -904,9 +921,15 @@ func (l *List) ObserveClient(ip string, c ClientInfo) {
 	if len(audits) > 0 {
 		go l.emit(audits)
 	}
+	e.noteClient(c.Role, version, host, fp, c.Verified, now)
+}
+
+// noteClient 记下（或刷新）条目上的一个客户端。有指纹按角色+指纹认同一个，没有指纹再加上身份串与版本。
+// 超出 maxClientsPerIP 时丢最久没出现的。调用方持有写锁，version/host 已清洗。
+func (e *entry) noteClient(role, version, host, fp string, verified bool, now int64) {
 	for i := range e.Clients {
 		cr := &e.Clients[i]
-		same := cr.Role == c.Role && cr.ClientFP == fp
+		same := cr.Role == role && cr.ClientFP == fp
 		if fp == "" {
 			same = same && cr.Host == host && cr.Version == version
 		}
@@ -915,11 +938,11 @@ func (l *List) ObserveClient(ip string, c ClientInfo) {
 			cr.Count++
 			cr.Version = version
 			cr.Host = host
-			cr.Verified = cr.Verified || c.Verified
+			cr.Verified = cr.Verified || verified
 			return
 		}
 	}
-	e.Clients = append(e.Clients, clientRec{Role: c.Role, Version: version, Host: host, ClientFP: fp, FirstSeen: now, LastSeen: now, Count: 1, Verified: c.Verified})
+	e.Clients = append(e.Clients, clientRec{Role: role, Version: version, Host: host, ClientFP: fp, FirstSeen: now, LastSeen: now, Count: 1, Verified: verified})
 	if len(e.Clients) > maxClientsPerIP {
 		oldest := 0
 		for i := range e.Clients {
@@ -937,10 +960,16 @@ func (l *List) RecordViolation(ip string, kind Kind, detail string) bool {
 	if l == nil {
 		return false
 	}
+	return l.recordViolation(ip, kind, detail, nil)
+}
+
+// recordViolation 是 RecordViolation 的实现；src 非 nil（只在设备名单上）时把来源与客户端记到条目上，
+// 在判定封禁之前写入，封禁记录里才带得上。
+func (l *List) recordViolation(ip string, kind Kind, detail string, src *DeviceSource) bool {
 	if l.staticAllowed(ip) {
 		return false // 启动参数放行：不计分、不建条目
 	}
-	key, err := KeyOf(ip)
+	key, err := l.keyer.keyOf(ip)
 	if err != nil {
 		return false
 	}
@@ -960,6 +989,9 @@ func (l *List) RecordViolation(ip string, kind Kind, detail string) bool {
 	}
 	audits, _ := l.refresh(e, now)
 	e.LastSeen = now
+	if src != nil {
+		e.noteDeviceSource(src, now) // 写盘时机同其他字段：钉住条目下面标脏，自动封禁另行请求写盘
+	}
 	if exemptIfRecentGood[kind] && l.recentGood(key, now) {
 		weight = 0
 	}
@@ -1009,10 +1041,14 @@ func (l *List) autoBanLocked(e *entry, now int64, kind Kind, points int) []audit
 	trigger, partial := banTrigger(e.Events, now, l.cfg.Window, points)
 	l.recordBanStart(e, m.Offenses, trigger, partial)
 	e.addHistory(historyRec{TS: now, Action: "ban", Actor: autoActor, Note: note, Detail: fmt.Sprintf("自动封禁 %s（第 %d 次）", fmtDuration(dur), m.Offenses)})
-	audits := []auditRec{{logger.AuditLevelWarn, "ip_banned", fmt.Sprintf("IP %s 已被自动封禁 %s，第 %d 次，%s", e.IP, fmtDuration(dur), m.Offenses, note), map[string]interface{}{
-		"ip": e.IP, "actor": autoActor, "reason": string(kind), "points": points,
+	details := map[string]interface{}{
+		l.keyer.field: e.IP, "actor": autoActor, "reason": string(kind), "points": points,
 		"duration": dur.String(), "until": until, "offense": m.Offenses,
-	}}}
+	}
+	if e.Via != "" {
+		details["via"] = e.Via
+	}
+	audits := []auditRec{{logger.AuditLevelWarn, l.keyer.event + "banned", fmt.Sprintf("%s %s 已被自动封禁 %s，第 %d 次，%s", l.keyer.noun, e.IP, fmtDuration(dur), m.Offenses, note), details}}
 	// 先入堆并立即钉住（移出 LRU），再处理上限淘汰。顺序不能反：被淘汰的条目放回 LRU 时会触发
 	// LRU 淘汰，若 e 还挂在 LRU 上（且恰好最旧），会被从主表删掉——封禁当场失效，还在堆里留下孤儿，
 	// 孤儿日后被弹出时会删掉同 IP 后来新建的条目（连带别人的生效封禁）。
@@ -1064,7 +1100,7 @@ func (l *List) dropAutoBan(victim *entry, now int64, detail string) []auditRec {
 			r.Offenses, r.LastBanEnd = 0, 0
 		}
 		victim.addHistory(historyRec{TS: now, Action: "ban_evicted", Actor: autoActor, Detail: detail})
-		audits = append(audits, auditRec{logger.AuditLevelWarn, "ip_ban_evicted", fmt.Sprintf("IP %s 的自动封禁因条目超限被提前解除", victim.IP), map[string]interface{}{"ip": victim.IP, "actor": autoActor}})
+		audits = append(audits, auditRec{logger.AuditLevelWarn, l.keyer.event + "ban_evicted", fmt.Sprintf("%s %s 的自动封禁因条目超限被提前解除", l.keyer.noun, victim.IP), map[string]interface{}{l.keyer.field: victim.IP, "actor": autoActor}})
 	}
 	l.place(victim, now, false)
 	return audits
@@ -1078,7 +1114,7 @@ type BanResult struct {
 // Ban 手动封禁 ip（IPv4 地址、IPv6 地址或 /64 前缀）。permanent=false 时 d 必须为正。
 // 会回调 OnManualBan 断开现有连接。
 func (l *List) Ban(ip string, d time.Duration, permanent bool, actor, note string) (BanResult, error) {
-	key, err := NormalizeKey(ip)
+	key, err := l.keyer.normalize(ip)
 	if err != nil {
 		return BanResult{}, err
 	}
@@ -1099,7 +1135,7 @@ func (l *List) Ban(ip string, d time.Duration, permanent bool, actor, note strin
 	}
 	audits, _ := l.refresh(e, now)
 	if e.Allow.active(now) {
-		res.Warning = "该 IP 在白名单中，手动封禁已覆盖白名单（白名单条目保留，解禁后继续生效）"
+		res.Warning = "该" + l.keyer.warnNoun() + "在白名单中，手动封禁已覆盖白名单（白名单条目保留，解禁后继续生效）"
 	}
 	l.removeAutoBan(e)
 	b := &banRec{Since: now, Permanent: permanent, Reason: "manual", Actor: actor, Note: note}
@@ -1120,8 +1156,8 @@ func (l *List) Ban(ip string, d time.Duration, permanent bool, actor, note strin
 	l.place(e, now, true)
 	l.mu.Unlock()
 
-	l.emit(append(audits, auditRec{logger.AuditLevelWarn, "ip_banned", fmt.Sprintf("IP %s 已被手动封禁 %s（操作人 %s）", key, durText, actor), map[string]interface{}{
-		"ip": key, "actor": actor, "reason": "manual", "note": note, "duration": durText, "until": b.Until, "overrides_allowlist": res.Warning != "",
+	l.emit(append(audits, auditRec{logger.AuditLevelWarn, l.keyer.event + "banned", fmt.Sprintf("%s %s 已被手动封禁 %s（操作人 %s）", l.keyer.noun, key, durText, actor), map[string]interface{}{
+		l.keyer.field: key, "actor": actor, "reason": "manual", "note": note, "duration": durText, "until": b.Until, "overrides_allowlist": res.Warning != "",
 	}}))
 	l.requestSave(true)
 	if fn, ok := l.onManualBan.Load().(func(string)); ok && fn != nil {
@@ -1138,7 +1174,7 @@ type AllowSpec struct {
 
 // Unban 解禁：移除封禁、清零分值与递增次数并进入宽限期；allow 非 nil 时同时加白。
 func (l *List) Unban(ip, actor, note string, allow *AllowSpec) error {
-	key, err := NormalizeKey(ip)
+	key, err := l.keyer.normalize(ip)
 	if err != nil {
 		return err
 	}
@@ -1184,8 +1220,8 @@ func (l *List) unbanLocked(e *entry, now int64, actor, note string) auditRec {
 	e.GraceUntil = now + int64(l.cfg.UnbanGrace/time.Second)
 	e.addHistory(historyRec{TS: now, Action: "unban", Actor: actor, Note: note,
 		Detail: fmt.Sprintf("手动解禁（原%s封禁），宽限期 %s 内不自动封禁", reasonText(prev.Reason), fmtDuration(l.cfg.UnbanGrace))})
-	return auditRec{logger.AuditLevelInfo, "ip_unbanned", fmt.Sprintf("IP %s 已被手动解禁（操作人 %s，原%s封禁）", e.IP, actor, reasonText(prev.Reason)), map[string]interface{}{
-		"ip": e.IP, "actor": actor, "note": note, "prev_reason": prev.Reason, "grace_until": e.GraceUntil,
+	return auditRec{logger.AuditLevelInfo, l.keyer.event + "unbanned", fmt.Sprintf("%s %s 已被手动解禁（操作人 %s，原%s封禁）", l.keyer.noun, e.IP, actor, reasonText(prev.Reason)), map[string]interface{}{
+		l.keyer.field: e.IP, "actor": actor, "note": note, "prev_reason": prev.Reason, "grace_until": e.GraceUntil,
 	}}
 }
 
@@ -1198,7 +1234,7 @@ func (l *List) Allow(ip string, d time.Duration, permanent bool, actor, note str
 // AllowWithOptions 加入（或更新）白名单。目标当前被封时：unban=true 一并解禁（进入宽限期）；
 // 否则保持封禁并返回 Warning，绝不静默。
 func (l *List) AllowWithOptions(ip string, spec AllowSpec, actor, note string, unban bool) (BanResult, error) {
-	key, err := NormalizeKey(ip)
+	key, err := l.keyer.normalize(ip)
 	if err != nil {
 		return BanResult{}, err
 	}
@@ -1219,7 +1255,7 @@ func (l *List) AllowWithOptions(ip string, spec AllowSpec, actor, note string, u
 		if unban {
 			audits = append(audits, l.unbanLocked(e, now, actor, note))
 		} else {
-			res.Warning = "该 IP 当前处于封禁中，加入白名单不会解除封禁；如需放行请同时选择解禁"
+			res.Warning = "该" + l.keyer.warnNoun() + "当前处于封禁中，加入白名单不会解除封禁；如需放行请同时选择解禁"
 		}
 	}
 	audits = append(audits, l.allowLocked(e, now, spec, actor, note))
@@ -1240,14 +1276,14 @@ func (l *List) allowLocked(e *entry, now int64, spec AllowSpec, actor, note stri
 	e.Allow = a
 	e.hits = nil
 	e.addHistory(historyRec{TS: now, Action: "allow", Actor: actor, Note: note, Detail: "加入白名单 " + durText})
-	return auditRec{logger.AuditLevelInfo, "ip_allowlisted", fmt.Sprintf("IP %s 已加入白名单 %s（操作人 %s）", e.IP, durText, actor), map[string]interface{}{
-		"ip": e.IP, "actor": actor, "note": note, "duration": durText, "until": a.Until,
+	return auditRec{logger.AuditLevelInfo, l.keyer.event + "allowlisted", fmt.Sprintf("%s %s 已加入白名单 %s（操作人 %s）", l.keyer.noun, e.IP, durText, actor), map[string]interface{}{
+		l.keyer.field: e.IP, "actor": actor, "note": note, "duration": durText, "until": a.Until,
 	}}
 }
 
 // Disallow 移出白名单，不影响封禁状态。
 func (l *List) Disallow(ip, actor, note string) error {
-	key, err := NormalizeKey(ip)
+	key, err := l.keyer.normalize(ip)
 	if err != nil {
 		return err
 	}
@@ -1271,7 +1307,7 @@ func (l *List) Disallow(ip, actor, note string) error {
 	e.addHistory(historyRec{TS: now, Action: "disallow", Actor: actor, Note: note, Detail: "移出白名单"})
 	l.place(e, now, true)
 	l.mu.Unlock()
-	l.emit(append(audits, auditRec{logger.AuditLevelInfo, "ip_disallowed", fmt.Sprintf("IP %s 已移出白名单（操作人 %s）", key, actor), map[string]interface{}{"ip": key, "actor": actor, "note": note}}))
+	l.emit(append(audits, auditRec{logger.AuditLevelInfo, l.keyer.event + "disallowed", fmt.Sprintf("%s %s 已移出白名单（操作人 %s）", l.keyer.noun, key, actor), map[string]interface{}{l.keyer.field: key, "actor": actor, "note": note}}))
 	l.requestSave(true)
 	return nil
 }
@@ -1404,7 +1440,8 @@ type HistoryView struct {
 
 // EntryView 是单个键的完整只读快照（含客户端、事件与处置历史），由 Detail 返回。
 type EntryView struct {
-	IP          string        `json:"ip"` // IPv4 地址或 IPv6 /64 前缀
+	IP          string        `json:"ip"`            // IPv4 地址或 IPv6 /64 前缀；设备名单为 dev- 键
+	Via         string        `json:"via,omitempty"` // 设备最近一次违规的来源 IP
 	Status      string        `json:"status"`
 	Ban         *BanView      `json:"ban,omitempty"`
 	Allow       *AllowView    `json:"allow,omitempty"`
@@ -1427,6 +1464,7 @@ type EntryView struct {
 // SummaryView 是单个键的摘要：不含客户端/事件/历史明细（明细见 EntryView）。
 type SummaryView struct {
 	IP          string     `json:"ip"`
+	Via         string     `json:"via,omitempty"`
 	Status      string     `json:"status"` // banned | allowlisted | grace | suspect | seen
 	Ban         *BanView   `json:"ban,omitempty"`
 	Allow       *AllowView `json:"allow,omitempty"`
@@ -1447,7 +1485,7 @@ type SummaryView struct {
 
 // Detail 返回单个键（IPv4 地址、IPv6 地址或 /64 前缀）的完整视图。非法或未跟踪返回 false。
 func (l *List) Detail(ip string) (EntryView, bool) {
-	key, err := NormalizeKey(ip)
+	key, err := l.keyer.normalize(ip)
 	if err != nil {
 		return EntryView{}, false
 	}
@@ -1490,6 +1528,7 @@ func (l *List) summaryLocked(e *entry, now int64) SummaryView {
 	vText, vSelf := verdict(e.Clients, e.Events)
 	v := SummaryView{
 		IP:          e.IP,
+		Via:         e.Via,
 		Status:      st,
 		Points:      pts,
 		Offenses:    l.offenses(e.IP),
@@ -1518,7 +1557,7 @@ func (l *List) summaryLocked(e *entry, now int64) SummaryView {
 func (l *List) detailLocked(e *entry, now int64) EntryView {
 	s := l.summaryLocked(e, now)
 	v := EntryView{
-		IP: s.IP, Status: s.Status, Ban: s.Ban, Allow: s.Allow, GraceUntil: s.GraceUntil,
+		IP: s.IP, Via: s.Via, Status: s.Status, Ban: s.Ban, Allow: s.Allow, GraceUntil: s.GraceUntil,
 		Points: s.Points, Offenses: s.Offenses, BanCount: s.BanCount, Connections: s.Connections,
 		Rejected: s.Rejected, FirstSeen: s.FirstSeen, LastSeen: s.LastSeen, Verdict: s.Verdict, VerdictSelf: s.VerdictSelf,
 		Clients: make([]ClientView, 0, len(e.Clients)),

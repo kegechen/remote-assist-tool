@@ -76,6 +76,9 @@ type ClientConn struct {
 	// realJoinFailures 只计"协助码无效/过期/不存在"这类真失败（不含限流拒绝），用于黑名单计分。
 	realJoinFailures int
 	remoteIP         string
+	// deviceKey 本次 join 的黑名单设备键（见 Server.joinDeviceKey），每次 join 开头重算；空 = 按 IP 计分。
+	// 只由读循环 goroutine 访问。
+	deviceKey string
 
 	// keepHelp register 首帧写入：share 声明 P2P 直连在它掉线期间一直通着的那个协助端连接
 	// （proto.RegisterRequest.KeepHelp，即对方的 helpTag），复用会话时据此保留配对。
