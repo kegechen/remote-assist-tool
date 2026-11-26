@@ -79,7 +79,8 @@ func (s *Server) flagJoinFailure(client *ClientConn, kind blocklist.Kind, detail
 const (
 	// deviceFallbackEvery 已识别设备的 join 失败每这么多次给来源 IP 记 1 分（IP 名单 20 分封禁 ≈ 100 次）。
 	deviceFallbackEvery = 5
-	// deviceFallbackIdle 一个来源这么久没有新的失败就丢掉它的零头计数（与 IP 名单默认的 10 分钟计分窗口一致）。
+	// deviceFallbackIdle 一个来源这么久没有新的失败就丢掉它的零头计数。NewServer 改成 IP 名单的计分窗口
+	// （--blocklist-window），这里是没设时的默认值，与 IP 名单默认窗口一致。
 	deviceFallbackIdle = 10 * time.Minute
 	// deviceFallbackMaxKeys 最多同时跟踪的来源数；满了随机丢一个，内存有上界。
 	deviceFallbackMaxKeys = 16384
@@ -88,8 +89,16 @@ const (
 // deviceFallback 按来源键（IPv4 地址 / IPv6 /64）累计已识别设备的 join 失败，只在内存里，重启清零。
 // 不按连接计：轮换标识的爆破每条连接只试一次也要累计到同一个来源上。
 type deviceFallback struct {
-	mu sync.Mutex
-	m  map[string]fallbackCount
+	mu   sync.Mutex
+	m    map[string]fallbackCount
+	idle time.Duration // 零头的空闲过期，0 = deviceFallbackIdle；只在 NewServer 里设置
+}
+
+func (f *deviceFallback) idleAfter() time.Duration {
+	if f.idle > 0 {
+		return f.idle
+	}
+	return deviceFallbackIdle
 }
 
 type fallbackCount struct {
@@ -106,7 +115,7 @@ func (f *deviceFallback) hit(ip string, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c, ok := f.m[key]
-	if ok && now.Sub(c.seen) > deviceFallbackIdle {
+	if ok && now.Sub(c.seen) > f.idleAfter() {
 		c = fallbackCount{}
 	}
 	if !ok {
@@ -130,12 +139,13 @@ func (f *deviceFallback) hit(ip string, now time.Time) bool {
 	return false
 }
 
-// prune 丢掉空闲超过 deviceFallbackIdle 的来源（cleanupLoop 定期调用）。
+// prune 丢掉空闲超过 idleAfter 的来源（cleanupLoop 定期调用）。
 func (f *deviceFallback) prune(now time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	idle := f.idleAfter()
 	for k, c := range f.m {
-		if now.Sub(c.seen) > deviceFallbackIdle {
+		if now.Sub(c.seen) > idle {
 			delete(f.m, k)
 		}
 	}

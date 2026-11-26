@@ -359,6 +359,10 @@ func NewServer(cfg *Config) (*Server, error) {
 		log.Printf("WARNING: device blocklist disabled together with the IP blocklist")
 		srv.deviceBlocklist = nil
 	}
+	if srv.blocklist != nil {
+		// 兜底分记在 IP 名单上，零头的过期跟它的计分窗口走：窗口外的零头 IP 名单本来也不会再算。
+		srv.deviceFallback.idle = srv.blocklist.Config().Window
+	}
 	srv.directory = nodeDir
 	return srv, nil
 }

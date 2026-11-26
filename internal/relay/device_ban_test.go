@@ -390,6 +390,34 @@ func TestDeviceFallbackBounded(t *testing.T) {
 	}
 }
 
+// 兜底零头的过期跟着 IP 名单的计分窗口（--blocklist-window）走，不写死 10 分钟：窗口调短时不比 IP 名单本身更严，
+// 调长时窗口内稀疏的失败也能攒满。
+func TestDeviceFallbackFollowsBlocklistWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	short := &newDevEnv(t, func(ip, _ *blocklist.Config, _ *Config) { ip.Window = 2 * time.Minute }).srv.deviceFallback
+	for i := 0; i < deviceFallbackEvery-1; i++ {
+		short.hit(devIP, now)
+	}
+	if short.hit(devIP, now.Add(3*time.Minute)) {
+		t.Fatal("窗口 2 分钟：3 分钟前的零头不应再算")
+	}
+	short.hit("203.0.113.9", now)
+	short.prune(now.Add(3 * time.Minute))
+	if k, _ := blocklist.KeyOf("203.0.113.9"); short.m[k].n != 0 {
+		t.Fatal("窗口 2 分钟：空闲 3 分钟的来源应被 prune 清掉")
+	}
+
+	long := &newDevEnv(t, func(ip, _ *blocklist.Config, _ *Config) { ip.Window = time.Hour }).srv.deviceFallback
+	gap := 15 * time.Minute
+	for i := 0; i < deviceFallbackEvery-1; i++ {
+		long.hit(devIP, now.Add(time.Duration(i)*gap))
+	}
+	if !long.hit(devIP, now.Add(time.Duration(deviceFallbackEvery-1)*gap)) {
+		t.Fatal("窗口 1 小时：每 15 分钟一次的失败应累计凑满")
+	}
+}
+
 // 只配了 IP 名单（没有设备名单）：行为与改动前完全相同，带 client_id 的失败也按 IP 计分。
 func TestDeviceBanWithoutDeviceListScoresIP(t *testing.T) {
 	ipl, err := blocklist.Open(blocklist.DefaultConfig())
