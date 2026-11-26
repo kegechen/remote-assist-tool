@@ -574,7 +574,7 @@ func (b *HelpMCPBootstrap) connectLocked(ctx context.Context, a connectArgs, fro
 	}
 	bridge := mcp.NewBridge(h.client, sess)
 
-	// 心跳保活：每 30s 发 Heartbeat，relay 回 echo，避免 ReadMessage 2-min deadline
+	// 心跳保活：每 30s 发 Heartbeat，relay 回 echo，避免 relay 读循环的读 deadline（relaySilenceTimeout）
 	// 因为空闲被触发，导致后台 goroutine 退出 → MCP 工具调用全部失效。
 	// 心跳始终走 relay：即便工具流量已升级到 P2P，relay 信令通道仍需保活，它承担
 	// 会话管理与 P2P 断开后的降级回退。

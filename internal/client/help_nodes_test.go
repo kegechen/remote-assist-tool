@@ -108,6 +108,8 @@ func (f *joinRelay) serve(c net.Conn) {
 			out, _ = proto.NewMessage(proto.MsgToolHelloAck, &proto.HelloAck{
 				Version: proto.ToolProtocolVersion, Capabilities: peer.Capabilities, NonceB64: peer.NonceB64, Accept: true,
 			})
+		case proto.MsgHeartbeat:
+			out = &msg // 同真 relay：每个心跳都回一个，help 加入之后要等到它（probeDownlink）
 		default:
 			continue
 		}

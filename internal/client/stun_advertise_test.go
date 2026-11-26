@@ -18,13 +18,18 @@ func TestJoinRemembersRelaySTUN(t *testing.T) {
 	defer remote.Close()
 	_ = remote.SetDeadline(time.Now().Add(3 * time.Second))
 	go func() {
+		enc, dec := json.NewEncoder(remote), json.NewDecoder(remote)
 		var req proto.Message
-		if err := json.NewDecoder(remote).Decode(&req); err != nil {
+		if err := dec.Decode(&req); err != nil {
 			return
 		}
 		resp, _ := proto.NewMessage(proto.MsgJoinResponse, &proto.JoinResponse{Success: true, SessionID: "s1",
 			STUNServers: []string{"23.95.78.14:3478", "stun.chat.bilibili.com:3478"}})
-		_ = json.NewEncoder(remote).Encode(resp)
+		_ = enc.Encode(resp)
+		// 同真 relay：回 help 加入之后确认下行（probeDownlink）的那个心跳。
+		if dec.Decode(&req) == nil && req.Type == proto.MsgHeartbeat {
+			_ = enc.Encode(&req)
+		}
 	}()
 	h := NewHelpMode(&Config{}, "TESTCODE", "127.0.0.1:0")
 	h.client = &Client{conn: local, enc: json.NewEncoder(local), dec: json.NewDecoder(local)}

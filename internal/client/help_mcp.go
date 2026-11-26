@@ -146,6 +146,7 @@ func (h *HelpMode) RunMCPMode(ctx context.Context) error {
 			msg, err := h.client.ReadMessage()
 			if err != nil {
 				// 隧道死了：唤醒所有在途 CallTool 立即返回友好错误，不再干等兜底。
+				err = h.client.silentErr(err, relaySilenceWhat, 75*time.Second)
 				bridge.Disconnect(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
 				return
 			}

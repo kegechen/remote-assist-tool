@@ -122,9 +122,7 @@ func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinRespon
 	}
 	// relay 收下 JoinRequest 却不应答（进程假死、被中间盒吞掉）时，裸 ReadMessage 会
 	// 永久阻塞。MCP 里这一步在 connectMu 之内，一次挂死就让后续所有 connect 排队卡住。
-	h.client.SetReadDeadline(time.Now().Add(joinTimeout))
-	defer h.client.SetReadDeadline(time.Time{})
-	msg, err := h.client.ReadMessage()
+	msg, err := h.client.readReply("加入应答")
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +135,12 @@ func (h *HelpMode) joinWithProof(proof *proto.P2PResumeProof) (*proto.JoinRespon
 	}
 	if !resp.Success {
 		return nil, joinFailureError(resp.Error)
+	}
+	// 同 ShareMode.register：收到应答只说明那一刻 relay 发来的数据还过得来，确认之后还收得到再报「已连接」。
+	// 不通就当这次加入失败（调用方会关掉连接，relay 随即腾出协助端的位置），auto 模式下 TCP 收不到数据时
+	// joinVia 改走 QUIC 再加入一次。
+	if err := h.client.probeDownlink(downlinkProbeTimeout); err != nil {
+		return nil, err
 	}
 	switch {
 	case h.nodes != nil:
@@ -448,11 +452,11 @@ func (h *HelpMode) handleTunnel() error {
 	// Single long-lived goroutine: reads from relay, writes to current local SSH connection
 	go func() {
 		for {
-			// Set read timeout to detect dead connections (reset after each successful read)
-			h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			// 每读一条消息之前重新设读 deadline：relay 对每个心跳都回一个，太久一条都没有就是连接不通了。
+			h.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
 			msg, err := h.client.ReadMessage()
 			if err != nil {
-				relayDone <- err
+				relayDone <- h.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
 				listener.Close() // unblock Accept
 				return
 			}

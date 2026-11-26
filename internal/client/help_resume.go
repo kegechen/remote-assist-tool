@@ -149,9 +149,12 @@ func (b *HelpMCPBootstrap) activeUsableLocked() bool {
 func (l *helpLink) relayLoop() {
 	h := l.h
 	for {
-		h.client.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		// 每读一条消息之前重新设读 deadline：relay 对每个心跳都回一个，太久一条都没有就是连接不通了。TCP 上的话
+		// 记下这个地址的 TCP 收不到数据，之后的 connect、续会话先走 QUIC（见 Client.silentErr）。
+		h.client.SetReadDeadline(time.Now().Add(relaySilenceTimeout))
 		msg, err := h.client.ReadMessage()
 		if err != nil {
+			err = h.client.silentErr(err, relaySilenceWhat, relaySilenceTimeout)
 			l.relayLost(fmt.Errorf("tunnel_lost: 隧道已断开（%w），请重新 connect", err))
 			return
 		}

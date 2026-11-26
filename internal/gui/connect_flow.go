@@ -47,6 +47,10 @@ func classifyConnectError(err error) (code, reason string) {
 		return reasonRejected, "被对端拒绝（握手未通过）"
 	case errors.Is(err, proto.ErrBlocked) || strings.Contains(msg, proto.BlockedMessage):
 		return reasonBlocked, proto.BlockedMessage
+	case strings.Contains(msg, client.RelaySilentMarker):
+		// 中转服务收不到回应（下行被干扰、静默超时）：归为超时类。它经 MCP 传来时常带着
+		// "join failed" 前缀，不先截住会落到 join failed 被说成协助码错误，把排查引向核对协助码。
+		return reasonTimeout, "连接超时"
 	case strings.Contains(low, "refused") || strings.Contains(msg, "拒绝"):
 		return reasonRefused, "连接被拒绝（中继未启动或端口不对）"
 	case errors.Is(err, context.DeadlineExceeded), strings.Contains(low, "timeout"),
